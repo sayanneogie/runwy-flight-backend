@@ -1123,7 +1123,15 @@ app.get("/v1/search", async (req, res) => {
       .map((record) => normalizeWithContext(record, records, query, provider.normalizeRecord, null));
 
     return res.json({ candidates: normalized });
-  } catch (_error) {
+  } catch (error) {
+    console.error("Search provider fetch failed", {
+      provider: FLIGHT_DATA_PROVIDER,
+      flightNumber,
+      date,
+      departureIata,
+      arrivalIata,
+      error: error?.message || String(error),
+    });
     return res.status(502).json({ error: "Failed to fetch provider data" });
   }
 });
