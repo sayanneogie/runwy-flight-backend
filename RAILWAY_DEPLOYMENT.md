@@ -7,19 +7,19 @@ This backend now expects two Railway services:
 
 Both services deploy from the same repo path:
 
-- root directory: `/backend/aviationstack-proxy`
+- root directory: `/`
 
 ## Service Layout
 
 ### API service
 
-- start command: `npm run start:api`
+- start command: `node src/server.js`
 - healthcheck path: `/health`
 - public domain: required
 
 ### Poller service
 
-- start command: `npm run start:poller`
+- start command: `node src/flight-poller.js`
 - healthcheck path: none
 - public domain: not required
 
@@ -44,6 +44,7 @@ Set these on both services:
 Set these on the API service if needed:
 
 - `PORT`
+- `ENABLE_TRACKING_POLLER=false`
 - `WEBHOOK_SHARED_SECRET`
 - `APNS_KEY_ID`
 - `APNS_TEAM_ID`
@@ -69,13 +70,11 @@ Optional shared fetch tuning:
 
 Set the root directory for both services to:
 
-- `/backend/aviationstack-proxy`
+- `/`
 
 ### Watch paths
 
-To avoid unnecessary deploys from iOS-only changes, set watch paths for both services to:
-
-- `/backend/aviationstack-proxy/**`
+This repo is backend-only, so the default repo watch path is fine.
 
 ### Healthcheck
 
@@ -113,7 +112,20 @@ If the poller starts but no rows update:
 
 If Railway keeps redeploying both services for unrelated app changes:
 
-- verify root directory and watch paths are both scoped to `/backend/aviationstack-proxy`
+- verify Railway is connected to the backend-only repo and root directory is `/`
+
+## Why Railway should not use `npm run ...`
+
+Use direct Node entrypoints in Railway:
+
+- API: `node src/server.js`
+- Poller: `node src/flight-poller.js`
+
+This avoids the noisy npm runtime warning:
+
+- `npm warn config production Use '--omit=dev' instead.`
+
+That warning is harmless, but direct Node commands keep deploy logs clean and avoid involving npm in the runtime process.
 
 ## References
 

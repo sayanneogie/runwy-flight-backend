@@ -2,8 +2,10 @@ require("dotenv").config();
 
 const crypto = require("node:crypto");
 const express = require("express");
+const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const { Pool } = require("pg");
+const { validatePushTokenPayload, validateSearchQuery, validateTrackPayload } = require("./request-schemas");
 const { createTrackingStore } = require("./tracking-store");
 const { createTrackingPollerRuntime } = require("./tracking-poller-runtime");
 
@@ -81,6 +83,7 @@ if (!WEBHOOK_SHARED_SECRET) {
 
 const app = express();
 app.disable("x-powered-by");
+app.use(helmet());
 app.use(express.json({ limit: "100kb" }));
 
 const authTokenCache = new Map();
@@ -798,27 +801,6 @@ function normalizeWithContext(record, records, query, normalizer, previousNormal
   };
 }
 
-function validateTrackPayload(body) {
-  const flightNumber = normalizeFlightCode(body?.flightNumber);
-  const date = String(body?.date || "");
-  const departureIata = body?.departureIata ? String(body.departureIata).toUpperCase() : undefined;
-  const arrivalIata = body?.arrivalIata ? String(body.arrivalIata).toUpperCase() : undefined;
-
-  if (!flightNumber.match(/^[A-Z0-9]{3,8}$/)) return { error: "Invalid flightNumber" };
-  if (!date.match(/^\d{4}-\d{2}-\d{2}$/)) return { error: "Invalid date (expected YYYY-MM-DD)" };
-  if (departureIata && !departureIata.match(/^[A-Z]{3}$/)) return { error: "Invalid departureIata" };
-  if (arrivalIata && !arrivalIata.match(/^[A-Z]{3}$/)) return { error: "Invalid arrivalIata" };
-
-  return {
-    value: {
-      flightNumber,
-      date,
-      departureIata,
-      arrivalIata,
-    },
-  };
-}
-
 const trackingStore = createTrackingStore({
   pool,
   memoryTrackedFlights,
@@ -1204,9 +1186,8 @@ app.get("/health", (_req, res) => {
 
 app.post("/v1/devices/push-token", async (req, res) => {
   const deviceId = normalizedHeaderDeviceID(req);
-  const token = String(req.body?.token || "").trim();
-  const platform = String(req.body?.platform || "ios").toLowerCase();
   const userId = String(req.auth?.userId || "").trim() || null;
+  const validated = validatePushTokenPayload(req.body);
 
   if (!userId) {
     return res.status(401).json({ error: "Sign in is required" });
@@ -1216,16 +1197,16 @@ app.post("/v1/devices/push-token", async (req, res) => {
     return res.status(400).json({ error: "X-Device-Id header is required" });
   }
 
-  if (!/^[A-Fa-f0-9]{64,512}$/.test(token)) {
-    return res.status(400).json({ error: "Invalid APNs token" });
+  if (validated.error) {
+    return res.status(400).json({ error: validated.error });
   }
 
   try {
     await upsertPushDevice({
-      apnsToken: token.toLowerCase(),
+      apnsToken: validated.value.token,
       deviceId,
       userId,
-      platform,
+      platform: validated.value.platform,
     });
 
     return res.json({ ok: true });
@@ -1334,17 +1315,12 @@ app.get("/v1/flights/:flightId", async (req, res) => {
 });
 
 app.get("/v1/search", async (req, res) => {
-  const flightNumber = normalizeFlightCode(req.query.flightNumber || "");
-  const date = String(req.query.date || "");
-  const departureIata = req.query.dep ? String(req.query.dep).toUpperCase() : undefined;
-  const arrivalIata = req.query.arr ? String(req.query.arr).toUpperCase() : undefined;
+  const validated = validateSearchQuery(req.query);
+  if (validated.error) {
+    return res.status(400).json({ error: validated.error });
+  }
 
-  if (!flightNumber) {
-    return res.status(400).json({ error: "flightNumber is required" });
-  }
-  if (!date.match(/^\d{4}-\d{2}-\d{2}$/)) {
-    return res.status(400).json({ error: "date is required (YYYY-MM-DD)" });
-  }
+  const { flightNumber, date, departureIata, arrivalIata } = validated.value;
 
   try {
     const query = { flightNumber, date, departureIata, arrivalIata };

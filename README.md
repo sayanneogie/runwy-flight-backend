@@ -42,6 +42,9 @@ Supported providers:
    - API defaults to `http://localhost:8787`
 9. Deploy on Railway:
    - follow [RAILWAY_DEPLOYMENT.md](RAILWAY_DEPLOYMENT.md)
+   - use direct Node start commands on Railway instead of `npm run ...`:
+     - API: `node src/server.js`
+     - Poller: `node src/flight-poller.js`
 
 ## Endpoints
 
@@ -147,6 +150,7 @@ If `WEBHOOK_SHARED_SECRET` is set, send it in:
 - Use `APNS_USE_SANDBOX=false` for production APNs.
 - Keep logs generic; never log secrets.
 - Railway should be split into at least two services:
-  - API service: `npm run start:api`
-  - Poller worker: `npm run start:poller`
-- If you use a custom API command instead of `npm run start:api`, keep `ENABLE_TRACKING_POLLER=false`.
+  - API service: `node src/server.js`
+  - Poller worker: `node src/flight-poller.js`
+- On Railway, prefer direct Node start commands over `npm run ...` to avoid npm runtime warnings.
+- If you use a custom API command, keep `ENABLE_TRACKING_POLLER=false`.
