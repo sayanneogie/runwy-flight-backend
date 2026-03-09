@@ -11,7 +11,7 @@ Supported providers:
 - Rate limiting protects provider quota.
 - In-memory caching reduces repeated provider calls.
 - Response format is normalized into a provider-agnostic tracked-flight model.
-- Optional Postgres persistence stores tracked flights and device subscriptions.
+- Optional Postgres persistence stores tracking sessions, live snapshots, and push devices.
 - Optional APNs dispatch sends delay/cancellation pushes to subscribed devices.
 
 ## Requirements
@@ -31,11 +31,17 @@ Supported providers:
 3. Set provider key(s) in `.env`.
 4. Optional: configure `DATABASE_URL` (+ `DATABASE_SSL=true` on managed PG with SSL).
 5. Optional: configure APNs (`APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, and private key).
-6. Install deps:
+6. Local debug only: if you intentionally bypass auth with `ALLOW_INSECURE_NO_AUTH=true`, also set `DEBUG_USER_ID` or send `X-Debug-User-Id` on requests.
+7. Install deps:
    - `npm install`
-7. Run:
-   - `npm start`
-   - Service defaults to `http://localhost:8787`
+8. Run:
+   - Preflight checks: `npm run doctor`
+   - API only: `npm run start:api`
+   - Poller worker: `npm run start:poller`
+   - Single-process fallback: `npm run start:all`
+   - API defaults to `http://localhost:8787`
+9. Deploy on Railway:
+   - follow [RAILWAY_DEPLOYMENT.md](RAILWAY_DEPLOYMENT.md)
 
 ## Endpoints
 
@@ -44,6 +50,7 @@ Returns runtime configuration summary:
 - active provider
 - persistence mode (`memory` or `postgres`)
 - whether APNs keys are configured
+- whether the poller is running in this process
 
 ### POST `/v1/track`
 Request:
@@ -100,8 +107,6 @@ Response (shape):
 }
 ```
 
-If `X-Device-Id` header is provided, the device is auto-subscribed to this `flightId`.
-
 ### GET `/v1/flights/:flightId`
 Returns refreshed `normalized` data with updated `alerts` flags (useful for delay/cancellation notification logic).
 
@@ -118,8 +123,7 @@ Body:
 ```json
 {
   "token": "<apns-device-token-hex>",
-  "platform": "ios",
-  "userId": "<optional-auth-user-id>"
+  "platform": "ios"
 }
 ```
 
@@ -142,3 +146,7 @@ If `WEBHOOK_SHARED_SECRET` is set, send it in:
 - Set `DATABASE_URL` for production so tracking/push subscriptions survive restarts.
 - Use `APNS_USE_SANDBOX=false` for production APNs.
 - Keep logs generic; never log secrets.
+- Railway should be split into at least two services:
+  - API service: `npm run start:api`
+  - Poller worker: `npm run start:poller`
+- If you use a custom API command instead of `npm run start:api`, keep `ENABLE_TRACKING_POLLER=false`.

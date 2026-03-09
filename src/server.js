@@ -4,24 +4,45 @@ const crypto = require("node:crypto");
 const express = require("express");
 const rateLimit = require("express-rate-limit");
 const { Pool } = require("pg");
+const { createTrackingStore } = require("./tracking-store");
+const { createTrackingPollerRuntime } = require("./tracking-poller-runtime");
 
 const PORT = Number(process.env.PORT || 8787);
 const FLIGHT_DATA_PROVIDER = (process.env.FLIGHT_DATA_PROVIDER || "aviationstack").toLowerCase();
 
 const AVIATIONSTACK_KEY = process.env.AVIATIONSTACK_KEY;
-const AVIATIONSTACK_BASE_URL =
-  process.env.AVIATIONSTACK_BASE_URL || "http://api.aviationstack.com/v1";
+const AVIATIONSTACK_BASE_URL = requireHTTPSBaseURL(
+  "AVIATIONSTACK_BASE_URL",
+  process.env.AVIATIONSTACK_BASE_URL || "https://api.aviationstack.com/v1"
+);
 
 const FLIGHTAWARE_API_KEY = process.env.FLIGHTAWARE_API_KEY;
-const FLIGHTAWARE_BASE_URL =
-  process.env.FLIGHTAWARE_BASE_URL || "https://aeroapi.flightaware.com/aeroapi";
+const FLIGHTAWARE_BASE_URL = requireHTTPSBaseURL(
+  "FLIGHTAWARE_BASE_URL",
+  process.env.FLIGHTAWARE_BASE_URL || "https://aeroapi.flightaware.com/aeroapi"
+);
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const DATABASE_SSL = String(process.env.DATABASE_SSL || "false").toLowerCase() === "true";
 
-const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 90_000);
-const RATE_LIMIT_PER_MINUTE = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const WEBHOOK_SHARED_SECRET = process.env.WEBHOOK_SHARED_SECRET || "";
+const CACHE_TTL_MS = toPositiveNumber(process.env.CACHE_TTL_MS, 90_000);
+const RATE_LIMIT_PER_MINUTE = toPositiveNumber(process.env.RATE_LIMIT_PER_MINUTE, 60);
+const WEBHOOK_SHARED_SECRET = (process.env.WEBHOOK_SHARED_SECRET || "").trim();
+
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
+const SUPABASE_ANON_KEY = (process.env.SUPABASE_ANON_KEY || "").trim();
+const SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET || "";
+const ALLOW_INSECURE_NO_AUTH = String(process.env.ALLOW_INSECURE_NO_AUTH || "false").toLowerCase() === "true";
+const AUTH_CACHE_TTL_MS = toPositiveNumber(process.env.AUTH_CACHE_TTL_MS, 5 * 60_000);
+const MAX_AUTH_CACHE_ENTRIES = toPositiveNumber(process.env.MAX_AUTH_CACHE_ENTRIES, 5_000);
+const POLLER_INTERVAL_MS = toPositiveNumber(process.env.POLLER_INTERVAL_MS, 30_000);
+const POLLER_BATCH_SIZE = toPositiveNumber(process.env.POLLER_BATCH_SIZE, 25);
+const STALE_FETCH_REFRESH_THRESHOLD_MS = toPositiveNumber(process.env.STALE_FETCH_REFRESH_THRESHOLD_MS, 90_000);
+const ENABLE_TRACKING_POLLER = String(process.env.ENABLE_TRACKING_POLLER || "false").toLowerCase() === "true";
+
+const MAX_PROVIDER_CACHE_ENTRIES = toPositiveNumber(process.env.MAX_PROVIDER_CACHE_ENTRIES, 2_000);
+const MAX_MEMORY_TRACKED_FLIGHTS = toPositiveNumber(process.env.MAX_MEMORY_TRACKED_FLIGHTS, 10_000);
+const MAX_MEMORY_PUSH_DEVICES = toPositiveNumber(process.env.MAX_MEMORY_PUSH_DEVICES, 25_000);
 
 const APNS_KEY_ID = process.env.APNS_KEY_ID || "";
 const APNS_TEAM_ID = process.env.APNS_TEAM_ID || "";
@@ -45,9 +66,24 @@ if (!["aviationstack", "flightaware"].includes(FLIGHT_DATA_PROVIDER)) {
   process.exit(1);
 }
 
+if (!ALLOW_INSECURE_NO_AUTH && !SUPABASE_JWT_SECRET && !(SUPABASE_URL && SUPABASE_ANON_KEY)) {
+  console.error(
+    "Missing auth verification config. Set SUPABASE_JWT_SECRET or both SUPABASE_URL and SUPABASE_ANON_KEY."
+  );
+  process.exit(1);
+}
+
+if (!WEBHOOK_SHARED_SECRET) {
+  console.warn(
+    "WEBHOOK_SHARED_SECRET is not configured. /v1/webhooks/flightaware will reject all requests."
+  );
+}
+
 const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "100kb" }));
+
+const authTokenCache = new Map();
 
 const limiter = rateLimit({
   windowMs: 60_000,
@@ -55,19 +91,24 @@ const limiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => {
-    const deviceID = req.get("X-Device-Id");
-    if (deviceID && deviceID.trim().length > 0) {
-      return `device:${deviceID.trim().slice(0, 128)}`;
+    const userID = String(req.auth?.userId || "").trim();
+    if (userID) {
+      return `user:${userID.slice(0, 128)}`;
     }
-    return `ip:${req.ip || "unknown"}`;
+    const ip = req.ip || req.socket?.remoteAddress || "unknown";
+    const deviceID = normalizedHeaderDeviceID(req);
+    if (deviceID) {
+      return `ip:${ip}|device:${deviceID.slice(0, 128)}`;
+    }
+    return `ip:${ip}`;
   },
 });
 
+app.use("/v1", authenticateRequest);
 app.use("/v1", limiter);
 
 const providerCache = new Map();
 const memoryTrackedFlights = new Map();
-const memoryFlightSubscriptions = new Map();
 const memoryPushDevices = new Map();
 
 const pool = DATABASE_URL
@@ -90,12 +131,267 @@ setInterval(() => {
       providerCache.delete(key);
     }
   }
+  for (const [key, entry] of authTokenCache.entries()) {
+    if (entry.expiresAt <= now) {
+      authTokenCache.delete(key);
+    }
+  }
 }, 60_000).unref();
 
 const apnsTokenCache = {
   token: null,
   expiresAt: 0,
 };
+
+function toPositiveNumber(rawValue, fallback) {
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
+function requireHTTPSBaseURL(envName, value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch (_error) {
+    console.error(`Invalid ${envName} URL: ${value}`);
+    process.exit(1);
+  }
+
+  if (parsed.protocol !== "https:") {
+    console.error(`${envName} must use HTTPS: ${value}`);
+    process.exit(1);
+  }
+
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+function enforceMapSizeLimit(map, maxEntries, onEvict) {
+  while (map.size > maxEntries) {
+    const oldestKey = map.keys().next().value;
+    if (typeof oldestKey === "undefined") break;
+    const oldestValue = map.get(oldestKey);
+    map.delete(oldestKey);
+    if (typeof onEvict === "function") {
+      onEvict(oldestKey, oldestValue);
+    }
+  }
+}
+
+function tokenCacheKey(token) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function base64UrlDecodeToBuffer(value) {
+  if (!value) return null;
+  let normalized = String(value).replace(/-/g, "+").replace(/_/g, "/");
+  while (normalized.length % 4 !== 0) {
+    normalized += "=";
+  }
+
+  try {
+    return Buffer.from(normalized, "base64");
+  } catch (_error) {
+    return null;
+  }
+}
+
+function decodeJWT(token) {
+  const segments = String(token || "").split(".");
+  if (segments.length !== 3) throw new Error("Invalid JWT format");
+
+  const headerBuffer = base64UrlDecodeToBuffer(segments[0]);
+  const payloadBuffer = base64UrlDecodeToBuffer(segments[1]);
+  const signatureBuffer = base64UrlDecodeToBuffer(segments[2]);
+  if (!headerBuffer || !payloadBuffer || !signatureBuffer) {
+    throw new Error("Invalid JWT encoding");
+  }
+
+  const header = JSON.parse(headerBuffer.toString("utf8"));
+  const payload = JSON.parse(payloadBuffer.toString("utf8"));
+
+  return {
+    header,
+    payload,
+    signatureBuffer,
+    signingInput: `${segments[0]}.${segments[1]}`,
+  };
+}
+
+function timingSafeEqualBuffer(a, b) {
+  if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) return false;
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function timingSafeEqualText(a, b) {
+  const left = Buffer.from(String(a || ""), "utf8");
+  const right = Buffer.from(String(b || ""), "utf8");
+  return timingSafeEqualBuffer(left, right);
+}
+
+function isUUID(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value || "").trim()
+  );
+}
+
+function validateJWTLifetime(payload) {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (Number.isFinite(payload?.nbf) && nowSeconds < payload.nbf) {
+    throw new Error("Token not active");
+  }
+  if (Number.isFinite(payload?.exp) && nowSeconds >= payload.exp) {
+    throw new Error("Token expired");
+  }
+}
+
+function verifySupabaseJWTWithSecret(token) {
+  const decoded = decodeJWT(token);
+  if (decoded.header?.alg !== "HS256") {
+    throw new Error("Unsupported JWT algorithm");
+  }
+
+  const expectedSignature = crypto
+    .createHmac("sha256", SUPABASE_JWT_SECRET)
+    .update(decoded.signingInput)
+    .digest();
+
+  if (!timingSafeEqualBuffer(decoded.signatureBuffer, expectedSignature)) {
+    throw new Error("Invalid JWT signature");
+  }
+
+  validateJWTLifetime(decoded.payload);
+  const userId = String(decoded.payload?.sub || "").trim();
+  if (!userId) {
+    throw new Error("JWT is missing user subject");
+  }
+
+  return {
+    userId,
+    tokenExpiresAtMs: Number.isFinite(decoded.payload?.exp) ? decoded.payload.exp * 1000 : null,
+  };
+}
+
+async function verifySupabaseTokenViaAuthAPI(token) {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    throw new Error("Supabase Auth API credentials are missing");
+  }
+  if (!SUPABASE_URL.startsWith("https://")) {
+    throw new Error("SUPABASE_URL must use HTTPS");
+  }
+
+  const response = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    method: "GET",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Supabase Auth API rejected token (${response.status})`);
+  }
+
+  const payload = await response.json();
+  const userId = String(payload?.id || "").trim();
+  if (!userId) {
+    throw new Error("Supabase Auth API response missing user id");
+  }
+
+  const decoded = decodeJWT(token);
+  validateJWTLifetime(decoded.payload);
+
+  return {
+    userId,
+    tokenExpiresAtMs: Number.isFinite(decoded.payload?.exp) ? decoded.payload.exp * 1000 : null,
+  };
+}
+
+function normalizedHeaderDeviceID(req) {
+  const raw = String(req.get("X-Device-Id") || "").trim();
+  if (!raw) return null;
+  return raw.slice(0, 128);
+}
+
+function scopedDeviceID(userId, rawDeviceID) {
+  const deviceID = String(rawDeviceID || "").trim();
+  if (!deviceID) return "";
+  const normalizedUserID = String(userId || "").trim();
+  if (!normalizedUserID) return deviceID.slice(0, 128);
+  return `${normalizedUserID}:${deviceID}`.slice(0, 192);
+}
+
+function shouldBypassAuthForRequest(req) {
+  return req.path === "/webhooks/flightaware";
+}
+
+async function authenticateRequest(req, res, next) {
+  if (shouldBypassAuthForRequest(req)) {
+    return next();
+  }
+
+  if (ALLOW_INSECURE_NO_AUTH) {
+    const debugUserId = String(req.get("X-Debug-User-Id") || process.env.DEBUG_USER_ID || "").trim();
+    if (!isUUID(debugUserId)) {
+      return res.status(401).json({ error: "Missing valid X-Debug-User-Id in ALLOW_INSECURE_NO_AUTH mode" });
+    }
+    req.auth = { userId: debugUserId };
+    return next();
+  }
+
+  const authHeader = String(req.get("Authorization") || "");
+  const bearerPrefix = "Bearer ";
+  if (!authHeader.startsWith(bearerPrefix)) {
+    return res.status(401).json({ error: "Missing Authorization bearer token" });
+  }
+
+  const token = authHeader.slice(bearerPrefix.length).trim();
+  if (!token) {
+    return res.status(401).json({ error: "Missing Authorization bearer token" });
+  }
+
+  const cacheKey = tokenCacheKey(token);
+  const now = Date.now();
+  const cached = authTokenCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    req.auth = { userId: cached.userId };
+    return next();
+  }
+
+  try {
+    let verification;
+    if (SUPABASE_JWT_SECRET) {
+      try {
+        verification = verifySupabaseJWTWithSecret(token);
+      } catch (verificationError) {
+        if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+          throw verificationError;
+        }
+        verification = await verifySupabaseTokenViaAuthAPI(token);
+      }
+    } else {
+      verification = await verifySupabaseTokenViaAuthAPI(token);
+    }
+
+    const maxExpiry = now + AUTH_CACHE_TTL_MS;
+    const tokenExpiry = Number.isFinite(verification.tokenExpiresAtMs)
+      ? verification.tokenExpiresAtMs
+      : maxExpiry;
+    const cacheExpiry = Math.min(maxExpiry, tokenExpiry);
+
+    authTokenCache.set(cacheKey, {
+      userId: verification.userId,
+      expiresAt: cacheExpiry,
+    });
+    enforceMapSizeLimit(authTokenCache, MAX_AUTH_CACHE_ENTRIES);
+
+    req.auth = { userId: verification.userId };
+    return next();
+  } catch (_error) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+}
 
 function normalizeFlightCode(input) {
   return String(input || "")
@@ -404,10 +700,14 @@ async function fetchAviationstackFlights(query) {
 
   const payload = await response.json();
   const rows = Array.isArray(payload?.data) ? payload.data : [];
+  if (providerCache.has(key)) {
+    providerCache.delete(key);
+  }
   providerCache.set(key, {
     data: rows,
     expiresAt: now + CACHE_TTL_MS,
   });
+  enforceMapSizeLimit(providerCache, MAX_PROVIDER_CACHE_ENTRIES);
 
   return rows;
 }
@@ -440,10 +740,14 @@ async function fetchFlightAwareFlights(query) {
   // FlightAware can return 400/404 for unknown identifiers or no data windows.
   // Treat these as "no candidates" so app search shows empty results instead of hard errors.
   if (response.status === 400 || response.status === 404) {
+    if (providerCache.has(key)) {
+      providerCache.delete(key);
+    }
     providerCache.set(key, {
       data: [],
       expiresAt: now + CACHE_TTL_MS,
     });
+    enforceMapSizeLimit(providerCache, MAX_PROVIDER_CACHE_ENTRIES);
     return [];
   }
 
@@ -453,10 +757,14 @@ async function fetchFlightAwareFlights(query) {
 
   const payload = await response.json();
   const rows = Array.isArray(payload?.flights) ? payload.flights : [];
+  if (providerCache.has(key)) {
+    providerCache.delete(key);
+  }
   providerCache.set(key, {
     data: rows,
     expiresAt: now + CACHE_TTL_MS,
   });
+  enforceMapSizeLimit(providerCache, MAX_PROVIDER_CACHE_ENTRIES);
 
   return rows;
 }
@@ -511,254 +819,38 @@ function validateTrackPayload(body) {
   };
 }
 
-function mapTrackedFlightRow(row) {
-  const rawDate = row.last_updated;
-  const lastUpdated = rawDate instanceof Date ? rawDate.toISOString() : new Date(rawDate).toISOString();
+const trackingStore = createTrackingStore({
+  pool,
+  memoryTrackedFlights,
+  memoryPushDevices,
+  maxMemoryTrackedFlights: MAX_MEMORY_TRACKED_FLIGHTS,
+  maxMemoryPushDevices: MAX_MEMORY_PUSH_DEVICES,
+  defaultPollerBatchSize: POLLER_BATCH_SIZE,
+  providerName: FLIGHT_DATA_PROVIDER,
+  normalizeFlightCode,
+  normalizeAirportCode,
+  parseAirlineCode,
+  displayFlightCode,
+  enforceMapSizeLimit,
+});
 
-  return {
-    flightId: row.flight_id,
-    query: row.query,
-    normalized: row.normalized,
-    provider: row.provider,
-    lastUpdated,
-  };
-}
-
-function usesDatabase() {
-  return Boolean(pool);
-}
-
-async function ensureDatabaseSchema() {
-  if (!usesDatabase()) return;
-
-  await pool.query(`
-    create table if not exists runwy_tracked_flights (
-      flight_id text primary key,
-      query jsonb not null,
-      normalized jsonb not null,
-      provider text not null,
-      last_updated timestamptz not null,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now()
-    );
-  `);
-
-  await pool.query(`
-    create table if not exists runwy_flight_subscriptions (
-      flight_id text not null references runwy_tracked_flights(flight_id) on delete cascade,
-      device_id text not null,
-      created_at timestamptz not null default now(),
-      primary key (flight_id, device_id)
-    );
-  `);
-
-  await pool.query(`
-    create table if not exists runwy_push_devices (
-      apns_token text primary key,
-      device_id text not null,
-      user_id text,
-      platform text not null default 'ios',
-      push_enabled boolean not null default true,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now()
-    );
-  `);
-
-  await pool.query(`
-    create index if not exists runwy_push_devices_device_idx
-    on runwy_push_devices(device_id);
-  `);
-
-  await pool.query(`
-    create index if not exists runwy_tracked_flights_flight_number_idx
-    on runwy_tracked_flights((upper(query->>'flightNumber')));
-  `);
-}
-
-async function upsertTrackedFlightRecord({ flightId, query, normalized, provider, lastUpdated }) {
-  if (usesDatabase()) {
-    await pool.query(
-      `
-      insert into runwy_tracked_flights (flight_id, query, normalized, provider, last_updated)
-      values ($1, $2::jsonb, $3::jsonb, $4, $5::timestamptz)
-      on conflict (flight_id) do update
-      set
-        query = excluded.query,
-        normalized = excluded.normalized,
-        provider = excluded.provider,
-        last_updated = excluded.last_updated,
-        updated_at = now()
-      `,
-      [flightId, JSON.stringify(query), JSON.stringify(normalized), provider, lastUpdated]
-    );
-    return;
-  }
-
-  memoryTrackedFlights.set(flightId, { flightId, query, normalized, provider, lastUpdated });
-}
-
-async function getTrackedFlightRecord(flightId) {
-  if (usesDatabase()) {
-    const result = await pool.query(
-      `
-      select flight_id, query, normalized, provider, last_updated
-      from runwy_tracked_flights
-      where flight_id = $1
-      limit 1
-      `,
-      [flightId]
-    );
-
-    if (!result.rows.length) return null;
-    return mapTrackedFlightRow(result.rows[0]);
-  }
-
-  return memoryTrackedFlights.get(flightId) || null;
-}
-
-async function listTrackedFlightsByFlightNumber(flightNumber) {
-  if (usesDatabase()) {
-    const result = await pool.query(
-      `
-      select flight_id, query, normalized, provider, last_updated
-      from runwy_tracked_flights
-      where upper(query->>'flightNumber') = upper($1)
-      `,
-      [normalizeFlightCode(flightNumber)]
-    );
-
-    return result.rows.map(mapTrackedFlightRow);
-  }
-
-  return [...memoryTrackedFlights.values()].filter((item) =>
-    normalizeFlightCode(item.query?.flightNumber) === normalizeFlightCode(flightNumber)
-  );
-}
-
-async function addFlightSubscription(flightId, deviceId) {
-  if (!deviceId) return;
-
-  if (usesDatabase()) {
-    await pool.query(
-      `
-      insert into runwy_flight_subscriptions (flight_id, device_id)
-      values ($1, $2)
-      on conflict do nothing
-      `,
-      [flightId, deviceId]
-    );
-    return;
-  }
-
-  const current = memoryFlightSubscriptions.get(flightId) || new Set();
-  current.add(deviceId);
-  memoryFlightSubscriptions.set(flightId, current);
-}
-
-async function upsertPushDevice({ apnsToken, deviceId, userId, platform = "ios" }) {
-  if (usesDatabase()) {
-    await pool.query(
-      `
-      insert into runwy_push_devices (apns_token, device_id, user_id, platform, push_enabled, updated_at)
-      values ($1, $2, $3, $4, true, now())
-      on conflict (apns_token) do update
-      set
-        device_id = excluded.device_id,
-        user_id = excluded.user_id,
-        platform = excluded.platform,
-        push_enabled = true,
-        updated_at = now()
-      `,
-      [apnsToken, deviceId, userId || null, platform]
-    );
-
-    return;
-  }
-
-  memoryPushDevices.set(apnsToken, {
-    apnsToken,
-    deviceId,
-    userId: userId || null,
-    platform,
-    pushEnabled: true,
-    updatedAt: new Date().toISOString(),
-  });
-}
-
-async function disablePushTokensForDevice(deviceId) {
-  if (!deviceId) return;
-
-  if (usesDatabase()) {
-    await pool.query(
-      `
-      update runwy_push_devices
-      set push_enabled = false, updated_at = now()
-      where device_id = $1
-      `,
-      [deviceId]
-    );
-    return;
-  }
-
-  for (const [token, info] of memoryPushDevices.entries()) {
-    if (info.deviceId === deviceId) {
-      memoryPushDevices.set(token, {
-        ...info,
-        pushEnabled: false,
-        updatedAt: new Date().toISOString(),
-      });
-    }
-  }
-}
-
-async function disablePushToken(apnsToken) {
-  if (!apnsToken) return;
-
-  if (usesDatabase()) {
-    await pool.query(
-      `
-      update runwy_push_devices
-      set push_enabled = false, updated_at = now()
-      where apns_token = $1
-      `,
-      [apnsToken]
-    );
-    return;
-  }
-
-  const info = memoryPushDevices.get(apnsToken);
-  if (!info) return;
-  memoryPushDevices.set(apnsToken, {
-    ...info,
-    pushEnabled: false,
-    updatedAt: new Date().toISOString(),
-  });
-}
-
-async function listPushTokensForFlight(flightId) {
-  if (usesDatabase()) {
-    const result = await pool.query(
-      `
-      select pd.apns_token
-      from runwy_flight_subscriptions fs
-      join runwy_push_devices pd on pd.device_id = fs.device_id
-      where fs.flight_id = $1
-        and pd.push_enabled = true
-      `,
-      [flightId]
-    );
-
-    return result.rows.map((row) => row.apns_token);
-  }
-
-  const subscriptions = memoryFlightSubscriptions.get(flightId);
-  if (!subscriptions || subscriptions.size === 0) return [];
-
-  const allowed = new Set(subscriptions);
-  return [...memoryPushDevices.values()]
-    .filter((device) => device.pushEnabled && allowed.has(device.deviceId))
-    .map((device) => device.apnsToken);
-}
+const {
+  createOrReuseTrackingSession,
+  disablePushToken,
+  disablePushTokensForDevice,
+  ensureDatabaseSchema,
+  fetchAccessibleTrackingRow,
+  fetchTrackingRowByID,
+  listDueTrackingRows,
+  listPushTokensForFlight,
+  listTrackedFlightsByFlightNumber,
+  markTrackingRowErrored,
+  persistTrackingSnapshot,
+  providerFlightIdentifier,
+  upsertPushDevice,
+  upsertTrackedFlightRecord,
+  usesDatabase,
+} = trackingStore;
 
 function apnsPrivateKeyMaterial() {
   if (APNS_PRIVATE_KEY_BASE64) {
@@ -879,6 +971,24 @@ function notificationPayloadFor(normalized, flightId) {
   return null;
 }
 
+function notificationEventFor(normalized, flightId) {
+  const payload = notificationPayloadFor(normalized, flightId);
+  const title = payload?.aps?.alert?.title;
+  const body = payload?.aps?.alert?.body;
+  const type = payload?.runwy?.type;
+
+  if (!payload || !title || !body || !type) {
+    return null;
+  }
+
+  return {
+    type,
+    title,
+    body,
+    payload,
+  };
+}
+
 async function sendApnsNotification(apnsToken, payload) {
   if (!isApnsConfigured()) {
     return { skipped: true };
@@ -916,13 +1026,74 @@ async function sendApnsNotification(apnsToken, payload) {
 }
 
 async function dispatchFlightStatusNotifications(flightId, normalized) {
-  const payload = notificationPayloadFor(normalized, flightId);
-  if (!payload) return;
+  const event = notificationEventFor(normalized, flightId);
+  if (!event) return;
+
+  if (usesDatabase()) {
+    await pool.query(
+      `
+      with recipients as (
+        select ts.owner_user_id as user_id
+        from public.tracking_sessions ts
+        where ts.id = $1::uuid
+
+        union
+
+        select fw.watcher_user_id as user_id
+        from public.flight_watchers fw
+        where fw.tracking_session_id = $1::uuid
+          and fw.watch_state = 'approved'
+          and fw.can_receive_notifications = true
+      )
+      insert into public.notifications (
+        user_id,
+        tracking_session_id,
+        notification_type,
+        delivery_channel,
+        delivery_status,
+        title,
+        body,
+        payload_json,
+        scheduled_for
+      )
+      select
+        recipients.user_id,
+        $1::uuid,
+        $2,
+        'push',
+        $3,
+        $4,
+        $5,
+        $6::jsonb,
+        now()
+      from recipients
+      `,
+      [flightId, event.type, isApnsConfigured() ? "queued" : "pending", event.title, event.body, JSON.stringify(event.payload)]
+    );
+  }
 
   const tokens = await listPushTokensForFlight(flightId);
-  if (!tokens.length) return;
+  if (!tokens.length || !isApnsConfigured()) return;
 
-  await Promise.all(tokens.map((token) => sendApnsNotification(token, payload)));
+  const results = await Promise.all(tokens.map((token) => sendApnsNotification(token, event.payload)));
+
+  if (usesDatabase()) {
+    const deliveryStatus = results.some((result) => result?.ok) ? "sent" : "failed";
+    await pool.query(
+      `
+      update public.notifications
+      set
+        delivery_status = $2,
+        sent_at = case when $2 = 'sent' then coalesce(sent_at, now()) else sent_at end,
+        updated_at = now()
+      where tracking_session_id = $1::uuid
+        and notification_type = $3
+        and delivery_status = 'queued'
+        and created_at >= now() - interval '15 minutes'
+      `,
+      [flightId, deliveryStatus, event.type]
+    );
+  }
 }
 
 async function refreshTrackedFlightRecord(trackedRecord) {
@@ -942,24 +1113,42 @@ async function refreshTrackedFlightRecord(trackedRecord) {
     trackedRecord.normalized
   );
 
-  const lastUpdated = new Date().toISOString();
-  await upsertTrackedFlightRecord({
-    flightId: trackedRecord.flightId,
-    query: trackedRecord.query,
-    normalized,
-    provider: provider.name,
-    lastUpdated,
-  });
+  normalized.lastUpdated = new Date().toISOString();
+
+  if (usesDatabase()) {
+    await persistTrackingSnapshot({
+      flightId: trackedRecord.flightId,
+      userId: trackedRecord.ownerUserId,
+      query: trackedRecord.query,
+      normalized,
+      provider: provider.name,
+      providerFlightId: providerFlightIdentifier(selected, provider.name),
+      rawProviderPayload: selected,
+    });
+  } else {
+    const lastUpdated = new Date().toISOString();
+    await upsertTrackedFlightRecord({
+      flightId: trackedRecord.flightId,
+      query: trackedRecord.query,
+      normalized,
+      provider: provider.name,
+      lastUpdated,
+    });
+  }
 
   if (normalized.alerts?.cancelledNow || normalized.alerts?.delayedNow) {
     await dispatchFlightStatusNotifications(trackedRecord.flightId, normalized);
+  }
+
+  if (usesDatabase()) {
+    return fetchTrackingRowByID(trackedRecord.flightId);
   }
 
   return {
     ...trackedRecord,
     normalized,
     provider: provider.name,
-    lastUpdated,
+    lastUpdated: normalized.lastUpdated,
   };
 }
 
@@ -984,20 +1173,44 @@ function flightNumberFromWebhookEvent(event) {
   );
 }
 
+const trackingPollerRuntime = createTrackingPollerRuntime({
+  isPollerEnabled: ENABLE_TRACKING_POLLER,
+  usesDatabase,
+  ensureDatabaseSchema,
+  listDueTrackingRows,
+  refreshTrackedFlightRecord,
+  markTrackingRowErrored,
+  pollerIntervalMs: POLLER_INTERVAL_MS,
+  pollerBatchSize: POLLER_BATCH_SIZE,
+  providerName: FLIGHT_DATA_PROVIDER,
+});
+
+const {
+  isPollerRunning,
+  runTrackingPollerCycle,
+  startTrackingPoller,
+  startTrackingPollerWorker,
+} = trackingPollerRuntime;
+
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     provider: FLIGHT_DATA_PROVIDER,
-    persistence: usesDatabase() ? "postgres" : "memory",
+    persistence: usesDatabase() ? "supabase-postgres" : "memory",
     apnsConfigured: isApnsConfigured(),
+    pollerEnabled: isPollerRunning(),
   });
 });
 
 app.post("/v1/devices/push-token", async (req, res) => {
-  const deviceId = req.get("X-Device-Id")?.trim();
+  const deviceId = normalizedHeaderDeviceID(req);
   const token = String(req.body?.token || "").trim();
   const platform = String(req.body?.platform || "ios").toLowerCase();
-  const userId = req.body?.userId ? String(req.body.userId) : null;
+  const userId = String(req.auth?.userId || "").trim() || null;
+
+  if (!userId) {
+    return res.status(401).json({ error: "Sign in is required" });
+  }
 
   if (!deviceId) {
     return res.status(400).json({ error: "X-Device-Id header is required" });
@@ -1022,13 +1235,17 @@ app.post("/v1/devices/push-token", async (req, res) => {
 });
 
 app.post("/v1/devices/push-token/remove", async (req, res) => {
-  const deviceId = req.get("X-Device-Id")?.trim();
+  const deviceId = normalizedHeaderDeviceID(req);
+  const userId = String(req.auth?.userId || "").trim() || null;
+  if (!userId) {
+    return res.status(401).json({ error: "Sign in is required" });
+  }
   if (!deviceId) {
     return res.status(400).json({ error: "X-Device-Id header is required" });
   }
 
   try {
-    await disablePushTokensForDevice(deviceId);
+    await disablePushTokensForDevice(deviceId, userId);
     return res.json({ ok: true });
   } catch (_error) {
     return res.status(500).json({ error: "Unable to disable push token" });
@@ -1041,6 +1258,15 @@ app.post("/v1/track", async (req, res) => {
     return res.status(400).json({ error: validated.error });
   }
 
+  const userId = String(req.auth?.userId || "").trim() || null;
+  if (!userId) {
+    return res.status(401).json({ error: "Sign in is required" });
+  }
+
+  if (!usesDatabase()) {
+    return res.status(503).json({ error: "Tracking persistence is not configured" });
+  }
+
   try {
     const query = validated.value;
     const provider = providerAdapter();
@@ -1051,25 +1277,24 @@ app.post("/v1/track", async (req, res) => {
     }
 
     const normalized = normalizeWithContext(selected, records, query, provider.normalizeRecord, null);
-    const flightId = crypto.randomUUID();
-    const lastUpdated = new Date().toISOString();
+    normalized.lastUpdated = new Date().toISOString();
 
-    await upsertTrackedFlightRecord({
-      flightId,
+    const tracked = await createOrReuseTrackingSession({
       query,
       normalized,
+      rawProviderPayload: selected,
+      userId,
       provider: provider.name,
-      lastUpdated,
+      createdSource: "manual_track",
     });
 
-    const deviceId = req.get("X-Device-Id")?.trim();
-    if (deviceId) {
-      await addFlightSubscription(flightId, deviceId);
+    if (!tracked) {
+      return res.status(500).json({ error: "Unable to create tracking session" });
     }
 
     return res.json({
-      flightId,
-      normalized,
+      flightId: tracked.flightId,
+      normalized: tracked.normalized,
     });
   } catch (_error) {
     return res.status(502).json({ error: "Failed to fetch provider data" });
@@ -1078,18 +1303,26 @@ app.post("/v1/track", async (req, res) => {
 
 app.get("/v1/flights/:flightId", async (req, res) => {
   const flightId = req.params.flightId;
-  const tracked = await getTrackedFlightRecord(flightId);
+  const userId = String(req.auth?.userId || "").trim() || null;
+
+  if (!userId) {
+    return res.status(401).json({ error: "Sign in is required" });
+  }
+
+  const tracked = await fetchAccessibleTrackingRow(flightId, userId);
   if (!tracked) {
     return res.status(404).json({ error: "Unknown flightId" });
   }
 
   try {
-    const refreshed = await refreshTrackedFlightRecord(tracked);
+    const lastUpdatedAt = new Date(tracked.lastUpdated).getTime();
+    const shouldRefresh = !Number.isFinite(lastUpdatedAt) || Date.now() - lastUpdatedAt >= STALE_FETCH_REFRESH_THRESHOLD_MS;
+    const current = shouldRefresh ? await refreshTrackedFlightRecord(tracked) : tracked;
 
     return res.json({
       flightId,
-      normalized: refreshed.normalized,
-      lastUpdated: refreshed.lastUpdated,
+      normalized: current.normalized,
+      lastUpdated: current.lastUpdated,
     });
   } catch (_error) {
     return res.status(200).json({
@@ -1137,11 +1370,13 @@ app.get("/v1/search", async (req, res) => {
 });
 
 app.post("/v1/webhooks/flightaware", async (req, res) => {
-  if (WEBHOOK_SHARED_SECRET) {
-    const incomingSecret = req.get("X-Runwy-Webhook-Secret") || "";
-    if (incomingSecret !== WEBHOOK_SHARED_SECRET) {
-      return res.status(401).json({ error: "Unauthorized webhook" });
-    }
+  if (!WEBHOOK_SHARED_SECRET) {
+    return res.status(503).json({ error: "Webhook secret is not configured" });
+  }
+
+  const incomingSecret = req.get("X-Runwy-Webhook-Secret") || "";
+  if (!timingSafeEqualText(incomingSecret, WEBHOOK_SHARED_SECRET)) {
+    return res.status(401).json({ error: "Unauthorized webhook" });
   }
 
   const events = extractWebhookEvents(req.body);
@@ -1180,19 +1415,33 @@ app.post("/v1/webhooks/flightaware", async (req, res) => {
   });
 });
 
-async function start() {
+async function startApiServer() {
   if (usesDatabase()) {
     await ensureDatabaseSchema();
   }
 
-  app.listen(PORT, () => {
+  startTrackingPoller({ keepProcessAlive: false });
+
+  return app.listen(PORT, () => {
     console.log(
-      `Flight proxy running on port ${PORT} provider=${FLIGHT_DATA_PROVIDER} persistence=${usesDatabase() ? "postgres" : "memory"}`
+      `Flight proxy running on port ${PORT} provider=${FLIGHT_DATA_PROVIDER} persistence=${usesDatabase() ? "supabase-postgres" : "memory"} poller=${isPollerRunning() ? "on" : "off"}`
     );
   });
 }
 
-start().catch((error) => {
-  console.error("Failed to start flight proxy", error);
-  process.exit(1);
-});
+if (require.main === module) {
+  startApiServer().catch((error) => {
+    console.error("Failed to start flight proxy", error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  app,
+  ensureDatabaseSchema,
+  runTrackingPollerCycle,
+  startApiServer,
+  startTrackingPoller,
+  startTrackingPollerWorker,
+  usesDatabase,
+};
