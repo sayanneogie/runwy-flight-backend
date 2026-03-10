@@ -317,7 +317,7 @@ function createTrackingStore({
     }
 
     if (["boarding", "departed", "enroute", "delayed"].includes(status)) {
-      return new Date(now.getTime() + 2 * 60_000).toISOString();
+      return new Date(now.getTime() + 30_000).toISOString();
     }
 
     const departureISO =

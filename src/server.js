@@ -28,6 +28,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const DATABASE_SSL = String(process.env.DATABASE_SSL || "false").toLowerCase() === "true";
 
 const CACHE_TTL_MS = toPositiveNumber(process.env.CACHE_TTL_MS, 90_000);
+const FLIGHTAWARE_POSITION_CACHE_TTL_MS = toPositiveNumber(process.env.FLIGHTAWARE_POSITION_CACHE_TTL_MS, 25_000);
 const RATE_LIMIT_PER_MINUTE = toPositiveNumber(process.env.RATE_LIMIT_PER_MINUTE, 60);
 const WEBHOOK_SHARED_SECRET = (process.env.WEBHOOK_SHARED_SECRET || "").trim();
 
@@ -423,6 +424,20 @@ function normalizeStatus(rawStatus) {
 
 function isoOrNull(value) {
   if (!value) return null;
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const normalizedEpoch = Math.abs(value) < 1e12 ? value * 1000 : value;
+    const date = new Date(normalizedEpoch);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+
+  if (typeof value === "string" && /^\d+(\.\d+)?$/.test(value.trim())) {
+    const numericValue = Number(value);
+    const normalizedEpoch = Math.abs(numericValue) < 1e12 ? numericValue * 1000 : numericValue;
+    const date = new Date(normalizedEpoch);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
@@ -440,6 +455,99 @@ function calculateDelayMinutes(departureTimes) {
   const estimated = new Date(departureTimes.estimated).getTime();
   if (!Number.isFinite(scheduled) || !Number.isFinite(estimated)) return null;
   return Math.max(0, Math.round((estimated - scheduled) / 60_000));
+}
+
+function finiteNumberOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function normalizeLivePosition({
+  latitude,
+  longitude,
+  headingDegrees,
+  groundSpeedKnots,
+  altitudeFeet,
+  recordedAt,
+}) {
+  const lat = finiteNumberOrNull(latitude);
+  const lon = finiteNumberOrNull(longitude);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return null;
+  }
+
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+    return null;
+  }
+
+  return {
+    latitude: lat,
+    longitude: lon,
+    headingDegrees: finiteNumberOrNull(headingDegrees),
+    groundSpeedKnots: finiteNumberOrNull(groundSpeedKnots),
+    altitudeFeet: finiteNumberOrNull(altitudeFeet),
+    recordedAt: isoOrNull(recordedAt),
+  };
+}
+
+function normalizeLivePositionFromAviationstack(record) {
+  const live = record?.live || {};
+  const directKnots =
+    finiteNumberOrNull(live.ground_speed_knots) ??
+    finiteNumberOrNull(live.groundspeed_knots) ??
+    finiteNumberOrNull(live.speed_knots);
+  const horizontalKmh = finiteNumberOrNull(live.speed_horizontal);
+  const groundSpeedKnots =
+    directKnots ?? (horizontalKmh === null ? null : horizontalKmh * 0.539957);
+
+  return normalizeLivePosition({
+    latitude: live.latitude,
+    longitude: live.longitude,
+    headingDegrees: live.direction ?? live.heading,
+    groundSpeedKnots,
+    altitudeFeet: live.altitude,
+    recordedAt: live.updated,
+  });
+}
+
+function normalizeLivePositionFromFlightAware(record) {
+  const lastPosition = record?.last_position || {};
+
+  return normalizeLivePosition({
+    latitude:
+      lastPosition.latitude ??
+      lastPosition.lat ??
+      record?.latitude ??
+      record?.lat,
+    longitude:
+      lastPosition.longitude ??
+      lastPosition.lon ??
+      lastPosition.lng ??
+      record?.longitude ??
+      record?.lon ??
+      record?.lng,
+    headingDegrees:
+      lastPosition.heading ??
+      lastPosition.track ??
+      record?.heading ??
+      record?.track,
+    groundSpeedKnots:
+      lastPosition.groundspeed ??
+      lastPosition.ground_speed ??
+      lastPosition.speed ??
+      record?.groundspeed ??
+      record?.ground_speed,
+    altitudeFeet:
+      lastPosition.altitude ??
+      lastPosition.reported_altitude ??
+      record?.altitude,
+    recordedAt:
+      lastPosition.date ??
+      record?.updated ??
+      record?.filed_time,
+  });
 }
 
 function normalizeRecordFromAviationstack(record) {
@@ -478,6 +586,8 @@ function normalizeRecordFromAviationstack(record) {
     inboundFlight: null,
     recentHistory: [],
     alerts: null,
+    progressPercent: finiteNumberOrNull(live.progress ?? live.progress_percent),
+    livePosition: normalizeLivePositionFromAviationstack(record),
     provider: "aviationstack",
     lastUpdated: isoOrNull(live.updated) || new Date().toISOString(),
   };
@@ -565,6 +675,8 @@ function normalizeRecordFromFlightAware(record) {
     inboundFlight,
     recentHistory: [],
     alerts: null,
+    progressPercent: finiteNumberOrNull(record?.progress_percent ?? record?.progress),
+    livePosition: normalizeLivePositionFromFlightAware(record),
     provider: "flightaware",
     lastUpdated: isoOrNull(record?.last_position?.date || record?.updated || record?.filed_time) || new Date().toISOString(),
   };
@@ -578,6 +690,155 @@ function makeProviderQueryKey(providerName, query) {
     departureIata: (query.departureIata || "").toUpperCase(),
     arrivalIata: (query.arrivalIata || "").toUpperCase(),
   });
+}
+
+function makeProviderPositionKey(providerName, providerFlightId) {
+  return JSON.stringify({
+    providerName,
+    providerFlightId: String(providerFlightId || "").trim(),
+    kind: "live-position",
+  });
+}
+
+function toEpochMillisOrZero(value) {
+  const epochMs = new Date(value || 0).getTime();
+  return Number.isFinite(epochMs) ? epochMs : 0;
+}
+
+function isTrackableLiveStatus(status) {
+  return ["boarding", "departed", "enroute", "delayed"].includes(String(status || "").toLowerCase());
+}
+
+function normalizeFlightAwareTrackPoint(record) {
+  if (!record || typeof record !== "object") return null;
+
+  const coordinates = Array.isArray(record?.geometry?.coordinates)
+    ? record.geometry.coordinates
+    : Array.isArray(record?.coordinates)
+      ? record.coordinates
+      : null;
+
+  const properties = record?.properties && typeof record.properties === "object"
+    ? record.properties
+    : {};
+
+  return normalizeLivePosition({
+    latitude: record.latitude ?? record.lat ?? properties.latitude ?? properties.lat ?? coordinates?.[1],
+    longitude:
+      record.longitude ??
+      record.lon ??
+      record.lng ??
+      properties.longitude ??
+      properties.lon ??
+      properties.lng ??
+      coordinates?.[0],
+    headingDegrees:
+      record.heading ??
+      record.track ??
+      record.direction ??
+      properties.heading ??
+      properties.track ??
+      properties.direction,
+    groundSpeedKnots:
+      record.groundspeed ??
+      record.ground_speed ??
+      record.speed ??
+      properties.groundspeed ??
+      properties.ground_speed ??
+      properties.speed,
+    altitudeFeet:
+      record.altitude ??
+      record.reported_altitude ??
+      properties.altitude ??
+      properties.reported_altitude,
+    recordedAt:
+      record.timestamp ??
+      record.recorded_at ??
+      record.date ??
+      record.observed ??
+      properties.timestamp ??
+      properties.recorded_at ??
+      properties.date,
+  });
+}
+
+function flightAwareTrackCandidatesFromPayload(payload) {
+  if (!payload || typeof payload !== "object") return [];
+
+  const candidates = [];
+
+  if (Array.isArray(payload.positions)) candidates.push(...payload.positions);
+  if (Array.isArray(payload.track)) candidates.push(...payload.track);
+  if (payload.position && typeof payload.position === "object") candidates.push(payload.position);
+  if (payload.last_position && typeof payload.last_position === "object") candidates.push(payload.last_position);
+  if (Array.isArray(payload.features)) candidates.push(...payload.features);
+  if (payload.geometry && payload.properties) candidates.push(payload);
+
+  return candidates;
+}
+
+async function fetchFlightAwareLivePosition(providerFlightId) {
+  const normalizedFlightId = String(providerFlightId || "").trim();
+  if (!normalizedFlightId) return null;
+
+  const cacheKey = makeProviderPositionKey("flightaware", normalizedFlightId);
+  const now = Date.now();
+  const cached = providerCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.data;
+  }
+
+  const endpointPaths = [
+    `/flights/${encodeURIComponent(normalizedFlightId)}/position`,
+    `/flights/${encodeURIComponent(normalizedFlightId)}/track`,
+    `/flights/${encodeURIComponent(normalizedFlightId)}/map`,
+  ];
+
+  for (const path of endpointPaths) {
+    const response = await fetch(`${FLIGHTAWARE_BASE_URL}${path}`, {
+      method: "GET",
+      headers: {
+        "x-apikey": FLIGHTAWARE_API_KEY,
+        Accept: "application/json",
+      },
+    });
+
+    if ([400, 401, 403, 404].includes(response.status)) {
+      continue;
+    }
+
+    if (!response.ok) {
+      throw new Error(`Provider position error (${response.status})`);
+    }
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (_error) {
+      continue;
+    }
+
+    const latestPosition = flightAwareTrackCandidatesFromPayload(payload)
+      .map(normalizeFlightAwareTrackPoint)
+      .filter(Boolean)
+      .sort((left, right) => toEpochMillisOrZero(right.recordedAt) - toEpochMillisOrZero(left.recordedAt))[0] || null;
+
+    if (latestPosition) {
+      providerCache.set(cacheKey, {
+        data: latestPosition,
+        expiresAt: now + FLIGHTAWARE_POSITION_CACHE_TTL_MS,
+      });
+      enforceMapSizeLimit(providerCache, MAX_PROVIDER_CACHE_ENTRIES);
+      return latestPosition;
+    }
+  }
+
+  providerCache.set(cacheKey, {
+    data: null,
+    expiresAt: now + FLIGHTAWARE_POSITION_CACHE_TTL_MS,
+  });
+  enforceMapSizeLimit(providerCache, MAX_PROVIDER_CACHE_ENTRIES);
+  return null;
 }
 
 function sortRecordsByDepartureDesc(records, normalizer) {
@@ -834,6 +1095,34 @@ const {
   usesDatabase,
 } = trackingStore;
 
+async function enrichNormalizedWithLivePosition(normalized, providerName, rawRecord) {
+  if (providerName !== "flightaware" || !isTrackableLiveStatus(normalized?.status)) {
+    return normalized;
+  }
+
+  const providerFlightId = providerFlightIdentifier(rawRecord, providerName);
+  if (!providerFlightId) {
+    return normalized;
+  }
+
+  try {
+    const livePosition = await fetchFlightAwareLivePosition(providerFlightId);
+    if (!livePosition) {
+      return normalized;
+    }
+
+    return {
+      ...normalized,
+      livePosition,
+    };
+  } catch (error) {
+    console.warn(
+      `FlightAware live position lookup failed for ${providerFlightId}: ${error?.message || String(error)}`
+    );
+    return normalized;
+  }
+}
+
 function apnsPrivateKeyMaterial() {
   if (APNS_PRIVATE_KEY_BASE64) {
     return Buffer.from(APNS_PRIVATE_KEY_BASE64, "base64").toString("utf8");
@@ -1087,7 +1376,7 @@ async function refreshTrackedFlightRecord(trackedRecord) {
     return trackedRecord;
   }
 
-  const normalized = normalizeWithContext(
+  let normalized = normalizeWithContext(
     selected,
     records,
     trackedRecord.query,
@@ -1095,7 +1384,8 @@ async function refreshTrackedFlightRecord(trackedRecord) {
     trackedRecord.normalized
   );
 
-  normalized.lastUpdated = new Date().toISOString();
+  normalized = await enrichNormalizedWithLivePosition(normalized, provider.name, selected);
+  normalized.lastUpdated = normalized.livePosition?.recordedAt || normalized.lastUpdated || new Date().toISOString();
 
   if (usesDatabase()) {
     await persistTrackingSnapshot({
@@ -1257,8 +1547,9 @@ app.post("/v1/track", async (req, res) => {
       return res.status(404).json({ error: "No matching flight found" });
     }
 
-    const normalized = normalizeWithContext(selected, records, query, provider.normalizeRecord, null);
-    normalized.lastUpdated = new Date().toISOString();
+    let normalized = normalizeWithContext(selected, records, query, provider.normalizeRecord, null);
+    normalized = await enrichNormalizedWithLivePosition(normalized, provider.name, selected);
+    normalized.lastUpdated = normalized.livePosition?.recordedAt || normalized.lastUpdated || new Date().toISOString();
 
     const tracked = await createOrReuseTrackingSession({
       query,
