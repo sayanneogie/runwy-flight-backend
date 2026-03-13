@@ -1,3 +1,11 @@
+const IMMINENT_DEPARTURE_POLL_INTERVAL_MS = 10 * 60_000;
+const PRE_DEPARTURE_POLL_INTERVAL_MS = 90 * 60_000;
+const FAR_FUTURE_POLL_INTERVAL_MS = 24 * 60 * 60_000;
+const POST_DEPARTURE_FINAL_REFRESH_BUFFER_MS = 15 * 60_000;
+const POST_DEPARTURE_FALLBACK_POLL_INTERVAL_MS = 3 * 60 * 60_000;
+const ERRORED_RETRY_INTERVAL_MINUTES = 30;
+const EXPIRED_TRACKING_WINDOW_GRACE_MS = 12 * 60 * 60_000;
+
 function createTrackingStore({
   pool,
   memoryTrackedFlights,
@@ -5,6 +13,7 @@ function createTrackingStore({
   maxMemoryTrackedFlights,
   maxMemoryPushDevices,
   defaultPollerBatchSize,
+  maxActiveTrackingSessionsPerUser,
   providerName,
   normalizeFlightCode,
   normalizeAirportCode,
@@ -35,7 +44,25 @@ function createTrackingStore({
     enforceMapSizeLimit(memoryTrackedFlights, maxMemoryTrackedFlights);
   }
 
-  async function listTrackedFlightsByFlightNumber(flightNumber) {
+  function normalizedTrackingStatuses(statuses) {
+    if (!Array.isArray(statuses) || statuses.length === 0) {
+      return ["pending", "active"];
+    }
+
+    const normalized = statuses
+      .map((status) => String(status || "").trim().toLowerCase())
+      .filter(Boolean);
+
+    return normalized.length > 0 ? normalized : ["pending", "active"];
+  }
+
+  async function listTrackedFlightsByFlightNumber(flightNumber, options = {}) {
+    const statuses = normalizedTrackingStatuses(options.statuses);
+    const startDate = options.startDate || null;
+    const endDate = options.endDate || null;
+    const departureIata = normalizeAirportCode(options.departureIata) || null;
+    const arrivalIata = normalizeAirportCode(options.arrivalIata) || null;
+
     if (usesDatabase()) {
       const result = await pool.query(
         `
@@ -50,17 +77,74 @@ function createTrackingStore({
         left join public.live_snapshots ls
           on ls.tracking_session_id = ts.id
         where upper(ts.flight_number) = upper($1)
-          and ts.session_status in ('pending', 'active', 'paused')
+          and ts.session_status = any($2::text[])
+          and ($3::date is null or ts.travel_date >= $3::date)
+          and ($4::date is null or ts.travel_date <= $4::date)
+          and ($5::text is null or coalesce(ts.origin_iata, '') = coalesce($5, ''))
+          and ($6::text is null or coalesce(ts.destination_iata, '') = coalesce($6, ''))
         `,
-        [normalizeFlightCode(flightNumber)]
+        [normalizeFlightCode(flightNumber), statuses, startDate, endDate, departureIata, arrivalIata]
       );
 
       return result.rows.map(mapTrackingRow).filter(Boolean);
     }
 
-    return [...memoryTrackedFlights.values()].filter((item) =>
-      normalizeFlightCode(item.query?.flightNumber) === normalizeFlightCode(flightNumber)
-    );
+    return [...memoryTrackedFlights.values()].filter((item) => {
+      const travelDate = String(item.query?.date || "").slice(0, 10) || null;
+      const itemStatus = String(item.normalized?.status || "scheduled").toLowerCase();
+      const sessionStatus = sessionStatusForNormalized(item.normalized);
+
+      return (
+        normalizeFlightCode(item.query?.flightNumber) === normalizeFlightCode(flightNumber) &&
+        statuses.includes(sessionStatus) &&
+        (!startDate || (travelDate && travelDate >= startDate)) &&
+        (!endDate || (travelDate && travelDate <= endDate)) &&
+        (!departureIata || normalizeAirportCode(item.query?.departureIata) === departureIata) &&
+        (!arrivalIata || normalizeAirportCode(item.query?.arrivalIata) === arrivalIata) &&
+        !["landed", "cancelled", "diverted"].includes(itemStatus)
+      );
+    });
+  }
+
+  async function listTrackedFlightsByProviderFlightId(providerFlightId, options = {}) {
+    const normalizedProviderFlightId = String(providerFlightId || "").trim();
+    if (!normalizedProviderFlightId) return [];
+
+    const statuses = normalizedTrackingStatuses(options.statuses);
+
+    if (usesDatabase()) {
+      const result = await pool.query(
+        `
+        select
+          ts.*,
+          ls.provider as snapshot_provider,
+          ls.provider_flight_id as snapshot_provider_flight_id,
+          ls.canonical_snapshot_json,
+          ls.provider_last_updated_at,
+          ls.updated_at as snapshot_updated_at
+        from public.tracking_sessions ts
+        left join public.live_snapshots ls
+          on ls.tracking_session_id = ts.id
+        where coalesce(ts.provider_flight_id, ls.provider_flight_id, '') = $1
+          and ts.session_status = any($2::text[])
+        `,
+        [normalizedProviderFlightId, statuses]
+      );
+
+      return result.rows.map(mapTrackingRow).filter(Boolean);
+    }
+
+    return [...memoryTrackedFlights.values()].filter((item) => {
+      const itemProviderFlightId = String(item.providerFlightId || "").trim();
+      const sessionStatus = sessionStatusForNormalized(item.normalized);
+      const itemStatus = String(item.normalized?.status || "scheduled").toLowerCase();
+
+      return (
+        itemProviderFlightId === normalizedProviderFlightId &&
+        statuses.includes(sessionStatus) &&
+        !["landed", "cancelled", "diverted"].includes(itemStatus)
+      );
+    });
   }
 
   async function upsertPushDevice({ apnsToken, deviceId, userId, platform = "ios" }) {
@@ -187,6 +271,70 @@ function createTrackingStore({
     return [];
   }
 
+  async function countActiveTrackingSessionsForUser(userId) {
+    if (!usesDatabase() || !userId) return 0;
+
+    const result = await pool.query(
+      `
+      select count(*)::int as count
+      from public.tracking_sessions
+      where owner_user_id = $1::uuid
+        and session_status in ('pending', 'active', 'errored')
+      `,
+      [userId]
+    );
+
+    return Number(result.rows[0]?.count || 0);
+  }
+
+  async function fetchTrackingSessionStatusSummary() {
+    if (!usesDatabase()) {
+      return {
+        byStatus: {},
+        total: 0,
+        dueNow: 0,
+      };
+    }
+
+    const result = await pool.query(
+      `
+      select
+        session_status,
+        count(*)::int as rows,
+        count(*) filter (where next_poll_after is not null)::int as with_next_poll,
+        count(*) filter (where next_poll_after <= now())::int as due_now
+      from public.tracking_sessions
+      group by session_status
+      order by session_status
+      `
+    );
+
+    const byStatus = {};
+    let total = 0;
+    let dueNow = 0;
+
+    for (const row of result.rows) {
+      const status = String(row.session_status || "unknown");
+      const rows = Number(row.rows || 0);
+      const withNextPoll = Number(row.with_next_poll || 0);
+      const dueCount = Number(row.due_now || 0);
+
+      byStatus[status] = {
+        rows,
+        withNextPoll,
+        dueNow: dueCount,
+      };
+      total += rows;
+      dueNow += dueCount;
+    }
+
+    return {
+      byStatus,
+      total,
+      dueNow,
+    };
+  }
+
   function toISOString(value) {
     if (!value) return null;
     const date = value instanceof Date ? value : new Date(value);
@@ -306,37 +454,130 @@ function createTrackingStore({
       normalized,
       provider: row.provider || normalized.provider || providerName,
       providerFlightId: row.provider_flight_id || row.snapshot_provider_flight_id || null,
+      sessionStatus: String(row.session_status || "").toLowerCase() || "active",
+      nextPollAfter: toISOString(row.next_poll_after) || null,
+      pollingStoppedReason: row.polling_stopped_reason || null,
       lastUpdated,
     };
   }
 
-  function nextPollAfterForNormalized(normalized, now = new Date()) {
+  function sessionStatusForNormalized(normalized) {
     const status = String(normalized?.status || "").toLowerCase();
-    if (["landed", "cancelled", "diverted"].includes(status)) {
-      return null;
+    switch (status) {
+      case "cancelled":
+        return "cancelled";
+      case "landed":
+      case "diverted":
+        return "completed";
+      default:
+        return "active";
     }
+  }
 
-    if (["boarding", "departed", "enroute", "delayed"].includes(status)) {
-      return new Date(now.getTime() + 30_000).toISOString();
+  function trackingWindowExpired(normalized, query, now = new Date()) {
+    const status = String(normalized?.status || "").toLowerCase();
+    if (["departed", "enroute", "landed", "cancelled", "diverted"].includes(status)) {
+      return false;
     }
 
     const departureISO =
       normalized?.departureTimes?.estimated ||
       normalized?.departureTimes?.scheduled ||
       normalized?.departureTimes?.actual;
-    const departureMs = departureISO ? new Date(departureISO).getTime() : NaN;
+    const arrivalISO =
+      normalized?.arrivalTimes?.estimated ||
+      normalized?.arrivalTimes?.scheduled ||
+      normalized?.arrivalTimes?.actual;
+
+    const eventTimes = [departureISO, arrivalISO]
+      .map((value) => new Date(value || "").getTime())
+      .filter(Number.isFinite);
+
+    if (eventTimes.length > 0) {
+      return Math.max(...eventTimes) <= now.getTime() - EXPIRED_TRACKING_WINDOW_GRACE_MS;
+    }
+
+    if (!query?.date) {
+      return false;
+    }
+
+    const travelDateEndMs = new Date(`${query.date}T23:59:59Z`).getTime();
+    if (!Number.isFinite(travelDateEndMs)) {
+      return false;
+    }
+
+    return travelDateEndMs <= now.getTime() - EXPIRED_TRACKING_WINDOW_GRACE_MS;
+  }
+
+  function trackingPolicyForSnapshot(normalized, query, now = new Date()) {
+    if (trackingWindowExpired(normalized, query, now)) {
+      return {
+        sessionStatus: "paused",
+        nextPollAfter: null,
+        pollingStoppedReason: "expired_tracking_window",
+      };
+    }
+
+    return {
+      sessionStatus: sessionStatusForNormalized(normalized),
+      nextPollAfter: nextPollAfterForNormalized(normalized, query, now),
+      pollingStoppedReason: null,
+    };
+  }
+
+  function departureTimeMsForNormalized(normalized) {
+    const departureISO =
+      normalized?.departureTimes?.estimated ||
+      normalized?.departureTimes?.scheduled ||
+      normalized?.departureTimes?.actual;
+    return departureISO ? new Date(departureISO).getTime() : NaN;
+  }
+
+  function arrivalTimeMsForNormalized(normalized) {
+    const arrivalISO =
+      normalized?.arrivalTimes?.estimated ||
+      normalized?.arrivalTimes?.scheduled ||
+      normalized?.arrivalTimes?.actual;
+    return arrivalISO ? new Date(arrivalISO).getTime() : NaN;
+  }
+
+  function postDepartureFinalRefreshAfter(normalized, now = new Date()) {
+    const arrivalMs = arrivalTimeMsForNormalized(normalized);
+    if (Number.isFinite(arrivalMs)) {
+      const bufferedArrivalMs = arrivalMs + POST_DEPARTURE_FINAL_REFRESH_BUFFER_MS;
+      return new Date(Math.max(bufferedArrivalMs, now.getTime() + POST_DEPARTURE_FINAL_REFRESH_BUFFER_MS)).toISOString();
+    }
+
+    return new Date(now.getTime() + POST_DEPARTURE_FALLBACK_POLL_INTERVAL_MS).toISOString();
+  }
+
+  function nextPollAfterForNormalized(normalized, query, now = new Date()) {
+    const status = String(normalized?.status || "").toLowerCase();
+    if (["landed", "cancelled", "diverted"].includes(status)) {
+      return null;
+    }
+
+    if (status === "departed" || status === "enroute") {
+      return postDepartureFinalRefreshAfter(normalized, now);
+    }
+
+    const departureMs = departureTimeMsForNormalized(normalized);
 
     if (Number.isFinite(departureMs)) {
       const secondsUntilDeparture = Math.round((departureMs - now.getTime()) / 1000);
       if (secondsUntilDeparture <= 2 * 60 * 60) {
-        return new Date(now.getTime() + 3 * 60_000).toISOString();
+        return new Date(now.getTime() + IMMINENT_DEPARTURE_POLL_INTERVAL_MS).toISOString();
       }
       if (secondsUntilDeparture <= 12 * 60 * 60) {
-        return new Date(now.getTime() + 10 * 60_000).toISOString();
+        return new Date(now.getTime() + PRE_DEPARTURE_POLL_INTERVAL_MS).toISOString();
       }
     }
 
-    return new Date(now.getTime() + 30 * 60_000).toISOString();
+    if (status === "boarding" || status === "delayed") {
+      return new Date(now.getTime() + IMMINENT_DEPARTURE_POLL_INTERVAL_MS).toISOString();
+    }
+
+    return new Date(now.getTime() + FAR_FUTURE_POLL_INTERVAL_MS).toISOString();
   }
 
   async function findReusableTrackingSession({
@@ -476,7 +717,10 @@ function createTrackingStore({
       throw new Error("Tracking persistence requires DATABASE_URL pointing at Supabase Postgres.");
     }
 
-    const nextPollAfter = nextPollAfterForNormalized(normalized);
+    const trackingPolicy = trackingPolicyForSnapshot(normalized, query);
+    const nextPollAfter = trackingPolicy.nextPollAfter;
+    const sessionStatus = trackingPolicy.sessionStatus;
+    const pollingStoppedReason = trackingPolicy.pollingStoppedReason;
     const displayCode = displayFlightCode(normalized);
     const scheduledDeparture =
       normalized?.departureTimes?.scheduled ||
@@ -502,6 +746,8 @@ function createTrackingStore({
         travel_date = $8::date,
         metadata_json = jsonb_build_object('query', $9::jsonb),
         next_poll_after = $10::timestamptz,
+        session_status = $11,
+        polling_stopped_reason = $12,
         updated_at = now()
       where id = $1::uuid
       `,
@@ -516,6 +762,8 @@ function createTrackingStore({
         query.date,
         JSON.stringify(query),
         nextPollAfter,
+        sessionStatus,
+        pollingStoppedReason,
       ]
     );
 
@@ -668,6 +916,17 @@ function createTrackingStore({
     });
 
     if (!flightId) {
+      if (Number.isFinite(maxActiveTrackingSessionsPerUser) && maxActiveTrackingSessionsPerUser > 0) {
+        const activeSessionCount = await countActiveTrackingSessionsForUser(userId);
+        if (activeSessionCount >= maxActiveTrackingSessionsPerUser) {
+          const error = new Error(
+            `Active tracking limit reached (${maxActiveTrackingSessionsPerUser}). Pause or complete older tracked flights before adding more.`
+          );
+          error.code = "TRACKING_LIMIT_REACHED";
+          throw error;
+        }
+      }
+
       const inserted = await pool.query(
         `
         insert into public.tracking_sessions (
@@ -747,8 +1006,9 @@ function createTrackingStore({
       from public.tracking_sessions ts
       left join public.live_snapshots ls
         on ls.tracking_session_id = ts.id
-      where ts.session_status in ('pending', 'active', 'paused', 'errored')
-        and (ts.next_poll_after is null or ts.next_poll_after <= now())
+      where ts.session_status in ('pending', 'active', 'errored')
+        and ts.next_poll_after is not null
+        and ts.next_poll_after <= now()
       order by coalesce(ts.next_poll_after, ts.created_at) asc
       limit $1
       `,
@@ -766,21 +1026,24 @@ function createTrackingStore({
       update public.tracking_sessions
       set
         session_status = 'errored',
-        next_poll_after = now() + interval '10 minutes',
-        polling_stopped_reason = left(coalesce($2, 'provider_error'), 256),
+        next_poll_after = now() + make_interval(mins => $2::int),
+        polling_stopped_reason = left(coalesce($3, 'provider_error'), 256),
         updated_at = now()
       where id = $1::uuid
       `,
-      [flightId, reason || null]
+      [flightId, ERRORED_RETRY_INTERVAL_MINUTES, reason || null]
     );
   }
 
   return {
+    countActiveTrackingSessionsForUser,
     createOrReuseTrackingSession,
     disablePushToken,
     disablePushTokensForDevice,
     ensureDatabaseSchema,
+    fetchTrackingSessionStatusSummary,
     fetchAccessibleTrackingRow,
+    listTrackedFlightsByProviderFlightId,
     fetchTrackingRowByID,
     listDueTrackingRows,
     listPushTokensForFlight,

@@ -7,6 +7,7 @@ function createTrackingPollerRuntime({
   markTrackingRowErrored,
   pollerIntervalMs,
   pollerBatchSize,
+  logPollerSummary,
   providerName,
 }) {
   let pollerTimer = null;
@@ -18,13 +19,23 @@ function createTrackingPollerRuntime({
     pollerInFlight = true;
     try {
       const trackedRows = await listDueTrackingRows(pollerBatchSize);
+      let refreshedCount = 0;
+      let errorCount = 0;
 
       for (const tracked of trackedRows) {
         try {
           await refreshTrackedFlightRecord(tracked);
+          refreshedCount += 1;
         } catch (error) {
+          errorCount += 1;
           await markTrackingRowErrored(tracked.flightId, error?.message || String(error));
         }
+      }
+
+      if (logPollerSummary && (trackedRows.length > 0 || errorCount > 0)) {
+        console.log(
+          `Tracking poller cycle provider=${providerName} due=${trackedRows.length} refreshed=${refreshedCount} errors=${errorCount} batchSize=${pollerBatchSize}`
+        );
       }
     } finally {
       pollerInFlight = false;

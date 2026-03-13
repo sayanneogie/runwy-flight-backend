@@ -6,7 +6,9 @@
   "main": "src/server.js",
   "type": "commonjs",
   "scripts": {
+    "build:airports": "node scripts/build-airports-dataset.js",
     "doctor": "node scripts/doctor.js",
+    "test": "node --test test/*.test.js",
     "start": "npm run start:api",
     "start:api": "ENABLE_TRACKING_POLLER=false node src/server.js",
     "start:poller": "node src/flight-poller.js",

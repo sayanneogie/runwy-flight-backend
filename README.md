@@ -55,6 +55,33 @@ Returns runtime configuration summary:
 - whether APNs keys are configured
 - whether the poller is running in this process
 
+### GET `/v1/airports`
+Returns the airport catalog used by the iOS app to resolve IATA codes into names, cities, and coordinates.
+
+Response (shape):
+```json
+{
+  "version": "ourairports-2026-03-11",
+  "airports": [
+    {
+      "code": "MNL",
+      "name": "Ninoy Aquino International Airport",
+      "city": "Pasay / Manila",
+      "countryCode": "PH",
+      "coordinate": { "latitude": 14.5086, "longitude": 121.0198 }
+    }
+  ],
+  "aliases": {
+    "Manila": "MNL",
+    "Ninoy Aquino International Airport": "MNL"
+  }
+}
+```
+
+Notes:
+- This endpoint is intentionally readable without bearer auth so the app can refresh airport metadata on launch.
+- The checked-in catalog is generated from OurAirports via `npm run build:airports`.
+
 ### POST `/v1/track`
 Request:
 ```json

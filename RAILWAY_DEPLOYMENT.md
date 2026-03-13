@@ -59,10 +59,31 @@ Optional tuning for the poller service:
 
 - `POLLER_INTERVAL_MS`
 - `POLLER_BATCH_SIZE`
+- `TRACKING_POLLER_LOG_SUMMARY`
+- `WEBHOOK_REFRESH_MIN_INTERVAL_MS`
 
 Optional shared fetch tuning:
 
+- `CACHE_TTL_MS`
+- `FLIGHTAWARE_POSITION_CACHE_TTL_MS`
 - `STALE_FETCH_REFRESH_THRESHOLD_MS`
+- `SEARCH_LIVE_ENRICH_LIMIT`
+- `FLIGHTAWARE_ENABLE_MAP_FALLBACK`
+- `DISABLE_PROVIDER_CALLS`
+- `PROVIDER_CALLS_ENABLED`
+
+Optional safety rails:
+
+- `MAX_ACTIVE_TRACKING_SESSIONS_PER_USER`
+
+Notes:
+
+- `MAX_ACTIVE_TRACKING_SESSIONS_PER_USER` defaults to `20` outside production and effectively disabled in production.
+- Set `MAX_ACTIVE_TRACKING_SESSIONS_PER_USER=0` to disable the limit explicitly.
+- `FLIGHTAWARE_ENABLE_MAP_FALLBACK` defaults to `false` to avoid expensive map fallback calls unless you intentionally enable them.
+- `WEBHOOK_REFRESH_MIN_INTERVAL_MS` defaults to `900000` (15 minutes) so repeated webhook bursts do not keep re-refreshing the same tracked flight.
+- Set `DISABLE_PROVIDER_CALLS=true` for an emergency hard stop on all provider-backed FlightAware/Aviationstack fetches. Stored tracked data and past-flight data remain readable, but new search/track requests will stop using the provider.
+- `PROVIDER_CALLS_ENABLED=false` is supported as an equivalent positive/negative toggle if you prefer that style.
 
 ## Recommended Railway Settings
 
@@ -87,6 +108,7 @@ Expected API health response:
 - `ok: true`
 - `persistence: "supabase-postgres"`
 - `pollerEnabled: false`
+- `providerCallsEnabled: true` unless you intentionally enable the hard stop
 
 ## Rollout Order
 
