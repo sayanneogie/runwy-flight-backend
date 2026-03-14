@@ -53,7 +53,7 @@ const STALE_FETCH_REFRESH_THRESHOLD_MS = toPositiveNumber(
 const ENABLE_TRACKING_POLLER = String(process.env.ENABLE_TRACKING_POLLER || "false").toLowerCase() === "true";
 const FLIGHTAWARE_ENABLE_MAP_FALLBACK =
   String(process.env.FLIGHTAWARE_ENABLE_MAP_FALLBACK || "false").toLowerCase() === "true";
-const SEARCH_LIVE_ENRICH_LIMIT = toPositiveNumber(process.env.SEARCH_LIVE_ENRICH_LIMIT, 1);
+const SEARCH_LIVE_ENRICH_LIMIT = toNonNegativeNumber(process.env.SEARCH_LIVE_ENRICH_LIMIT, 0);
 const TRACKING_POLLER_LOG_SUMMARY =
   String(process.env.TRACKING_POLLER_LOG_SUMMARY || "true").toLowerCase() === "true";
 const MAX_ACTIVE_TRACKING_SESSIONS_PER_USER = toNonNegativeNumber(

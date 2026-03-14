@@ -1,9 +1,9 @@
-const IMMINENT_DEPARTURE_POLL_INTERVAL_MS = 10 * 60_000;
-const PRE_DEPARTURE_POLL_INTERVAL_MS = 90 * 60_000;
+const IMMINENT_DEPARTURE_POLL_INTERVAL_MS = 15 * 60_000;
+const PRE_DEPARTURE_POLL_INTERVAL_MS = 2 * 60 * 60_000;
 const FAR_FUTURE_POLL_INTERVAL_MS = 24 * 60 * 60_000;
 const POST_DEPARTURE_FINAL_REFRESH_BUFFER_MS = 15 * 60_000;
 const POST_DEPARTURE_FALLBACK_POLL_INTERVAL_MS = 3 * 60 * 60_000;
-const ERRORED_RETRY_INTERVAL_MINUTES = 30;
+const ERRORED_RETRY_INTERVAL_MINUTES = 60;
 const EXPIRED_TRACKING_WINDOW_GRACE_MS = 12 * 60 * 60_000;
 
 function createTrackingStore({
@@ -1015,7 +1015,35 @@ function createTrackingStore({
       [limit]
     );
 
-    return result.rows.map(mapTrackingRow).filter(Boolean);
+    const mappedRows = result.rows.map(mapTrackingRow).filter(Boolean);
+    const expiredRows = [];
+    const dueRows = [];
+
+    for (const row of mappedRows) {
+      if (trackingWindowExpired(row.normalized, row.query)) {
+        expiredRows.push(row);
+      } else {
+        dueRows.push(row);
+      }
+    }
+
+    if (expiredRows.length > 0) {
+      await pool.query(
+        `
+        update public.tracking_sessions
+        set
+          session_status = 'paused',
+          next_poll_after = null,
+          polling_stopped_reason = 'expired_tracking_window',
+          updated_at = now()
+        where id = any($1::uuid[])
+          and session_status in ('pending', 'active', 'errored')
+        `,
+        [expiredRows.map((row) => row.flightId)]
+      );
+    }
+
+    return dueRows;
   }
 
   async function markTrackingRowErrored(flightId, reason) {

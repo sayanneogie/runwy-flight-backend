@@ -3,11 +3,14 @@ const assert = require("node:assert/strict");
 
 const { createTrackingStore } = require("../src/tracking-store");
 
-function makeStore() {
+function makeStore(options = {}) {
   const queries = [];
   const pool = {
     async query(sql, params = []) {
       queries.push({ sql, params });
+      if (typeof options.queryHandler === "function") {
+        return options.queryHandler(sql, params, queries);
+      }
       return { rows: [] };
     },
   };
@@ -123,7 +126,7 @@ test("far future flights poll once per day", async () => {
   assertApproxDuration(nextPollAfterMs - now, 24 * 60 * 60_000);
 });
 
-test("flights within 12 hours poll every 90 minutes", async () => {
+test("flights within 12 hours poll every 2 hours", async () => {
   const now = Date.now();
   const departure = new Date(now + 8 * 60 * 60_000).toISOString();
   const params = await persistSnapshot(
@@ -139,10 +142,10 @@ test("flights within 12 hours poll every 90 minutes", async () => {
   );
 
   const nextPollAfterMs = new Date(params[9]).getTime();
-  assertApproxDuration(nextPollAfterMs - now, 90 * 60_000);
+  assertApproxDuration(nextPollAfterMs - now, 2 * 60 * 60_000);
 });
 
-test("flights within 2 hours poll every 10 minutes", async () => {
+test("flights within 2 hours poll every 15 minutes", async () => {
   const now = Date.now();
   const departure = new Date(now + 90 * 60_000).toISOString();
   const params = await persistSnapshot(
@@ -158,7 +161,7 @@ test("flights within 2 hours poll every 10 minutes", async () => {
   );
 
   const nextPollAfterMs = new Date(params[9]).getTime();
-  assertApproxDuration(nextPollAfterMs - now, 10 * 60_000);
+  assertApproxDuration(nextPollAfterMs - now, 15 * 60_000);
 });
 
 test("departed flights schedule a single final arrival-based refresh", async () => {
@@ -204,4 +207,66 @@ test("landed flights complete tracking and stop polling", async () => {
 
   assert.equal(params[9], null);
   assert.equal(params[10], "completed");
+});
+
+test("expired due rows are paused before returning to the poller", async () => {
+  const now = new Date().toISOString();
+  const staleTravelDate = "2026-03-10";
+  const { store, queries } = makeStore({
+    queryHandler(sql) {
+      if (sql.includes("from public.tracking_sessions ts") && sql.includes("ts.next_poll_after <=")) {
+        return {
+          rows: [
+            {
+              id: "11111111-1111-1111-1111-111111111111",
+              owner_user_id: "22222222-2222-2222-2222-222222222222",
+              provider: "flightaware",
+              provider_flight_id: "FAKE123",
+              flight_number: "AI203",
+              airline_code: "AI",
+              origin_iata: "DEL",
+              destination_iata: "BOM",
+              travel_date: staleTravelDate,
+              metadata_json: {
+                query: {
+                  flightNumber: "AI203",
+                  date: staleTravelDate,
+                  departureIata: "DEL",
+                  arrivalIata: "BOM",
+                },
+              },
+              session_status: "active",
+              next_poll_after: "2026-03-13T09:00:00.000Z",
+              polling_stopped_reason: null,
+              last_snapshot_at: now,
+              updated_at: now,
+              canonical_snapshot_json: {
+                airlineCode: "AI",
+                flightNumber: "AI203",
+                departureAirportIata: "DEL",
+                arrivalAirportIata: "BOM",
+                status: "scheduled",
+                departureTimes: { scheduled: "2026-03-10T10:00:00.000Z" },
+                arrivalTimes: { scheduled: "2026-03-10T12:00:00.000Z" },
+                lastUpdated: now,
+              },
+              provider_last_updated_at: now,
+              snapshot_updated_at: now,
+            },
+          ],
+        };
+      }
+
+      return { rows: [] };
+    },
+  });
+
+  const dueRows = await store.listDueTrackingRows();
+  assert.equal(dueRows.length, 0);
+
+  const pauseUpdate = queries.find(
+    ({ sql }) => sql.includes("update public.tracking_sessions") && sql.includes("expired_tracking_window")
+  );
+  assert.ok(pauseUpdate, "expected expired rows to be paused");
+  assert.deepEqual(pauseUpdate.params[0], ["11111111-1111-1111-1111-111111111111"]);
 });
