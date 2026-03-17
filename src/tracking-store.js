@@ -1048,6 +1048,39 @@ function createTrackingStore({
     return dueRows;
   }
 
+  async function listFirehoseTrackedRows() {
+    if (!usesDatabase()) return [];
+
+    const result = await pool.query(
+      `
+      select
+        ts.*,
+        ls.provider as snapshot_provider,
+        ls.provider_flight_id as snapshot_provider_flight_id,
+        ls.snapshot_status,
+        ls.terminal,
+        ls.gate,
+        ls.baggage_claim,
+        ls.delay_minutes,
+        ls.departure_times_json,
+        ls.arrival_times_json,
+        ls.alerts_json,
+        ls.metrics_json,
+        ls.canonical_snapshot_json,
+        ls.raw_provider_payload_json,
+        ls.provider_last_updated_at,
+        ls.updated_at as snapshot_updated_at
+      from public.tracking_sessions ts
+      left join public.live_snapshots ls
+        on ls.tracking_session_id = ts.id
+      where ts.session_status in ('pending', 'active', 'errored')
+      order by ts.updated_at desc
+      `
+    );
+
+    return result.rows.map(mapTrackingRow).filter(Boolean);
+  }
+
   async function markTrackingRowErrored(flightId, reason) {
     if (!usesDatabase()) return;
 
@@ -1094,6 +1127,7 @@ function createTrackingStore({
     fetchAccessibleTrackingRow,
     listTrackedFlightsByProviderFlightId,
     fetchTrackingRowByID,
+    listFirehoseTrackedRows,
     listDueTrackingRows,
     listPushTokensForFlight,
     listTrackedFlightsByFlightNumber,

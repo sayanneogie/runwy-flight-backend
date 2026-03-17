@@ -12,10 +12,12 @@
     "start": "npm run start:api",
     "start:api": "ENABLE_TRACKING_POLLER=false node src/server.js",
     "start:poller": "node src/flight-poller.js",
+    "start:firehose": "node src/flight-firehose.js",
     "start:all": "ENABLE_TRACKING_POLLER=true node src/server.js",
     "dev": "npm run dev:api",
     "dev:api": "ENABLE_TRACKING_POLLER=false node --watch src/server.js",
-    "dev:poller": "node --watch src/flight-poller.js"
+    "dev:poller": "node --watch src/flight-poller.js",
+    "dev:firehose": "node --watch src/flight-firehose.js"
   },
   "engines": {
     "node": ">=18.18"

@@ -3,6 +3,10 @@
 This backend now expects two Railway services:
 
 - `runwy-api`
+- `runwy-flight-firehose`
+
+Optional fallback only:
+
 - `runwy-flight-poller`
 
 Both services deploy from the same repo path:
@@ -23,11 +27,17 @@ Both services deploy from the same repo path:
 - healthcheck path: none
 - public domain: not required
 
-The API service should not run the poller loop. The worker owns polling.
+### Firehose service
+
+- start command: `node src/flight-firehose.js`
+- healthcheck path: none
+- public domain: not required
+
+The API service should not run the poller loop or Firehose loop. Dedicated workers own live refresh.
 
 ## Shared Required Variables
 
-Set these on both services:
+Set these on API + Firehose services:
 
 - `DATABASE_URL`
 - `DATABASE_SSL`
@@ -53,6 +63,33 @@ Set these on the API service if needed:
 - `APNS_PRIVATE_KEY`
 - `APNS_PRIVATE_KEY_BASE64`
 - `APNS_USE_SANDBOX`
+
+## Firehose-only Variables
+
+Set these on `runwy-flight-firehose`:
+
+- `ENABLE_FIREHOSE_WORKER=true`
+- `ENABLE_TRACKING_POLLER=false`
+- `FIREHOSE_HOST`
+- `FIREHOSE_PORT`
+- `FIREHOSE_USERNAME`
+- `FIREHOSE_PASSWORD`
+- `FIREHOSE_VERSION`
+- `FIREHOSE_USER_AGENT`
+- `FIREHOSE_EVENTS`
+- `FIREHOSE_KEEPALIVE_SECONDS`
+- `FIREHOSE_MIN_SECONDS_BETWEEN_AIRBORNE`
+- `FIREHOSE_TRACKED_SET_REFRESH_MS`
+- `FIREHOSE_RECONNECT_DELAY_MS`
+- `FIREHOSE_TRACK_LOOKAHEAD_HOURS`
+- `FIREHOSE_POST_ARRIVAL_BUFFER_MINUTES`
+
+Recommended on the Firehose worker:
+
+- `DISABLE_PROVIDER_CALLS=true`
+- `PROVIDER_CALLS_ENABLED=false`
+
+That lets the worker stream/write snapshots without making AeroAPI refresh calls.
 
 ## Poller-only Variables
 
@@ -111,6 +148,7 @@ Expected API health response:
 - `ok: true`
 - `persistence: "supabase-postgres"`
 - `pollerEnabled: false`
+- `firehoseEnabled: false`
 - `providerCallsEnabled: true` unless you intentionally enable the hard stop
 
 ## Rollout Order
@@ -118,9 +156,10 @@ Expected API health response:
 1. Apply Supabase migrations.
 2. Deploy or restart `runwy-api`.
 3. Confirm `GET /health` returns `200`.
-4. Deploy or restart `runwy-flight-poller`.
-5. Confirm worker logs show `Flight poller worker started`.
-6. Run [LIVE_TRACKING_VERIFICATION.md](/Users/sayanneogie/Documents/New%20project/runwy/LIVE_TRACKING_VERIFICATION.md).
+4. Deploy or restart `runwy-flight-firehose`.
+5. Confirm worker logs show `FlightAware Firehose worker starting`.
+6. Only if you still want a safety fallback, deploy or restart `runwy-flight-poller`.
+7. Run [LIVE_TRACKING_VERIFICATION.md](/Users/sayanneogie/Documents/New%20project/runwy/LIVE_TRACKING_VERIFICATION.md).
 
 ## Failure Checks
 
@@ -135,6 +174,13 @@ If the poller starts but no rows update:
 - confirm `tracking_sessions.next_poll_after` is due for active sessions
 - confirm provider credentials are valid
 
+If the Firehose worker starts but no rows update:
+
+- confirm your Firehose trial includes real-time data, not historical-only replay
+- confirm `FIREHOSE_USERNAME` and `FIREHOSE_PASSWORD` are correct
+- confirm tracked sessions are within the Firehose lookahead window
+- confirm the worker logs show successful socket connection rather than immediate disconnect
+
 If Railway keeps redeploying both services for unrelated app changes:
 
 - verify Railway is connected to the backend-only repo and root directory is `/`
@@ -145,6 +191,7 @@ Use direct Node entrypoints in Railway:
 
 - API: `node src/server.js`
 - Poller: `node src/flight-poller.js`
+- Firehose: `node src/flight-firehose.js`
 
 This avoids the noisy npm runtime warning:
 

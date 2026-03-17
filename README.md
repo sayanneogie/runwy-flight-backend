@@ -6,6 +6,9 @@ Supported providers:
 - Aviationstack
 - FlightAware AeroAPI
 
+Optional live-tracking transport:
+- FlightAware Firehose
+
 ## Why this exists
 - The iOS app never receives or stores provider API keys.
 - Rate limiting protects provider quota.
@@ -13,6 +16,7 @@ Supported providers:
 - Response format is normalized into a provider-agnostic tracked-flight model.
 - Optional Postgres persistence stores tracking sessions, live snapshots, and push devices.
 - Optional APNs dispatch sends delay/cancellation pushes to subscribed devices.
+- Optional FlightAware Firehose worker streams live tracked-flight updates into `live_snapshots` for the iOS app.
 
 ## Requirements
 - Node.js 18+
@@ -22,6 +26,7 @@ Supported providers:
 - Optional but recommended:
   - `DATABASE_URL` for durable tracked-flight + device storage
   - APNs key configuration for true background push alerts
+  - Firehose credentials if you want moving live tracked flights without a poller
 
 ## Setup
 1. Copy env template:
@@ -38,6 +43,7 @@ Supported providers:
    - Preflight checks: `npm run doctor`
    - API only: `npm run start:api`
    - Poller worker: `npm run start:poller`
+   - Firehose worker: `npm run start:firehose`
    - Single-process fallback: `npm run start:all`
    - API defaults to `http://localhost:8787`
 9. Deploy on Railway:
@@ -54,6 +60,7 @@ Returns runtime configuration summary:
 - persistence mode (`memory` or `postgres`)
 - whether APNs keys are configured
 - whether the poller is running in this process
+- whether a Firehose worker is configured/running in this process
 
 ### GET `/v1/airports`
 Returns the airport catalog used by the iOS app to resolve IATA codes into names, cities, and coordinates.
@@ -77,6 +84,10 @@ Response (shape):
   }
 }
 ```
+
+Notes:
+- `/v1/track` still uses AeroAPI for the initial flight lookup and session creation.
+- Continuous live movement should come from the Firehose worker writing new `live_snapshots` rows, which the iOS app already consumes through Supabase realtime.
 
 Notes:
 - This endpoint is intentionally readable without bearer auth so the app can refresh airport metadata on launch.
@@ -183,6 +194,9 @@ If `WEBHOOK_SHARED_SECRET` is set, authenticate either way:
 - Keep logs generic; never log secrets.
 - Railway should be split into at least two services:
   - API service: `node src/server.js`
+  - Firehose worker: `node src/flight-firehose.js`
+- Poller is now optional and should stay off unless you intentionally want it as a fallback:
   - Poller worker: `node src/flight-poller.js`
 - On Railway, prefer direct Node start commands over `npm run ...` to avoid npm runtime warnings.
 - If you use a custom API command, keep `ENABLE_TRACKING_POLLER=false`.
+- For a Firehose-only worker, it is fine to set `DISABLE_PROVIDER_CALLS=true` there so the worker does not make AeroAPI refresh calls.
