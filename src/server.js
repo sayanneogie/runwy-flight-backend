@@ -547,6 +547,42 @@ function normalizeStatus(rawStatus) {
   return "scheduled";
 }
 
+function reconcileOperationalStatus(normalized) {
+  if (!normalized || typeof normalized !== "object") {
+    return normalized;
+  }
+
+  const landingActual = normalized.landingTimes?.actual || normalized.arrivalTimes?.actual;
+  if (landingActual) {
+    return {
+      ...normalized,
+      status: "landed",
+    };
+  }
+
+  const airborneSignal =
+    normalized.livePosition ||
+    normalized.takeoffTimes?.actual ||
+    (Number.isFinite(Number(normalized.progressPercent)) && Number(normalized.progressPercent) > 0);
+
+  if (airborneSignal) {
+    return {
+      ...normalized,
+      status: "enroute",
+    };
+  }
+
+  const departedSignal = normalized.departureTimes?.actual || normalized.takeoffTimes?.estimated;
+  if (departedSignal && ["cancelled", "scheduled", "boarding", "delayed"].includes(normalized.status)) {
+    return {
+      ...normalized,
+      status: "departed",
+    };
+  }
+
+  return normalized;
+}
+
 function isoOrNull(value) {
   if (!value) return null;
 
@@ -1140,7 +1176,7 @@ function sortSearchRecords(records, query, normalizer) {
 
 function bestMatch(records, query, normalizer) {
   if (!records.length) return null;
-  return [...records].sort((a, b) => scoreCandidate(b, query, normalizer) - scoreCandidate(a, query, normalizer))[0];
+  return sortSearchRecords(records, query, normalizer)[0];
 }
 
 function deriveRecentHistory(records, selectedRecord, normalizer) {
@@ -1328,7 +1364,7 @@ function providerAdapter(preferredProvider = FLIGHT_DATA_PROVIDER) {
 }
 
 function normalizeWithContext(record, records, query, normalizer, previousNormalized = null) {
-  const normalized = normalizer(record);
+  const normalized = reconcileOperationalStatus(normalizer(record));
   const recentHistory = deriveRecentHistory(records, record, normalizer);
   const alerts = deriveAlertFlags(previousNormalized, normalized);
 
@@ -1394,8 +1430,10 @@ async function enrichNormalizedWithLivePosition(normalized, providerName, rawRec
     }
 
     return {
-      ...normalized,
-      livePosition,
+      ...reconcileOperationalStatus({
+        ...normalized,
+        livePosition,
+      }),
     };
   } catch (error) {
     console.warn(
