@@ -446,11 +446,13 @@ function createTrackingStore({
     if (!row) return null;
     const normalized = normalizedForTrackingRow(row);
     const lastUpdated = normalized.lastUpdated || toISOString(row.snapshot_updated_at || row.updated_at) || new Date().toISOString();
+    const metadata = row?.metadata_json && typeof row.metadata_json === "object" ? row.metadata_json : {};
 
     return {
       flightId: String(row.id),
       ownerUserId: String(row.owner_user_id),
       query: queryForTrackingRow(row),
+      metadata,
       normalized,
       provider: row.provider || normalized.provider || providerName,
       providerFlightId: row.provider_flight_id || row.snapshot_provider_flight_id || null,
@@ -744,7 +746,7 @@ function createTrackingStore({
         origin_iata = $6,
         destination_iata = $7,
         travel_date = $8::date,
-        metadata_json = jsonb_build_object('query', $9::jsonb),
+        metadata_json = coalesce(metadata_json, '{}'::jsonb) || jsonb_build_object('query', $9::jsonb),
         next_poll_after = $10::timestamptz,
         session_status = $11,
         polling_stopped_reason = $12,
@@ -1063,6 +1065,25 @@ function createTrackingStore({
     );
   }
 
+  async function mergeTrackingSessionMetadata(flightId, metadataPatch) {
+    if (!usesDatabase()) return null;
+
+    const patch = metadataPatch && typeof metadataPatch === "object" ? metadataPatch : {};
+    const result = await pool.query(
+      `
+      update public.tracking_sessions
+      set
+        metadata_json = coalesce(metadata_json, '{}'::jsonb) || $2::jsonb,
+        updated_at = now()
+      where id = $1::uuid
+      returning metadata_json
+      `,
+      [flightId, JSON.stringify(patch)]
+    );
+
+    return result.rows[0]?.metadata_json || null;
+  }
+
   return {
     countActiveTrackingSessionsForUser,
     createOrReuseTrackingSession,
@@ -1077,6 +1098,7 @@ function createTrackingStore({
     listPushTokensForFlight,
     listTrackedFlightsByFlightNumber,
     markTrackingRowErrored,
+    mergeTrackingSessionMetadata,
     persistTrackingSnapshot,
     providerFlightIdentifier,
     upsertPushDevice,

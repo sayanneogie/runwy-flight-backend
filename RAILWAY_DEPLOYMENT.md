@@ -46,6 +46,7 @@ Set these on the API service if needed:
 - `PORT`
 - `ENABLE_TRACKING_POLLER=false`
 - `WEBHOOK_SHARED_SECRET`
+- `WEBHOOK_PUBLIC_BASE_URL` (optional override if the public webhook URL should not be inferred from the request host)
 - `APNS_KEY_ID`
 - `APNS_TEAM_ID`
 - `APNS_BUNDLE_ID`
@@ -82,6 +83,8 @@ Notes:
 - Set `MAX_ACTIVE_TRACKING_SESSIONS_PER_USER=0` to disable the limit explicitly.
 - `FLIGHTAWARE_ENABLE_MAP_FALLBACK` defaults to `false` to avoid expensive map fallback calls unless you intentionally enable them.
 - `WEBHOOK_REFRESH_MIN_INTERVAL_MS` defaults to `900000` (15 minutes) so repeated webhook bursts do not keep re-refreshing the same tracked flight.
+- When wiring FlightAware alerts, prefer a webhook URL like `/v1/webhooks/flightaware?secret=...` so the provider can authenticate without relying on custom headers.
+- Runwy auto-creates FlightAware post alerts from `/v1/track` when provider calls are enabled and `WEBHOOK_SHARED_SECRET` is set.
 - Set `DISABLE_PROVIDER_CALLS=true` for an emergency hard stop on all provider-backed FlightAware/Aviationstack fetches. Stored tracked data and past-flight data remain readable, but new search/track requests will stop using the provider.
 - `PROVIDER_CALLS_ENABLED=false` is supported as an equivalent positive/negative toggle if you prefer that style.
 

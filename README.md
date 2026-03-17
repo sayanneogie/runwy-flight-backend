@@ -93,6 +93,10 @@ Request:
 }
 ```
 
+Notes:
+- When provider calls are enabled and `WEBHOOK_SHARED_SECRET` is configured, Runwy now attempts to auto-create a FlightAware post alert for the tracked flight so webhook updates can arrive without manual alert setup.
+- The webhook target is inferred from the incoming request host by default. If you need to override it behind a proxy/custom domain setup, set `WEBHOOK_PUBLIC_BASE_URL`.
+
 Response (shape):
 ```json
 {
@@ -168,8 +172,9 @@ Provider webhook endpoint that refreshes matched tracked flights and dispatches 
 - `delayedNow`
 - `cancelledNow`
 
-If `WEBHOOK_SHARED_SECRET` is set, send it in:
-- `X-Runwy-Webhook-Secret: <secret>`
+If `WEBHOOK_SHARED_SECRET` is set, authenticate either way:
+- query string: `/v1/webhooks/flightaware?secret=<secret>`
+- or header: `X-Runwy-Webhook-Secret: <secret>`
 
 ## Deployment notes
 - Put this service behind HTTPS and a reverse proxy in production.

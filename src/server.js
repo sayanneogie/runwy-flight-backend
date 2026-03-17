@@ -6,7 +6,12 @@ const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const { Pool } = require("pg");
 const { getAirportCatalog } = require("./airport-catalog");
-const { validatePushTokenPayload, validateSearchQuery, validateTrackPayload } = require("./request-schemas");
+const {
+  validatePushTokenPayload,
+  validateRouteSearchQuery,
+  validateSearchQuery,
+  validateTrackPayload,
+} = require("./request-schemas");
 const { createTrackingStore } = require("./tracking-store");
 const { createTrackingPollerRuntime } = require("./tracking-poller-runtime");
 
@@ -23,6 +28,14 @@ const FLIGHTAWARE_API_KEY = process.env.FLIGHTAWARE_API_KEY;
 const FLIGHTAWARE_BASE_URL = requireHTTPSBaseURL(
   "FLIGHTAWARE_BASE_URL",
   process.env.FLIGHTAWARE_BASE_URL || "https://aeroapi.flightaware.com/aeroapi"
+);
+const WEBHOOK_PUBLIC_BASE_URL = optionalHTTPSBaseURL(
+  "WEBHOOK_PUBLIC_BASE_URL",
+  process.env.WEBHOOK_PUBLIC_BASE_URL ||
+    process.env.PUBLIC_BASE_URL ||
+    (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : "") ||
+    process.env.RAILWAY_STATIC_URL ||
+    ""
 );
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -79,6 +92,21 @@ const APNS_BUNDLE_ID = process.env.APNS_BUNDLE_ID || "";
 const APNS_PRIVATE_KEY = process.env.APNS_PRIVATE_KEY || "";
 const APNS_PRIVATE_KEY_BASE64 = process.env.APNS_PRIVATE_KEY_BASE64 || "";
 const APNS_USE_SANDBOX = String(process.env.APNS_USE_SANDBOX || "true").toLowerCase() === "true";
+const FLIGHTAWARE_AUTO_ALERT_EVENTS = Object.freeze({
+  arrival: true,
+  cancelled: true,
+  departure: true,
+  diverted: true,
+  filed: true,
+  out: false,
+  off: true,
+  on: true,
+  in: false,
+  hold_start: false,
+  hold_end: false,
+});
+const FLIGHTAWARE_AUTO_ALERT_IMPENDING_DEPARTURE_MINUTES = Object.freeze([120, 60, 15]);
+const FLIGHTAWARE_AUTO_ALERT_IMPENDING_ARRIVAL_MINUTES = Object.freeze([30]);
 
 if (PROVIDER_CALLS_ENABLED && FLIGHT_DATA_PROVIDER === "aviationstack" && !AVIATIONSTACK_KEY) {
   console.error("Missing AVIATIONSTACK_KEY environment variable.");
@@ -198,6 +226,30 @@ function requireHTTPSBaseURL(envName, value) {
   if (parsed.protocol !== "https:") {
     console.error(`${envName} must use HTTPS: ${value}`);
     process.exit(1);
+  }
+
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+function optionalHTTPSBaseURL(envName, value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "";
+  return requireHTTPSBaseURL(envName, normalized);
+}
+
+function safeHTTPSBaseURL(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "";
+
+  let parsed;
+  try {
+    parsed = new URL(normalized);
+  } catch (_error) {
+    return "";
+  }
+
+  if (parsed.protocol !== "https:") {
+    return "";
   }
 
   return parsed.toString().replace(/\/+$/, "");
@@ -349,6 +401,46 @@ function normalizedHeaderDeviceID(req) {
   const raw = String(req.get("X-Device-Id") || "").trim();
   if (!raw) return null;
   return raw.slice(0, 128);
+}
+
+function webhookSecretFromRequest(req) {
+  const headerSecret = String(req.get("X-Runwy-Webhook-Secret") || "").trim();
+  if (headerSecret) {
+    return headerSecret;
+  }
+
+  const secretQueryValue =
+    req.query?.secret ||
+    req.query?.token ||
+    req.query?.webhook_secret ||
+    req.query?.webhookSecret;
+  const querySecret = String(secretQueryValue || "").trim();
+  return querySecret || "";
+}
+
+function inferredHTTPSBaseURLFromRequest(req) {
+  const forwardedHost = String(req.get("X-Forwarded-Host") || req.get("Host") || "")
+    .split(",")[0]
+    .trim();
+  if (!forwardedHost) return "";
+
+  const forwardedProto = String(req.get("X-Forwarded-Proto") || "")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+  const scheme = forwardedProto === "https" ? "https" : "https";
+  return safeHTTPSBaseURL(`${scheme}://${forwardedHost}`);
+}
+
+function flightAwareWebhookTargetURL(req) {
+  if (!WEBHOOK_SHARED_SECRET) return null;
+
+  const baseURL = inferredHTTPSBaseURLFromRequest(req) || WEBHOOK_PUBLIC_BASE_URL;
+  if (!baseURL) return null;
+
+  const target = new URL("/v1/webhooks/flightaware", `${baseURL}/`);
+  target.searchParams.set("secret", WEBHOOK_SHARED_SECRET);
+  return target.toString();
 }
 
 function scopedDeviceID(userId, rawDeviceID) {
@@ -749,6 +841,57 @@ function makeProviderQueryKey(providerName, query) {
   });
 }
 
+function dedupeFlightAwareRecords(records) {
+  const seen = new Set();
+  const deduped = [];
+
+  for (const record of Array.isArray(records) ? records : []) {
+    const normalized = normalizeRecordFromFlightAware(record);
+    const key = [
+      record?.fa_flight_id || normalized.flightNumber || "",
+      normalized.departureAirportIata || "",
+      normalized.arrivalAirportIata || "",
+      normalized.departureTimes?.scheduled || normalized.departureTimes?.estimated || "",
+    ].join("|");
+
+    if (!key || seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(record);
+  }
+
+  return deduped;
+}
+
+function extractFlightAwareSearchRows(payload) {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+
+  if (Array.isArray(payload.flights)) {
+    return dedupeFlightAwareRecords(payload.flights);
+  }
+
+  const bucketNames = [
+    "arrivals",
+    "departures",
+    "enroute",
+    "scheduled_arrivals",
+    "scheduled_departures",
+  ];
+
+  const rows = [];
+  for (const bucketName of bucketNames) {
+    if (Array.isArray(payload[bucketName])) {
+      rows.push(...payload[bucketName]);
+    }
+  }
+
+  return dedupeFlightAwareRecords(rows);
+}
+
 function makeProviderPositionKey(providerName, providerFlightId) {
   return JSON.stringify({
     providerName,
@@ -972,6 +1115,29 @@ function scoreCandidate(record, query, normalizer) {
   return score;
 }
 
+function departureTimeForRecord(record, normalizer) {
+  const normalized = normalizer(record);
+  return (
+    normalized?.departureTimes?.estimated ||
+    normalized?.departureTimes?.scheduled ||
+    normalized?.departureTimes?.actual ||
+    ""
+  );
+}
+
+function sortSearchRecords(records, query, normalizer) {
+  return [...records].sort((a, b) => {
+    const scoreDelta = scoreCandidate(b, query, normalizer) - scoreCandidate(a, query, normalizer);
+    if (scoreDelta !== 0) {
+      return scoreDelta;
+    }
+
+    const departureA = new Date(departureTimeForRecord(a, normalizer) || 0).getTime();
+    const departureB = new Date(departureTimeForRecord(b, normalizer) || 0).getTime();
+    return departureA - departureB;
+  });
+}
+
 function bestMatch(records, query, normalizer) {
   if (!records.length) return null;
   return [...records].sort((a, b) => scoreCandidate(b, query, normalizer) - scoreCandidate(a, query, normalizer))[0];
@@ -1093,7 +1259,17 @@ async function fetchFlightAwareFlights(query) {
       params.set("end", `${query.date}T23:59:59Z`);
     }
 
-    const url = `${FLIGHTAWARE_BASE_URL}/flights/${encodeURIComponent(ident)}?${params.toString()}`;
+    let url;
+    if (ident) {
+      url = `${FLIGHTAWARE_BASE_URL}/flights/${encodeURIComponent(ident)}?${params.toString()}`;
+    } else if (query.departureIata && query.arrivalIata) {
+      url =
+        `${FLIGHTAWARE_BASE_URL}/airports/${encodeURIComponent(query.departureIata.toUpperCase())}` +
+        `/flights/to/${encodeURIComponent(query.arrivalIata.toUpperCase())}?${params.toString()}`;
+    } else {
+      return [];
+    }
+
     const response = await fetch(url, {
       method: "GET",
       headers: {
@@ -1121,7 +1297,7 @@ async function fetchFlightAwareFlights(query) {
     }
 
     const payload = await response.json();
-    const rows = Array.isArray(payload?.flights) ? payload.flights : [];
+    const rows = extractFlightAwareSearchRows(payload);
     if (providerCache.has(key)) {
       providerCache.delete(key);
     }
@@ -1193,6 +1369,7 @@ const {
   listPushTokensForFlight,
   listTrackedFlightsByFlightNumber,
   markTrackingRowErrored,
+  mergeTrackingSessionMetadata,
   persistTrackingSnapshot,
   providerFlightIdentifier,
   upsertPushDevice,
@@ -1225,6 +1402,189 @@ async function enrichNormalizedWithLivePosition(normalized, providerName, rawRec
       `FlightAware live position lookup failed for ${providerFlightId}: ${error?.message || String(error)}`
     );
     return normalized;
+  }
+}
+
+function addDaysToISODate(dateString, dayOffset) {
+  const date = new Date(`${String(dateString || "").slice(0, 10)}T00:00:00Z`);
+  if (!Number.isFinite(date.getTime())) {
+    return null;
+  }
+
+  date.setUTCDate(date.getUTCDate() + dayOffset);
+  return date.toISOString().slice(0, 10);
+}
+
+function flightAwareAlertContextForTrackedRecord(trackedRecord) {
+  if (!trackedRecord || String(trackedRecord.provider || "").toLowerCase() !== "flightaware") {
+    return null;
+  }
+
+  const status = String(trackedRecord.normalized?.status || "").toLowerCase();
+  if (["landed", "cancelled", "diverted"].includes(status)) {
+    return null;
+  }
+
+  const flightNumber = normalizeFlightCode(
+    trackedRecord.query?.flightNumber || trackedRecord.normalized?.flightNumber
+  );
+  const departureIata =
+    normalizeAirportCode(trackedRecord.query?.departureIata || trackedRecord.normalized?.departureAirportIata) || null;
+  const arrivalIata =
+    normalizeAirportCode(trackedRecord.query?.arrivalIata || trackedRecord.normalized?.arrivalAirportIata) || null;
+  const startDate =
+    String(
+      trackedRecord.query?.date ||
+        trackedRecord.normalized?.departureTimes?.scheduled?.slice(0, 10) ||
+        trackedRecord.normalized?.departureTimes?.estimated?.slice(0, 10) ||
+        ""
+    ).slice(0, 10) || null;
+
+  if (!flightNumber || !startDate) {
+    return null;
+  }
+
+  const endDate = addDaysToISODate(startDate, 2);
+  if (!endDate) {
+    return null;
+  }
+
+  return {
+    flightNumber,
+    departureIata,
+    arrivalIata,
+    startDate,
+    endDate,
+  };
+}
+
+function flightAwareAlertFingerprint(context) {
+  return crypto.createHash("sha256").update(JSON.stringify(context)).digest("hex");
+}
+
+function flightAwareAlertIDFromPayload(payload) {
+  const candidates = [
+    payload?.alert_id,
+    payload?.alertId,
+    payload?.id,
+    payload?.alert?.alert_id,
+    payload?.alert?.alertId,
+    payload?.alert?.id,
+    payload?.alerts?.[0]?.alert_id,
+    payload?.alerts?.[0]?.alertId,
+    payload?.alerts?.[0]?.id,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = String(candidate || "").trim();
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
+async function createFlightAwareAlert({ targetUrl, context }) {
+  const payload = {
+    ident_iata: context.flightNumber,
+    start: context.startDate,
+    end: context.endDate,
+    impending_departure: [...FLIGHTAWARE_AUTO_ALERT_IMPENDING_DEPARTURE_MINUTES],
+    impending_arrival: [...FLIGHTAWARE_AUTO_ALERT_IMPENDING_ARRIVAL_MINUTES],
+    events: FLIGHTAWARE_AUTO_ALERT_EVENTS,
+    target_url: targetUrl,
+  };
+
+  if (context.departureIata) {
+    payload.origin_iata = context.departureIata;
+  }
+  if (context.arrivalIata) {
+    payload.destination_iata = context.arrivalIata;
+  }
+
+  const response = await fetch(`${FLIGHTAWARE_BASE_URL}/alerts`, {
+    method: "POST",
+    headers: {
+      "x-apikey": FLIGHTAWARE_API_KEY,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const responseText = await response.text();
+  if (!response.ok) {
+    throw new Error(`FlightAware alert create failed (${response.status}): ${responseText.slice(0, 200)}`);
+  }
+
+  let responsePayload = null;
+  try {
+    responsePayload = responseText ? JSON.parse(responseText) : null;
+  } catch (_error) {
+    responsePayload = null;
+  }
+
+  return {
+    alertId: flightAwareAlertIDFromPayload(responsePayload),
+  };
+}
+
+async function ensureFlightAwareAlertForTrackedSession(req, trackedRecord) {
+  if (!usesDatabase() || !PROVIDER_CALLS_ENABLED) {
+    return;
+  }
+
+  const targetUrl = flightAwareWebhookTargetURL(req);
+  if (!targetUrl) {
+    return;
+  }
+
+  const context = flightAwareAlertContextForTrackedRecord(trackedRecord);
+  if (!context) {
+    return;
+  }
+
+  const fingerprint = flightAwareAlertFingerprint(context);
+  const existing = trackedRecord.metadata?.flightawareAlert;
+  if (existing?.fingerprint === fingerprint && (existing?.alertId || existing?.createdAt)) {
+    return;
+  }
+
+  const baseMetadata = {
+    autoCreated: true,
+    provider: "flightaware",
+    fingerprint,
+    startDate: context.startDate,
+    endDate: context.endDate,
+    flightNumber: context.flightNumber,
+    departureIata: context.departureIata,
+    arrivalIata: context.arrivalIata,
+    lastAttemptAt: new Date().toISOString(),
+  };
+
+  try {
+    const createdAlert = await createFlightAwareAlert({ targetUrl, context });
+    await mergeTrackingSessionMetadata(trackedRecord.flightId, {
+      flightawareAlert: {
+        ...baseMetadata,
+        alertId: createdAlert.alertId,
+        createdAt: new Date().toISOString(),
+        lastError: null,
+      },
+    });
+  } catch (error) {
+    console.warn(
+      `FlightAware alert create failed for ${trackedRecord.flightId}: ${error?.message || String(error)}`
+    );
+    await mergeTrackingSessionMetadata(trackedRecord.flightId, {
+      flightawareAlert: {
+        ...baseMetadata,
+        alertId: existing?.alertId || null,
+        createdAt: existing?.createdAt || null,
+        lastError: String(error?.message || error || "").slice(0, 256),
+      },
+    });
   }
 }
 
@@ -1902,6 +2262,12 @@ app.post("/v1/track", async (req, res) => {
       return res.status(500).json({ error: "Unable to create tracking session" });
     }
 
+    ensureFlightAwareAlertForTrackedSession(req, tracked).catch((error) => {
+      console.warn(
+        `FlightAware alert ensure failed for ${tracked.flightId}: ${error?.message || String(error)}`
+      );
+    });
+
     return res.json({
       flightId: tracked.flightId,
       normalized: tracked.normalized,
@@ -1945,6 +2311,25 @@ app.get("/v1/flights/:flightId", async (req, res) => {
   }
 });
 
+async function buildSearchCandidates(query) {
+  const provider = providerAdapter();
+  const records = await provider.fetchFlights(query);
+  const topRecords = sortSearchRecords(records, query, provider.normalizeRecord).slice(0, 30);
+
+  const normalized = await Promise.all(
+    topRecords.map(async (record, index) => {
+      let candidate = normalizeWithContext(record, records, query, provider.normalizeRecord, null);
+      if (index < SEARCH_LIVE_ENRICH_LIMIT) {
+        candidate = await enrichNormalizedWithLivePosition(candidate, provider.name, record);
+      }
+      candidate.lastUpdated = candidate.livePosition?.recordedAt || candidate.lastUpdated || new Date().toISOString();
+      return candidate;
+    })
+  );
+
+  return normalized;
+}
+
 app.get("/v1/search", async (req, res) => {
   const validated = validateSearchQuery(req.query);
   if (validated.error) {
@@ -1959,23 +2344,7 @@ app.get("/v1/search", async (req, res) => {
 
   try {
     const query = { flightNumber, date, departureIata, arrivalIata };
-    const provider = providerAdapter();
-    const records = await provider.fetchFlights(query);
-    const topRecords = records
-      .sort((a, b) => scoreCandidate(b, query, provider.normalizeRecord) - scoreCandidate(a, query, provider.normalizeRecord))
-      .slice(0, 10);
-
-    const normalized = await Promise.all(
-      topRecords.map(async (record, index) => {
-        let candidate = normalizeWithContext(record, records, query, provider.normalizeRecord, null);
-        if (index < SEARCH_LIVE_ENRICH_LIMIT) {
-          candidate = await enrichNormalizedWithLivePosition(candidate, provider.name, record);
-        }
-        candidate.lastUpdated = candidate.livePosition?.recordedAt || candidate.lastUpdated || new Date().toISOString();
-        return candidate;
-      })
-    );
-
+    const normalized = await buildSearchCandidates(query);
     return res.json({ candidates: normalized });
   } catch (error) {
     console.error("Search provider fetch failed", {
@@ -1990,12 +2359,40 @@ app.get("/v1/search", async (req, res) => {
   }
 });
 
+app.get("/v1/search/route", async (req, res) => {
+  const validated = validateRouteSearchQuery(req.query);
+  if (validated.error) {
+    return res.status(400).json({ error: validated.error });
+  }
+
+  const { date, departureIata, arrivalIata } = validated.value;
+
+  if (!PROVIDER_CALLS_ENABLED) {
+    return res.json({ candidates: [], providerDisabled: true });
+  }
+
+  try {
+    const query = { date, departureIata, arrivalIata };
+    const normalized = await buildSearchCandidates(query);
+    return res.json({ candidates: normalized });
+  } catch (error) {
+    console.error("Route search provider fetch failed", {
+      provider: FLIGHT_DATA_PROVIDER,
+      date,
+      departureIata,
+      arrivalIata,
+      error: error?.message || String(error),
+    });
+    return res.status(502).json({ error: "Failed to fetch provider data" });
+  }
+});
+
 app.post("/v1/webhooks/flightaware", async (req, res) => {
   if (!WEBHOOK_SHARED_SECRET) {
     return res.status(503).json({ error: "Webhook secret is not configured" });
   }
 
-  const incomingSecret = req.get("X-Runwy-Webhook-Secret") || "";
+  const incomingSecret = webhookSecretFromRequest(req);
   if (!timingSafeEqualText(incomingSecret, WEBHOOK_SHARED_SECRET)) {
     return res.status(401).json({ error: "Unauthorized webhook" });
   }
