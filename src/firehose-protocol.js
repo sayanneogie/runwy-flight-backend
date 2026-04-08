@@ -6,6 +6,25 @@ function quoteFirehoseValue(value) {
     .replace(/"/g, '\\"')}"`;
 }
 
+function normalizeFirehoseValues(values, { uppercase = false } = {}) {
+  const rawValues = Array.isArray(values)
+    ? values
+    : String(values || "")
+        .split(/\s+/)
+        .filter(Boolean);
+
+  return Array.from(
+    new Set(
+      rawValues
+        .map((value) => {
+          const normalized = String(value || "").trim();
+          return uppercase ? normalized.toUpperCase() : normalized;
+        })
+        .filter(Boolean)
+    )
+  );
+}
+
 function buildFirehoseInitCommand({
   timeMode = "live",
   version = "36.0",
@@ -28,21 +47,16 @@ function buildFirehoseInitCommand({
     throw new Error("Firehose username/password are required");
   }
 
-  const normalizedEvents = Array.from(
-    new Set(
-      (Array.isArray(events) ? events : [])
-        .map((value) => String(value || "").trim())
-        .filter(Boolean)
-    )
-  );
+  const normalizedEvents = normalizeFirehoseValues(events);
+  const sanitizedEvents = normalizedEvents.filter((event) => {
+    if (event !== "extendedFlightInfo" && event !== "flightplan") {
+      return true;
+    }
 
-  const normalizedIdents = Array.from(
-    new Set(
-      (Array.isArray(idents) ? idents : [])
-        .map((value) => String(value || "").trim().toUpperCase())
-        .filter(Boolean)
-    )
-  );
+    return !normalizedEvents.includes("flifo");
+  });
+
+  const normalizedIdents = normalizeFirehoseValues(idents, { uppercase: true });
 
   const commandParts = [
     normalizedTimeMode,
@@ -60,8 +74,8 @@ function buildFirehoseInitCommand({
       : "60",
   ];
 
-  if (normalizedEvents.length > 0) {
-    commandParts.push("events", quoteFirehoseValue(normalizedEvents.join(" ")));
+  if (sanitizedEvents.length > 0) {
+    commandParts.push("events", quoteFirehoseValue(sanitizedEvents.join(" ")));
   }
 
   if (normalizedIdents.length > 0) {

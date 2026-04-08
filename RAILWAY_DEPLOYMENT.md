@@ -73,7 +73,7 @@ Set these on `runwy-flight-firehose`:
 - `FIREHOSE_HOST`
 - `FIREHOSE_PORT`
 - `FIREHOSE_USERNAME`
-- `FIREHOSE_PASSWORD`
+- `FIREHOSE_API_KEY`
 - `FIREHOSE_VERSION`
 - `FIREHOSE_USER_AGENT`
 - `FIREHOSE_EVENTS`
@@ -83,6 +83,9 @@ Set these on `runwy-flight-firehose`:
 - `FIREHOSE_RECONNECT_DELAY_MS`
 - `FIREHOSE_TRACK_LOOKAHEAD_HOURS`
 - `FIREHOSE_POST_ARRIVAL_BUFFER_MINUTES`
+- `FIREHOSE_BACKFILL_MAX_HOURS`
+- `FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES`
+- `FIREHOSE_BACKFILL_MIN_TRACK_POINTS`
 
 Recommended on the Firehose worker:
 
@@ -90,6 +93,19 @@ Recommended on the Firehose worker:
 - `PROVIDER_CALLS_ENABLED=false`
 
 That lets the worker stream/write snapshots without making AeroAPI refresh calls.
+
+Firehose credential notes:
+
+- `FIREHOSE_USERNAME` should be your FlightAware account username.
+- `FIREHOSE_API_KEY` should be your FlightAware Firehose API key.
+- `FIREHOSE_PASSWORD` is still accepted by the code as a legacy alias if you already use it, but `FIREHOSE_API_KEY` is the preferred name.
+- Keep `FIREHOSE_EVENTS` to the core supported set unless FlightAware has explicitly enabled more for your account:
+  `flifo departure arrival cancellation position`
+- If you include `flifo` in `FIREHOSE_EVENTS`, do not combine it with `extendedFlightInfo` or `flightplan`.
+- For a real flown-path trail, allow Firehose to reconnect with a bounded `pitr` backfill window:
+  `FIREHOSE_BACKFILL_MAX_HOURS=8`
+  `FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES=15`
+  `FIREHOSE_BACKFILL_MIN_TRACK_POINTS=8`
 
 ## Poller-only Variables
 
@@ -151,6 +167,11 @@ Expected API health response:
 - `firehoseEnabled: false`
 - `providerCallsEnabled: true` unless you intentionally enable the hard stop
 
+Important:
+
+- `firehoseConfigured` and `firehoseEnabled` on `/health` only describe the API process.
+- A separately deployed `runwy-flight-firehose` worker can be healthy and streaming even while the API health still shows `firehoseEnabled: false`.
+
 ## Rollout Order
 
 1. Apply Supabase migrations.
@@ -177,7 +198,7 @@ If the poller starts but no rows update:
 If the Firehose worker starts but no rows update:
 
 - confirm your Firehose trial includes real-time data, not historical-only replay
-- confirm `FIREHOSE_USERNAME` and `FIREHOSE_PASSWORD` are correct
+- confirm `FIREHOSE_USERNAME` and `FIREHOSE_API_KEY` are correct
 - confirm tracked sessions are within the Firehose lookahead window
 - confirm the worker logs show successful socket connection rather than immediate disconnect
 

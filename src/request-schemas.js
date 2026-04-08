@@ -21,6 +21,17 @@ const optionalIataSchema = z.preprocess((value) => {
   return normalized.length === 0 ? undefined : normalized;
 }, z.string().regex(/^[A-Z]{3}$/, "Invalid airport code").optional());
 
+const optionalBooleanQuerySchema = z.preprocess((value) => {
+  if (value == null) return undefined;
+  if (typeof value === "boolean") return value;
+
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return value;
+}, z.boolean().optional());
+
 const pushPlatformSchema = z
   .string()
   .trim()
@@ -49,6 +60,23 @@ const searchQuerySchema = z.object({
   date: dateSchema,
   dep: optionalIataSchema,
   arr: optionalIataSchema,
+  historical: optionalBooleanQuerySchema,
+  preferSchedules: optionalBooleanQuerySchema,
+});
+
+const routeSearchQuerySchema = z.object({
+  date: dateSchema,
+  dep: optionalIataSchema,
+  arr: optionalIataSchema,
+  historical: optionalBooleanQuerySchema,
+  preferSchedules: optionalBooleanQuerySchema,
+}).superRefine((value, ctx) => {
+  if (!value.dep || !value.arr) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Route search requires both dep and arr airport codes",
+    });
+  }
 });
 
 const pushTokenBodySchema = z.object({
@@ -82,6 +110,23 @@ function validateSearchQuery(query) {
       date: parsed.value.date,
       departureIata: parsed.value.dep,
       arrivalIata: parsed.value.arr,
+      historical: parsed.value.historical === true,
+      preferSchedules: parsed.value.preferSchedules === true,
+    },
+  };
+}
+
+function validateRouteSearchQuery(query) {
+  const parsed = parseSchema(routeSearchQuerySchema, query);
+  if (parsed.error) return parsed;
+
+  return {
+    value: {
+      date: parsed.value.date,
+      departureIata: parsed.value.dep,
+      arrivalIata: parsed.value.arr,
+      historical: parsed.value.historical === true,
+      preferSchedules: parsed.value.preferSchedules === true,
     },
   };
 }
@@ -100,6 +145,7 @@ function validatePushTokenPayload(body) {
 
 module.exports = {
   validatePushTokenPayload,
+  validateRouteSearchQuery,
   validateSearchQuery,
   validateTrackPayload,
 };

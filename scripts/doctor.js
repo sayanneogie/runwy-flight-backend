@@ -11,10 +11,12 @@ const REQUIRED_TABLES = [
   "user_settings",
   "tracking_sessions",
   "user_flights",
-  "flight_watchers",
   "live_snapshots",
   "notifications",
   "push_devices",
+  "friend_invites",
+  "friend_relationships",
+  "friend_permissions",
 ];
 
 function boolText(value) {

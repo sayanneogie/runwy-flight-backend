@@ -1,0 +1,13 @@
+project_id = "djbhozqfsxzkfnpxdumh"
+
+[functions.create-friend-invite]
+verify_jwt = true
+
+[functions.flight-circle-overview]
+verify_jwt = true
+
+[functions.accept-friend-invite]
+verify_jwt = true
+
+[functions.preview-friend-invite]
+verify_jwt = false

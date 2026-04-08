@@ -250,11 +250,16 @@ function createTrackingStore({
 
           union
 
-          select fw.watcher_user_id as user_id
-          from public.flight_watchers fw
-          where fw.tracking_session_id = $1::uuid
-            and fw.watch_state = 'approved'
-            and fw.can_receive_notifications = true
+          select fp.viewer_user_id as user_id
+          from public.tracking_sessions ts
+          join public.friend_permissions fp
+            on fp.owner_user_id = ts.owner_user_id
+          join public.friend_relationships fr
+            on fr.id = fp.relationship_id
+          where ts.id = $1::uuid
+            and fr.relationship_status = 'active'
+            and fp.can_view_live = true
+            and fp.can_receive_alerts = true
         )
         select distinct pd.apns_token
         from public.push_devices pd
@@ -349,8 +354,8 @@ function createTrackingStore({
         String(
           record.fa_flight_id ||
             record.faFlightId ||
-            record.ident_iata ||
             record.ident ||
+            record.ident_iata ||
             record.flight_number ||
             ""
         ).trim() || null
@@ -421,6 +426,7 @@ function createTrackingStore({
       inboundFlight: null,
       recentHistory: [],
       alerts: null,
+      trackPoints: [],
       provider: row.provider || providerName,
       lastUpdated: toISOString(row.last_snapshot_at || row.updated_at) || new Date().toISOString(),
     };
@@ -473,6 +479,24 @@ function createTrackingStore({
         return "completed";
       default:
         return "active";
+    }
+  }
+
+  function userFlightLifecycleForNormalized(normalized) {
+    const status = String(normalized?.status || "").toLowerCase();
+    switch (status) {
+      case "cancelled":
+        return "deleted";
+      case "landed":
+      case "diverted":
+        return "landed";
+      case "boarding":
+      case "delayed":
+      case "departed":
+      case "enroute":
+        return "active";
+      default:
+        return "upcoming";
     }
   }
 
@@ -691,10 +715,13 @@ function createTrackingStore({
           ts.owner_user_id = $2::uuid
           or exists (
             select 1
-            from public.flight_watchers fw
-            where fw.tracking_session_id = ts.id
-              and fw.watcher_user_id = $2::uuid
-              and fw.watch_state = 'approved'
+            from public.friend_permissions fp
+            join public.friend_relationships fr
+              on fr.id = fp.relationship_id
+            where fp.owner_user_id = ts.owner_user_id
+              and fp.viewer_user_id = $2::uuid
+              and fr.relationship_status = 'active'
+              and fp.can_view_live = true
           )
         )
       limit 1
@@ -724,6 +751,7 @@ function createTrackingStore({
     const sessionStatus = trackingPolicy.sessionStatus;
     const pollingStoppedReason = trackingPolicy.pollingStoppedReason;
     const displayCode = displayFlightCode(normalized);
+    const userFlightLifecycle = userFlightLifecycleForNormalized(normalized);
     const scheduledDeparture =
       normalized?.departureTimes?.scheduled ||
       normalized?.departureTimes?.estimated ||
@@ -750,6 +778,7 @@ function createTrackingStore({
         next_poll_after = $10::timestamptz,
         session_status = $11,
         polling_stopped_reason = $12,
+        last_snapshot_at = $13::timestamptz,
         updated_at = now()
       where id = $1::uuid
       `,
@@ -766,6 +795,7 @@ function createTrackingStore({
         nextPollAfter,
         sessionStatus,
         pollingStoppedReason,
+        normalized.lastUpdated || new Date().toISOString(),
       ]
     );
 
@@ -774,33 +804,101 @@ function createTrackingStore({
       insert into public.user_flights (
         user_id,
         tracking_session_id,
+        source_type,
+        lifecycle_state,
         display_flight_number,
-        airline_name,
+        marketing_airline_code,
+        marketing_airline_name,
+        operating_airline_code,
+        operating_airline_name,
         origin_iata,
         destination_iata,
         scheduled_departure,
         scheduled_arrival,
-        added_source
+        estimated_departure,
+        estimated_arrival,
+        actual_departure,
+        actual_arrival,
+        departure_terminal,
+        departure_gate,
+        aircraft_type,
+        status,
+        delay_minutes,
+        provider_name,
+        provider_flight_id
       )
-      values ($1::uuid, $2::uuid, $3, null, $4, $5, $6::timestamptz, $7::timestamptz, $8)
+      values (
+        $1::uuid,
+        $2::uuid,
+        'tracked',
+        $3,
+        $4,
+        $5,
+        null,
+        $5,
+        null,
+        $6,
+        $7,
+        $8::timestamptz,
+        $9::timestamptz,
+        $10::timestamptz,
+        $11::timestamptz,
+        $12::timestamptz,
+        $13::timestamptz,
+        $14,
+        $15,
+        null,
+        $16,
+        $17,
+        $18,
+        $19
+      )
       on conflict (user_id, tracking_session_id)
       do update set
+        source_type = excluded.source_type,
+        lifecycle_state = excluded.lifecycle_state,
         display_flight_number = excluded.display_flight_number,
+        marketing_airline_code = excluded.marketing_airline_code,
+        marketing_airline_name = excluded.marketing_airline_name,
+        operating_airline_code = excluded.operating_airline_code,
+        operating_airline_name = excluded.operating_airline_name,
         origin_iata = excluded.origin_iata,
         destination_iata = excluded.destination_iata,
         scheduled_departure = excluded.scheduled_departure,
         scheduled_arrival = excluded.scheduled_arrival,
+        estimated_departure = excluded.estimated_departure,
+        estimated_arrival = excluded.estimated_arrival,
+        actual_departure = excluded.actual_departure,
+        actual_arrival = excluded.actual_arrival,
+        departure_terminal = excluded.departure_terminal,
+        departure_gate = excluded.departure_gate,
+        aircraft_type = excluded.aircraft_type,
+        status = excluded.status,
+        delay_minutes = excluded.delay_minutes,
+        provider_name = excluded.provider_name,
+        provider_flight_id = excluded.provider_flight_id,
         updated_at = now()
       `,
       [
         userId,
         flightId,
+        userFlightLifecycle,
         displayCode,
+        normalized.airlineCode || null,
         normalizeAirportCode(normalized.departureAirportIata),
         normalizeAirportCode(normalized.arrivalAirportIata),
         scheduledDeparture,
         scheduledArrival,
-        createdSource,
+        normalized?.departureTimes?.estimated || scheduledDeparture,
+        normalized?.arrivalTimes?.estimated || scheduledArrival,
+        normalized?.departureTimes?.actual || null,
+        normalized?.arrivalTimes?.actual || null,
+        normalized.terminal || null,
+        normalized.gate || null,
+        normalized.status || "scheduled",
+        Number.isFinite(Number(normalized.delayMinutes)) ? Number(normalized.delayMinutes) : null,
+        provider,
+        providerFlightId,
       ]
     );
 

@@ -12,6 +12,103 @@ const {
   parseFirehoseJSONLine,
 } = require("./firehose-protocol");
 
+const DEFAULT_FIREHOSE_BACKFILL_MAX_HOURS = 8;
+const DEFAULT_FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES = 15;
+const DEFAULT_FIREHOSE_BACKFILL_MIN_TRACK_POINTS = 8;
+
+function epochMs(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const asNumber = Number(value);
+  if (Number.isFinite(asNumber)) {
+    return Math.abs(asNumber) < 1e12 ? asNumber * 1000 : asNumber;
+  }
+
+  const asDate = new Date(value).getTime();
+  return Number.isFinite(asDate) ? asDate : null;
+}
+
+function trackedRowTrackPointCount(row) {
+  return Array.isArray(row?.normalized?.trackPoints) ? row.normalized.trackPoints.length : 0;
+}
+
+function trackedRowBackfillStartMs(
+  row,
+  {
+    nowMs = Date.now(),
+    maxBackfillHours = DEFAULT_FIREHOSE_BACKFILL_MAX_HOURS,
+    preDepartureMinutes = DEFAULT_FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES,
+    minTrackPoints = DEFAULT_FIREHOSE_BACKFILL_MIN_TRACK_POINTS,
+  } = {}
+) {
+  if (!row) {
+    return null;
+  }
+
+  const status = String(row.normalized?.status || "").toLowerCase();
+  if (!["boarding", "delayed", "departed", "enroute"].includes(status)) {
+    return null;
+  }
+
+  if (trackedRowTrackPointCount(row) >= minTrackPoints) {
+    return null;
+  }
+
+  const maxBackfillMs = Math.max(1, Number(maxBackfillHours) || 0) * 60 * 60 * 1000;
+  const preDepartureBufferMs = Math.max(0, Number(preDepartureMinutes) || 0) * 60 * 1000;
+  const oldestAllowedMs = nowMs - maxBackfillMs;
+
+  const departureMs =
+    epochMs(row.normalized?.takeoffTimes?.actual) ??
+    epochMs(row.normalized?.departureTimes?.actual) ??
+    epochMs(row.normalized?.takeoffTimes?.estimated) ??
+    epochMs(row.normalized?.departureTimes?.estimated) ??
+    epochMs(row.normalized?.takeoffTimes?.scheduled) ??
+    epochMs(row.normalized?.departureTimes?.scheduled);
+
+  const fallbackReferenceMs =
+    epochMs(row.normalized?.livePosition?.recordedAt) ??
+    epochMs(row.normalized?.lastUpdated) ??
+    nowMs;
+
+  const desiredStartMs =
+    departureMs !== null ? departureMs - preDepartureBufferMs : fallbackReferenceMs - 30 * 60 * 1000;
+  const clampedStartMs = Math.max(oldestAllowedMs, Math.min(desiredStartMs, nowMs));
+
+  return Number.isFinite(clampedStartMs) && clampedStartMs < nowMs ? clampedStartMs : null;
+}
+
+function resolveFirehoseTimeMode({
+  lastGoodPitr = null,
+  trackedRows = [],
+  nowMs = Date.now(),
+  maxBackfillHours = DEFAULT_FIREHOSE_BACKFILL_MAX_HOURS,
+  preDepartureMinutes = DEFAULT_FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES,
+  minTrackPoints = DEFAULT_FIREHOSE_BACKFILL_MIN_TRACK_POINTS,
+} = {}) {
+  const pitrCandidates = [
+    epochMs(lastGoodPitr),
+    ...Array.from(trackedRows || [])
+      .map((row) =>
+        trackedRowBackfillStartMs(row, {
+          nowMs,
+          maxBackfillHours,
+          preDepartureMinutes,
+          minTrackPoints,
+        })
+      )
+      .filter(Number.isFinite),
+  ].filter(Number.isFinite);
+
+  if (!pitrCandidates.length) {
+    return "live";
+  }
+
+  return `pitr ${Math.floor(Math.min(...pitrCandidates) / 1000)}`;
+}
+
 function createFirehoseRuntime({
   firehoseEnabled,
   firehoseHost,
@@ -25,6 +122,9 @@ function createFirehoseRuntime({
   firehoseMinSecondsBetweenAirborne,
   firehoseTrackedSetRefreshMs,
   firehoseReconnectDelayMs,
+  firehoseBackfillMaxHours = DEFAULT_FIREHOSE_BACKFILL_MAX_HOURS,
+  firehoseBackfillPredepartureMinutes = DEFAULT_FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES,
+  firehoseBackfillMinTrackPoints = DEFAULT_FIREHOSE_BACKFILL_MIN_TRACK_POINTS,
   usesDatabase,
   ensureDatabaseSchema,
   listFirehoseTrackedRows,
@@ -68,12 +168,18 @@ function createFirehoseRuntime({
     return Array.from(
       new Set(
         Array.from(trackedRows || [])
-          .map((row) =>
-            String(row.query?.flightNumber || row.normalized?.flightNumber || "")
+          .flatMap((row) => {
+            const providerIdent = String(row.providerFlightId || "")
               .trim()
-              .toUpperCase()
-              .replace(/\s+/g, "")
-          )
+              .split("-")[0];
+
+            return [
+              row.query?.flightNumber,
+              row.normalized?.flightNumber,
+              providerIdent,
+            ];
+          })
+          .map((value) => String(value || "").trim().toUpperCase().replace(/\s+/g, ""))
           .filter(Boolean)
       )
     ).sort();
@@ -95,7 +201,14 @@ function createFirehoseRuntime({
       return { lastPitr: lastGoodPitr };
     }
 
-    const timeMode = lastGoodPitr ? `pitr ${lastGoodPitr}` : "live";
+    const timeMode = resolveFirehoseTimeMode({
+      lastGoodPitr,
+      trackedRows,
+      nowMs: Date.now(),
+      maxBackfillHours: firehoseBackfillMaxHours,
+      preDepartureMinutes: firehoseBackfillPredepartureMinutes,
+      minTrackPoints: firehoseBackfillMinTrackPoints,
+    });
     const initCommand = buildFirehoseInitCommand({
       timeMode,
       version: firehoseVersion,
@@ -107,6 +220,12 @@ function createFirehoseRuntime({
       idents,
       minSecondsBetweenAirborne: firehoseMinSecondsBetweenAirborne,
     });
+
+    console.log(
+      `FlightAware Firehose connecting mode=${timeMode} trackedRows=${trackedRows.length} idents=${idents.length} sample=${idents
+        .slice(0, 8)
+        .join(",")}`
+    );
 
     const trackedRowsById = new Map(Array.from(trackedRows || []).map((row) => [row.flightId, row]));
     let currentSignature = trackedRowsSignature(trackedRowsById.values());
@@ -242,7 +361,9 @@ function createFirehoseRuntime({
     }
 
     if (!isFirehoseConfigured()) {
-      throw new Error("FlightAware Firehose worker requires FIREHOSE_HOST, FIREHOSE_PORT, FIREHOSE_USERNAME, and FIREHOSE_PASSWORD.");
+      throw new Error(
+        "FlightAware Firehose worker requires FIREHOSE_HOST, FIREHOSE_PORT, FIREHOSE_USERNAME, and FIREHOSE_API_KEY (or legacy FIREHOSE_PASSWORD)."
+      );
     }
 
     await ensureDatabaseSchema();
@@ -261,4 +382,7 @@ function createFirehoseRuntime({
 
 module.exports = {
   createFirehoseRuntime,
+  resolveFirehoseTimeMode,
+  trackedRowBackfillStartMs,
+  trackedRowTrackPointCount,
 };

@@ -270,3 +270,18 @@ test("expired due rows are paused before returning to the poller", async () => {
   assert.ok(pauseUpdate, "expected expired rows to be paused");
   assert.deepEqual(pauseUpdate.params[0], ["11111111-1111-1111-1111-111111111111"]);
 });
+
+test("providerFlightIdentifier prefers FlightAware ICAO ident when fa_flight_id is missing", () => {
+  const { store } = makeStore();
+
+  assert.equal(
+    store.providerFlightIdentifier(
+      {
+        ident_iata: "6E6383",
+        ident: "IGO6383",
+      },
+      "flightaware"
+    ),
+    "IGO6383"
+  );
+});

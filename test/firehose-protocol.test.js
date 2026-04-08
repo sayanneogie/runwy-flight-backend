@@ -32,6 +32,30 @@ test("buildFirehoseInitCommand includes core command parts", () => {
   assert.ok(command.endsWith("\n"));
 });
 
+test("buildFirehoseInitCommand removes incompatible extended data events when flifo is present", () => {
+  const command = buildFirehoseInitCommand({
+    username: "demo-user",
+    password: "demo-pass",
+    events: ["flifo", "extendedFlightInfo", "flightplan", "position"],
+  });
+
+  assert.match(command, /events "flifo position"/);
+  assert.doesNotMatch(command, /extendedFlightInfo/);
+  assert.doesNotMatch(command, /flightplan/);
+});
+
+test("buildFirehoseInitCommand accepts whitespace-delimited event strings", () => {
+  const command = buildFirehoseInitCommand({
+    username: "demo-user",
+    password: "demo-pass",
+    events: "flifo departure arrival cancellation position",
+    idents: "ai2904 aic2904 ai2484",
+  });
+
+  assert.match(command, /events "flifo departure arrival cancellation position"/);
+  assert.match(command, /idents "AI2904 AIC2904 AI2484"|idents "AI2904 AI2484 AIC2904"|idents "AIC2904 AI2904 AI2484"|idents "AIC2904 AI2484 AI2904"|idents "AI2484 AI2904 AIC2904"|idents "AI2484 AIC2904 AI2904"/);
+});
+
 test("parseFirehoseJSONLine handles position messages", () => {
   const message = parseFirehoseJSONLine(
     '{"pitr":"1591763773","type":"position","ident":"UEA2236","id":"UEA2236-1591584600-schedule-0391","clock":"1591763767","lat":"29.84762","lon":"104.34529"}'

@@ -26,7 +26,9 @@ Optional live-tracking transport:
 - Optional but recommended:
   - `DATABASE_URL` for durable tracked-flight + device storage
   - APNs key configuration for true background push alerts
-  - Firehose credentials if you want moving live tracked flights without a poller
+  - Firehose credentials if you want moving live tracked flights without a poller:
+    - `FIREHOSE_USERNAME` = your FlightAware account username
+    - `FIREHOSE_API_KEY` = your FlightAware Firehose API key
 
 ## Setup
 1. Copy env template:
@@ -61,6 +63,9 @@ Returns runtime configuration summary:
 - whether APNs keys are configured
 - whether the poller is running in this process
 - whether a Firehose worker is configured/running in this process
+
+Note:
+- when you deploy the Firehose worker as a separate Railway service, the API service can still report `firehoseEnabled: false` because `/health` only reflects the current process.
 
 ### GET `/v1/airports`
 Returns the airport catalog used by the iOS app to resolve IATA codes into names, cities, and coordinates.

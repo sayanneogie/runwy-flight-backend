@@ -5,6 +5,7 @@ const express = require("express");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const { Pool } = require("pg");
+const { version: PACKAGE_VERSION = "0.0.0" } = require("../package.json");
 const { getAirportCatalog } = require("./airport-catalog");
 const {
   validatePushTokenPayload,
@@ -19,6 +20,7 @@ const {
   firehoseMessageType,
 } = require("./firehose-protocol");
 const { createFirehoseRuntime } = require("./firehose-runtime");
+const { mergeRealtimeTelemetry } = require("./realtime-telemetry");
 const { createTrackingStore } = require("./tracking-store");
 const { createTrackingPollerRuntime } = require("./tracking-poller-runtime");
 
@@ -54,6 +56,18 @@ const FIREHOSE_MIN_SECONDS_BETWEEN_AIRBORNE = toNonNegativeNumber(
   process.env.FIREHOSE_MIN_SECONDS_BETWEEN_AIRBORNE,
   15
 );
+const FIREHOSE_BACKFILL_MAX_HOURS = toPositiveNumber(
+  process.env.FIREHOSE_BACKFILL_MAX_HOURS,
+  8
+);
+const FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES = toNonNegativeNumber(
+  process.env.FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES,
+  15
+);
+const FIREHOSE_BACKFILL_MIN_TRACK_POINTS = Math.max(
+  1,
+  Math.round(toPositiveNumber(process.env.FIREHOSE_BACKFILL_MIN_TRACK_POINTS, 8))
+);
 const ENABLE_FIREHOSE_WORKER =
   String(process.env.ENABLE_FIREHOSE_WORKER || "false").toLowerCase() === "true";
 const FIREHOSE_EVENTS = Object.freeze(
@@ -63,9 +77,6 @@ const FIREHOSE_EVENTS = Object.freeze(
     "arrival",
     "cancellation",
     "position",
-    "extendedFlightInfo",
-    "offblock",
-    "onblock",
   ])
 );
 const FIREHOSE_TRACK_LOOKAHEAD_MS =
@@ -91,6 +102,7 @@ const FLIGHTAWARE_POSITION_CACHE_TTL_MS = toPositiveNumber(
   process.env.FLIGHTAWARE_POSITION_CACHE_TTL_MS,
   5 * 60_000
 );
+const FLIGHTAWARE_SCHEDULE_WINDOW_MS = 48 * 60 * 60_000;
 const RATE_LIMIT_PER_MINUTE = toPositiveNumber(process.env.RATE_LIMIT_PER_MINUTE, 60);
 const WEBHOOK_SHARED_SECRET = (process.env.WEBHOOK_SHARED_SECRET || "").trim();
 
@@ -124,10 +136,38 @@ const DISABLE_PROVIDER_CALLS = String(process.env.DISABLE_PROVIDER_CALLS || "fal
 const PROVIDER_CALLS_ENABLED =
   !DISABLE_PROVIDER_CALLS &&
   String(process.env.PROVIDER_CALLS_ENABLED || "true").toLowerCase() !== "false";
+const HEALTH_PROVIDER_AUTH_CACHE_TTL_MS = toPositiveNumber(
+  process.env.HEALTH_PROVIDER_AUTH_CACHE_TTL_MS,
+  6 * 60 * 60_000
+);
 
 const MAX_PROVIDER_CACHE_ENTRIES = toPositiveNumber(process.env.MAX_PROVIDER_CACHE_ENTRIES, 2_000);
 const MAX_MEMORY_TRACKED_FLIGHTS = toPositiveNumber(process.env.MAX_MEMORY_TRACKED_FLIGHTS, 10_000);
 const MAX_MEMORY_PUSH_DEVICES = toPositiveNumber(process.env.MAX_MEMORY_PUSH_DEVICES, 25_000);
+const SERVER_STARTED_AT = new Date().toISOString();
+const BUILD_INFO = Object.freeze({
+  version: PACKAGE_VERSION,
+  startedAt: SERVER_STARTED_AT,
+  railwayServiceName: String(process.env.RAILWAY_SERVICE_NAME || "").trim() || null,
+  railwayEnvironmentName: String(process.env.RAILWAY_ENVIRONMENT_NAME || "").trim() || null,
+  railwayDeploymentId: String(process.env.RAILWAY_DEPLOYMENT_ID || "").trim() || null,
+  gitCommitSha:
+    String(
+      process.env.RAILWAY_GIT_COMMIT_SHA ||
+      process.env.SOURCE_VERSION ||
+      ""
+    ).trim() || null,
+  gitBranch:
+    String(
+      process.env.RAILWAY_GIT_BRANCH ||
+      process.env.VERCEL_GIT_COMMIT_REF ||
+      ""
+    ).trim() || null,
+  features: Object.freeze({
+    scheduleAwareSearch: true,
+    scheduleWindowHours: Math.round(FLIGHTAWARE_SCHEDULE_WINDOW_MS / 60 / 60_000),
+  }),
+});
 
 const APNS_KEY_ID = process.env.APNS_KEY_ID || "";
 const APNS_TEAM_ID = process.env.APNS_TEAM_ID || "";
@@ -588,6 +628,12 @@ function normalizeAirportCode(input) {
   return value.length >= 3 ? value.slice(0, 3) : value;
 }
 
+function normalizeIataAirportCode(input) {
+  const value = String(input || "").toUpperCase().trim();
+  if (!value) return null;
+  return /^[A-Z0-9]{3}$/.test(value) ? value : null;
+}
+
 function normalizeStatus(rawStatus) {
   const value = String(rawStatus || "").toLowerCase().trim();
   if (!value) return "scheduled";
@@ -765,6 +811,125 @@ function normalizeLivePositionFromFlightAware(record) {
   });
 }
 
+const MAX_TRACK_POINTS = 1_800;
+const MIN_TRACK_POINT_SPACING_MS = 15_000;
+const MIN_TRACK_POINT_DISTANCE_METERS = 750;
+const TRACK_POINT_REPLACE_WINDOW_MS = 12_000;
+const TRACK_POINT_REPLACE_DISTANCE_METERS = 120;
+
+function distanceBetweenCoordinatesMeters(left, right) {
+  if (!left || !right) return Number.POSITIVE_INFINITY;
+
+  const lat1 = Number(left.latitude) * Math.PI / 180;
+  const lon1 = Number(left.longitude) * Math.PI / 180;
+  const lat2 = Number(right.latitude) * Math.PI / 180;
+  const lon2 = Number(right.longitude) * Math.PI / 180;
+
+  if (![lat1, lon1, lat2, lon2].every(Number.isFinite)) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const deltaLat = lat2 - lat1;
+  const deltaLon = lon2 - lon1;
+  const haversine =
+    Math.sin(deltaLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLon / 2) ** 2;
+
+  return 2 * 6_371_000 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+}
+
+function normalizeTrackPoints(trackPoints) {
+  if (!Array.isArray(trackPoints)) {
+    return [];
+  }
+
+  return trackPoints
+    .map((point) =>
+      normalizeLivePosition({
+        latitude: point?.latitude,
+        longitude: point?.longitude,
+        headingDegrees: point?.headingDegrees,
+        groundSpeedKnots: point?.groundSpeedKnots,
+        altitudeFeet: point?.altitudeFeet,
+        recordedAt: point?.recordedAt,
+      })
+    )
+    .filter(Boolean)
+    .sort((left, right) => {
+      const leftRecordedAt = new Date(left.recordedAt || 0).getTime();
+      const rightRecordedAt = new Date(right.recordedAt || 0).getTime();
+      return leftRecordedAt - rightRecordedAt;
+    });
+}
+
+function compactTrackPoints(trackPoints) {
+  const sortedPoints = normalizeTrackPoints(trackPoints);
+  if (!sortedPoints.length) {
+    return [];
+  }
+
+  const compacted = [];
+
+  for (const point of sortedPoints) {
+    if (!compacted.length) {
+      compacted.push(point);
+      continue;
+    }
+
+    const previousPoint = compacted[compacted.length - 1];
+    const previousRecordedAtMs = new Date(previousPoint.recordedAt || 0).getTime();
+    const nextRecordedAtMs = new Date(point.recordedAt || 0).getTime();
+    const distanceMeters = distanceBetweenCoordinatesMeters(previousPoint, point);
+
+    const hasComparableTimestamps =
+      Number.isFinite(previousRecordedAtMs) && Number.isFinite(nextRecordedAtMs);
+    const elapsedMs = hasComparableTimestamps
+      ? nextRecordedAtMs - previousRecordedAtMs
+      : Number.POSITIVE_INFINITY;
+
+    if (
+      (hasComparableTimestamps && nextRecordedAtMs === previousRecordedAtMs) ||
+      (distanceMeters <= TRACK_POINT_REPLACE_DISTANCE_METERS &&
+        (!hasComparableTimestamps || Math.abs(elapsedMs) <= TRACK_POINT_REPLACE_WINDOW_MS))
+    ) {
+      compacted[compacted.length - 1] = point;
+      continue;
+    }
+
+    if (elapsedMs < MIN_TRACK_POINT_SPACING_MS && distanceMeters < MIN_TRACK_POINT_DISTANCE_METERS) {
+      continue;
+    }
+
+    compacted.push(point);
+  }
+
+  return compacted.slice(-MAX_TRACK_POINTS);
+}
+
+function appendTrackPoint(trackPoints, livePosition) {
+  const nextPoint = normalizeLivePosition(livePosition || {});
+  if (!nextPoint) {
+    return compactTrackPoints(trackPoints);
+  }
+
+  return compactTrackPoints([...(Array.isArray(trackPoints) ? trackPoints : []), nextPoint]);
+}
+
+function mergeTrackPoints(previousTrackPoints, nextTrackPoints, nextLivePosition = null) {
+  let merged = [];
+
+  for (const point of normalizeTrackPoints(previousTrackPoints)) {
+    merged = appendTrackPoint(merged, point);
+  }
+
+  for (const point of normalizeTrackPoints(nextTrackPoints)) {
+    merged = appendTrackPoint(merged, point);
+  }
+
+  merged = appendTrackPoint(merged, nextLivePosition);
+  return merged.length ? merged : null;
+}
+
 function normalizeRecordFromAviationstack(record) {
   const airlineCode = record?.airline?.iata || record?.airline?.icao || null;
   const flightNumberRaw =
@@ -799,6 +964,7 @@ function normalizeRecordFromAviationstack(record) {
 
   return {
     airlineCode,
+    providerFlightId: null,
     flightNumber: normalizeFlightCode(flightNumberRaw),
     departureAirportIata: normalizeAirportCode(departure.iata),
     arrivalAirportIata: normalizeAirportCode(arrival.iata),
@@ -815,6 +981,7 @@ function normalizeRecordFromAviationstack(record) {
     alerts: null,
     progressPercent: finiteNumberOrNull(live.progress ?? live.progress_percent),
     livePosition: normalizeLivePositionFromAviationstack(record),
+    trackPoints: [],
     provider: "aviationstack",
     lastUpdated: isoOrNull(live.updated) || new Date().toISOString(),
   };
@@ -822,22 +989,31 @@ function normalizeRecordFromAviationstack(record) {
 
 function normalizeRecordFromFlightAware(record) {
   const flightNumber = normalizeFlightCode(
-    record?.ident_iata || record?.ident || record?.fa_flight_id || record?.flight_number
+    record?.ident_iata ||
+      record?.actual_ident_iata ||
+      record?.ident ||
+      record?.actual_ident ||
+      record?.fa_flight_id ||
+      record?.flight_number
   );
 
-  const originIata = normalizeAirportCode(
-    record?.origin?.code_iata ||
-      record?.origin_iata ||
-      record?.origin?.code ||
-      record?.origin?.airport_code
-  );
+  const originIata =
+    normalizeIataAirportCode(
+      record?.origin?.code_iata ||
+        record?.origin_iata ||
+        record?.origin_lid ||
+        record?.origin?.airport_code ||
+        (typeof record?.origin === "string" ? record.origin : null)
+    ) || null;
 
-  const destinationIata = normalizeAirportCode(
-    record?.destination?.code_iata ||
-      record?.destination_iata ||
-      record?.destination?.code ||
-      record?.destination?.airport_code
-  );
+  const destinationIata =
+    normalizeIataAirportCode(
+      record?.destination?.code_iata ||
+        record?.destination_iata ||
+        record?.destination_lid ||
+        record?.destination?.airport_code ||
+        (typeof record?.destination === "string" ? record.destination : null)
+    ) || null;
 
   const departureTimes = {
     scheduled: isoOrNull(record?.scheduled_out || record?.scheduled_departure_time || record?.filed_departure_time),
@@ -887,11 +1063,13 @@ function normalizeRecordFromFlightAware(record) {
   const airlineCode =
     record?.operator_iata ||
     record?.airline_iata ||
+    parseAirlineCode(record?.ident_iata || record?.actual_ident_iata) ||
     parseAirlineCode(flightNumber) ||
     null;
 
   return {
     airlineCode,
+    providerFlightId: String(record?.fa_flight_id || "").trim() || null,
     flightNumber,
     departureAirportIata: originIata,
     arrivalAirportIata: destinationIata,
@@ -916,6 +1094,7 @@ function normalizeRecordFromFlightAware(record) {
     alerts: null,
     progressPercent: finiteNumberOrNull(record?.progress_percent ?? record?.progress),
     livePosition: normalizeLivePositionFromFlightAware(record),
+    trackPoints: [],
     provider: "flightaware",
     lastUpdated: isoOrNull(record?.last_position?.date || record?.updated || record?.filed_time) || new Date().toISOString(),
   };
@@ -1106,6 +1285,11 @@ function normalizedFromFirehoseMessage(previousNormalized, message) {
       : isTerminalFlightStatus(nextStatus)
         ? null
         : previousNormalized?.livePosition || null;
+  const nextTrackPoints = mergeTrackPoints(
+    previousNormalized?.trackPoints,
+    firehoseNormalized?.trackPoints,
+    nextLivePosition
+  );
 
   const nextNormalized = reconcileOperationalStatus({
     ...previousNormalized,
@@ -1129,6 +1313,7 @@ function normalizedFromFirehoseMessage(previousNormalized, message) {
     inboundFlight: previousNormalized?.inboundFlight || null,
     recentHistory: previousNormalized?.recentHistory || [],
     livePosition: nextLivePosition,
+    trackPoints: nextTrackPoints,
     provider: "flightaware",
     lastUpdated:
       nextLivePosition?.recordedAt ||
@@ -1150,6 +1335,8 @@ function makeProviderQueryKey(providerName, query) {
     date: query.date || "",
     departureIata: (query.departureIata || "").toUpperCase(),
     arrivalIata: (query.arrivalIata || "").toUpperCase(),
+    historical: query.historical === true,
+    preferSchedules: query.preferSchedules === true,
   });
 }
 
@@ -1190,8 +1377,11 @@ function extractFlightAwareSearchRows(payload) {
     "arrivals",
     "departures",
     "enroute",
+    "scheduled",
     "scheduled_arrivals",
     "scheduled_departures",
+    "data",
+    "results",
   ];
 
   const rows = [];
@@ -1204,11 +1394,473 @@ function extractFlightAwareSearchRows(payload) {
   return dedupeFlightAwareRecords(rows);
 }
 
+function flightAwareMatchableFlightCodes(record, normalizer) {
+  const normalized = normalizer(record);
+  const candidates = [
+    normalized?.flightNumber,
+    record?.ident_iata,
+    record?.actual_ident_iata,
+    record?.ident,
+    record?.actual_ident,
+    record?.flight_number,
+  ];
+
+  return Array.from(
+    new Set(
+      candidates
+        .map((value) => normalizeFlightCode(value))
+        .filter(Boolean)
+    )
+  );
+}
+
+function flightAwareDateWindow(queryDate) {
+  const date = new Date(`${String(queryDate || "").slice(0, 10)}T12:00:00Z`);
+  return Number.isFinite(date.getTime()) ? date.getTime() : null;
+}
+
+function normalizedQueryDateString(queryDate) {
+  const normalizedDate = String(queryDate || "").slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(normalizedDate) ? normalizedDate : null;
+}
+
+function currentUTCDateString(referenceTimeMs = Date.now()) {
+  const reference = new Date(referenceTimeMs);
+  return Number.isFinite(reference.getTime()) ? reference.toISOString().slice(0, 10) : null;
+}
+
+function isFutureFlightAwareQueryDate(queryDate, referenceTimeMs = Date.now()) {
+  const normalizedDate = normalizedQueryDateString(queryDate);
+  const currentDate = currentUTCDateString(referenceTimeMs);
+  if (!normalizedDate || !currentDate) {
+    return false;
+  }
+
+  return normalizedDate > currentDate;
+}
+
+function flightAwareHistoryBounds(queryDate) {
+  const normalizedDate = normalizedQueryDateString(queryDate);
+  if (!normalizedDate) {
+    return null;
+  }
+
+  const startDate = new Date(`${normalizedDate}T00:00:00Z`);
+  if (!Number.isFinite(startDate.getTime())) {
+    return null;
+  }
+
+  const endDate = new Date(startDate);
+  endDate.setUTCDate(endDate.getUTCDate() + 1);
+
+  return {
+    start: normalizedDate,
+    end: endDate.toISOString().slice(0, 10),
+  };
+}
+
+function shouldUseHistoricalFlightAwareSearch(query) {
+  return query?.historical === true;
+}
+
+function shouldPrioritizeFlightAwareSchedules(query, referenceTimeMs = Date.now()) {
+  return (
+    query?.preferSchedules === true ||
+    isFutureFlightAwareQueryDate(query?.date, referenceTimeMs) ||
+    shouldPreferFlightAwareSchedules(query?.date, referenceTimeMs)
+  );
+}
+
+function shouldPreferFlightAwareSchedules(queryDate, referenceTimeMs = Date.now()) {
+  const targetMs = flightAwareDateWindow(queryDate);
+  if (!Number.isFinite(targetMs)) {
+    return false;
+  }
+
+  return Math.abs(targetMs - referenceTimeMs) > FLIGHTAWARE_SCHEDULE_WINDOW_MS;
+}
+
+function flightAwareScheduleBounds(queryDate) {
+  const normalizedDate = String(queryDate || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDate)) {
+    return null;
+  }
+
+  return {
+    start: `${normalizedDate}T00:00:00Z`,
+    end: `${normalizedDate}T23:59:59Z`,
+  };
+}
+
+function flightAwareScheduleQueryItems(query) {
+  const params = new URLSearchParams();
+
+  if (query.flightNumber) {
+    const normalizedFlightNumber = normalizeFlightCode(query.flightNumber);
+    const parts = normalizedFlightNumber.match(/^([A-Z0-9]{2,3}?)([0-9]{1,4}[A-Z]?)$/);
+    if (parts) {
+      params.set("airline", parts[1]);
+      params.set("flight_number", parts[2]);
+    }
+  }
+
+  if (query.departureIata) {
+    params.set("origin", query.departureIata.toUpperCase());
+  }
+
+  if (query.arrivalIata) {
+    params.set("destination", query.arrivalIata.toUpperCase());
+  }
+
+  return params;
+}
+
+async function fetchFlightAwareOperationalFlights(query) {
+  const ident = normalizeFlightCode(query.flightNumber);
+  const params = new URLSearchParams({ max_pages: "1" });
+
+  if (query.date) {
+    params.set("start", `${query.date}T00:00:00Z`);
+    params.set("end", `${query.date}T23:59:59Z`);
+  }
+
+  let url;
+  if (ident) {
+    url = `${FLIGHTAWARE_BASE_URL}/flights/${encodeURIComponent(ident)}?${params.toString()}`;
+  } else if (query.departureIata && query.arrivalIata) {
+    url =
+      `${FLIGHTAWARE_BASE_URL}/airports/${encodeURIComponent(query.departureIata.toUpperCase())}` +
+      `/flights/to/${encodeURIComponent(query.arrivalIata.toUpperCase())}?${params.toString()}`;
+  } else {
+    return [];
+  }
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "x-apikey": FLIGHTAWARE_API_KEY,
+      Accept: "application/json",
+    },
+  });
+
+  if (response.status === 400 || response.status === 404) {
+    return [];
+  }
+
+  if (!response.ok) {
+    throw new Error(`Provider error (${response.status})`);
+  }
+
+  const payload = await response.json();
+  return extractFlightAwareSearchRows(payload);
+}
+
+async function fetchFlightAwareScheduleFlights(query) {
+  const bounds = flightAwareScheduleBounds(query.date);
+  if (!bounds) {
+    return [];
+  }
+
+  const params = flightAwareScheduleQueryItems(query);
+  const queryString = params.toString();
+  const url =
+    `${FLIGHTAWARE_BASE_URL}/schedules/${encodeURIComponent(bounds.start)}` +
+    `/${encodeURIComponent(bounds.end)}${queryString ? `?${queryString}` : ""}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "x-apikey": FLIGHTAWARE_API_KEY,
+      Accept: "application/json",
+    },
+  });
+
+  if (response.status === 400 || response.status === 404) {
+    return [];
+  }
+
+  if (!response.ok) {
+    throw new Error(`Provider error (${response.status})`);
+  }
+
+  const payload = await response.json();
+  return extractFlightAwareSearchRows(payload);
+}
+
+async function fetchFlightAwareHistoricalFlights(query) {
+  const ident = normalizeFlightCode(query.flightNumber);
+  const bounds = flightAwareHistoryBounds(query.date);
+  if (!ident || !bounds) {
+    return [];
+  }
+
+  const params = new URLSearchParams({
+    ident_type: "designator",
+    start: bounds.start,
+    end: bounds.end,
+    max_pages: "1",
+  });
+
+  const url =
+    `${FLIGHTAWARE_BASE_URL}/history/flights/${encodeURIComponent(ident)}` +
+    `?${params.toString()}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "x-apikey": FLIGHTAWARE_API_KEY,
+      Accept: "application/json",
+    },
+  });
+
+  if (response.status === 400 || response.status === 404) {
+    return [];
+  }
+
+  if (!response.ok) {
+    throw new Error(`Provider error (${response.status})`);
+  }
+
+  const payload = await response.json();
+  return extractFlightAwareSearchRows(payload);
+}
+
+async function fetchFlightAwareHistoricalRouteFlights(query) {
+  const bounds = flightAwareHistoryBounds(query.date);
+  const departureIata = normalizeAirportCode(query.departureIata);
+  const arrivalIata = normalizeAirportCode(query.arrivalIata);
+  if (!bounds || !departureIata || !arrivalIata) {
+    return [];
+  }
+
+  const params = new URLSearchParams({
+    start: bounds.start,
+    end: bounds.end,
+    max_pages: "1",
+  });
+
+  const url =
+    `${FLIGHTAWARE_BASE_URL}/history/airports/${encodeURIComponent(departureIata)}` +
+    `/flights/to/${encodeURIComponent(arrivalIata)}?${params.toString()}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "x-apikey": FLIGHTAWARE_API_KEY,
+      Accept: "application/json",
+    },
+  });
+
+  if (response.status === 400 || response.status === 404) {
+    return [];
+  }
+
+  if (!response.ok) {
+    throw new Error(`Provider error (${response.status})`);
+  }
+
+  const payload = await response.json();
+  return extractFlightAwareSearchRows(payload);
+}
+
+let providerAuthHealthCache = null;
+let providerAuthHealthPromise = null;
+
+function healthBuildInfo() {
+  return {
+    ...BUILD_INFO,
+    gitCommitShort: BUILD_INFO.gitCommitSha ? BUILD_INFO.gitCommitSha.slice(0, 7) : null,
+  };
+}
+
+function classifyFlightAwareAuthProbeResult({
+  statusCode = null,
+  checkedAt = new Date().toISOString(),
+  error = null,
+} = {}) {
+  const normalizedError = error?.message || error || null;
+  const base = {
+    provider: "flightaware",
+    endpoint: "schedules",
+    checkedAt,
+    ok: null,
+    state: "unknown",
+    statusCode,
+    detail: null,
+  };
+
+  if (!PROVIDER_CALLS_ENABLED) {
+    return {
+      ...base,
+      ok: null,
+      state: "skipped",
+      detail: "Provider calls are disabled.",
+    };
+  }
+
+  if (!FLIGHTAWARE_API_KEY) {
+    return {
+      ...base,
+      ok: false,
+      state: "missing_api_key",
+      detail: "FLIGHTAWARE_API_KEY is not configured.",
+    };
+  }
+
+  if (normalizedError) {
+    const lowered = String(normalizedError).toLowerCase();
+    return {
+      ...base,
+      ok: null,
+      state: lowered.includes("abort") || lowered.includes("timeout") ? "timeout" : "unreachable",
+      detail: String(normalizedError),
+    };
+  }
+
+  if (statusCode === 401 || statusCode === 403) {
+    return {
+      ...base,
+      ok: false,
+      state: "invalid_credentials",
+      detail: "FlightAware rejected the configured credentials.",
+    };
+  }
+
+  if (statusCode === 429) {
+    return {
+      ...base,
+      ok: true,
+      state: "rate_limited",
+      detail: "FlightAware accepted the credentials but rate limited the probe.",
+    };
+  }
+
+  if (statusCode >= 200 && statusCode < 500) {
+    return {
+      ...base,
+      ok: true,
+      state: "ok",
+      detail: "FlightAware accepted the schedules probe.",
+    };
+  }
+
+  if (statusCode >= 500) {
+    return {
+      ...base,
+      ok: null,
+      state: "upstream_error",
+      detail: "FlightAware returned a server error for the schedules probe.",
+    };
+  }
+
+  return base;
+}
+
+async function probeFlightAwareAuthHealth() {
+  const checkedAt = new Date().toISOString();
+  const bounds = flightAwareScheduleBounds(new Date().toISOString().slice(0, 10));
+  if (!bounds) {
+    return classifyFlightAwareAuthProbeResult({
+      checkedAt,
+      error: "Unable to build FlightAware schedule health-check bounds.",
+    });
+  }
+
+  const params = new URLSearchParams([
+    ["ident", "__RUNWY_HEALTHCHECK__"],
+    ["max_pages", "1"],
+  ]);
+  const url =
+    `${FLIGHTAWARE_BASE_URL}/schedules/${encodeURIComponent(bounds.start)}` +
+    `/${encodeURIComponent(bounds.end)}?${params.toString()}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4_000);
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "x-apikey": FLIGHTAWARE_API_KEY,
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+
+    return classifyFlightAwareAuthProbeResult({
+      statusCode: response.status,
+      checkedAt,
+    });
+  } catch (error) {
+    return classifyFlightAwareAuthProbeResult({
+      checkedAt,
+      error,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function getProviderAuthHealth() {
+  if (FLIGHT_DATA_PROVIDER !== "flightaware") {
+    return {
+      provider: FLIGHT_DATA_PROVIDER,
+      endpoint: null,
+      checkedAt: new Date().toISOString(),
+      ok: null,
+      state: PROVIDER_CALLS_ENABLED ? "not_implemented" : "skipped",
+      statusCode: null,
+      detail: PROVIDER_CALLS_ENABLED
+        ? `No auth probe is implemented for provider ${FLIGHT_DATA_PROVIDER}.`
+        : "Provider calls are disabled.",
+    };
+  }
+
+  const now = Date.now();
+  if (
+    providerAuthHealthCache &&
+    now - providerAuthHealthCache.cachedAtMs < HEALTH_PROVIDER_AUTH_CACHE_TTL_MS
+  ) {
+    return {
+      ...providerAuthHealthCache.result,
+      cached: true,
+      cacheTtlMs: HEALTH_PROVIDER_AUTH_CACHE_TTL_MS,
+    };
+  }
+
+  if (!providerAuthHealthPromise) {
+    providerAuthHealthPromise = (async () => {
+      const result = await probeFlightAwareAuthHealth();
+      providerAuthHealthCache = {
+        cachedAtMs: Date.now(),
+        result,
+      };
+      return result;
+    })().finally(() => {
+      providerAuthHealthPromise = null;
+    });
+  }
+
+  const result = await providerAuthHealthPromise;
+  return {
+    ...result,
+    cached: false,
+    cacheTtlMs: HEALTH_PROVIDER_AUTH_CACHE_TTL_MS,
+  };
+}
+
 function makeProviderPositionKey(providerName, providerFlightId) {
   return JSON.stringify({
     providerName,
     providerFlightId: String(providerFlightId || "").trim(),
     kind: "live-position",
+  });
+}
+
+function makeProviderTrackKey(providerName, providerFlightId) {
+  return JSON.stringify({
+    providerName,
+    providerFlightId: String(providerFlightId || "").trim(),
+    kind: "flight-track",
   });
 }
 
@@ -1311,6 +1963,160 @@ function flightAwareTrackCandidatesFromPayload(payload) {
   return candidates;
 }
 
+function latestTrackPoint(trackPoints) {
+  const normalizedPoints = normalizeTrackPoints(trackPoints);
+  return normalizedPoints.length > 0 ? normalizedPoints[normalizedPoints.length - 1] : null;
+}
+
+function flightAwareTrackSeedMetadata({ providerFlightId, source, fetchedTrackPoints, livePosition }) {
+  const latestPoint = latestTrackPoint(fetchedTrackPoints) || livePosition || null;
+
+  return {
+    flightawareTrackTrail: {
+      providerFlightId: String(providerFlightId || "").trim() || null,
+      source: String(source || "").trim() || "unknown",
+      requestedAt: new Date().toISOString(),
+      fetchedPointCount: Array.isArray(fetchedTrackPoints) ? fetchedTrackPoints.length : 0,
+      latestPointRecordedAt: latestPoint?.recordedAt || null,
+    },
+  };
+}
+
+function shouldSeedFlightAwareTrackTrail({
+  normalized,
+  providerName,
+  providerFlightId,
+  metadata,
+}) {
+  if (providerName !== "flightaware") {
+    return false;
+  }
+
+  const normalizedProviderFlightId = String(providerFlightId || "").trim();
+  if (!normalizedProviderFlightId || isTerminalFlightStatus(normalized?.status)) {
+    return false;
+  }
+
+  const looksAirborneOrLive = Boolean(
+    normalized?.livePosition ||
+      normalized?.takeoffTimes?.actual ||
+      normalized?.departureTimes?.actual ||
+      ["departed", "enroute"].includes(String(normalized?.status || "").toLowerCase())
+  );
+  if (!looksAirborneOrLive) {
+    return false;
+  }
+
+  if (Array.isArray(normalized?.trackPoints) && normalized.trackPoints.length > 1) {
+    return false;
+  }
+
+  const priorSeed = metadata?.flightawareTrackTrail;
+  if (
+    String(priorSeed?.providerFlightId || "").trim() === normalizedProviderFlightId &&
+    String(priorSeed?.requestedAt || "").trim()
+  ) {
+    const priorSeedRequestedAtMs = new Date(priorSeed.requestedAt).getTime();
+    if (
+      Number.isFinite(priorSeedRequestedAtMs) &&
+      Date.now() - priorSeedRequestedAtMs < FLIGHTAWARE_POSITION_CACHE_TTL_MS
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function mergeFlightAwareTrackTrailIntoNormalized(normalized, { trackPoints, livePosition } = {}) {
+  const mergedTrackPoints = mergeTrackPoints(normalized?.trackPoints, trackPoints, livePosition || null);
+  const latestMergedTrackPoint = latestTrackPoint(mergedTrackPoints);
+  const liveCandidates = [normalized?.livePosition, livePosition, latestMergedTrackPoint]
+    .filter(Boolean)
+    .sort((left, right) => toEpochMillisOrZero(right?.recordedAt) - toEpochMillisOrZero(left?.recordedAt));
+  const mergedLivePosition = liveCandidates[0] || null;
+
+  return reconcileOperationalStatus({
+    ...normalized,
+    livePosition: mergedLivePosition,
+    trackPoints: mergedTrackPoints,
+    lastUpdated:
+      mergedLivePosition?.recordedAt ||
+      latestMergedTrackPoint?.recordedAt ||
+      normalized?.lastUpdated ||
+      new Date().toISOString(),
+  });
+}
+
+async function fetchFlightAwareTrackTrail(providerFlightId) {
+  if (!PROVIDER_CALLS_ENABLED) {
+    return { trackPoints: [], livePosition: null };
+  }
+
+  const normalizedFlightId = String(providerFlightId || "").trim();
+  if (!normalizedFlightId) {
+    return { trackPoints: [], livePosition: null };
+  }
+
+  const cacheKey = makeProviderTrackKey("flightaware", normalizedFlightId);
+  const now = Date.now();
+  const cached = providerCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.data;
+  }
+
+  return withProviderRequestDedup(cacheKey, async () => {
+    const response = await fetch(
+      `${FLIGHTAWARE_BASE_URL}/flights/${encodeURIComponent(normalizedFlightId)}/track`,
+      {
+        method: "GET",
+        headers: {
+          "x-apikey": FLIGHTAWARE_API_KEY,
+          Accept: "application/json",
+        },
+      }
+    );
+
+    if ([400, 401, 403, 404].includes(response.status)) {
+      const emptyData = { trackPoints: [], livePosition: null };
+      providerCache.set(cacheKey, {
+        data: emptyData,
+        expiresAt: now + FLIGHTAWARE_POSITION_CACHE_TTL_MS,
+      });
+      enforceMapSizeLimit(providerCache, MAX_PROVIDER_CACHE_ENTRIES);
+      return emptyData;
+    }
+
+    if (!response.ok) {
+      throw new Error(`Provider track error (${response.status})`);
+    }
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (_error) {
+      payload = null;
+    }
+
+    const trackPoints = compactTrackPoints(
+      flightAwareTrackCandidatesFromPayload(payload)
+        .map(normalizeFlightAwareTrackPoint)
+        .filter(Boolean)
+    );
+    const data = {
+      trackPoints,
+      livePosition: latestTrackPoint(trackPoints),
+    };
+
+    providerCache.set(cacheKey, {
+      data,
+      expiresAt: now + FLIGHTAWARE_POSITION_CACHE_TTL_MS,
+    });
+    enforceMapSizeLimit(providerCache, MAX_PROVIDER_CACHE_ENTRIES);
+    return data;
+  });
+}
+
 async function fetchFlightAwareLivePosition(providerFlightId) {
   if (!PROVIDER_CALLS_ENABLED) {
     return null;
@@ -1386,6 +2192,47 @@ async function fetchFlightAwareLivePosition(providerFlightId) {
   });
 }
 
+async function maybeBuildFlightAwareTrackTrailSeed({
+  trackedRecord = null,
+  normalized,
+  providerName,
+  rawRecord,
+  source,
+}) {
+  const providerFlightId = String(
+    providerFlightIdentifier(rawRecord, providerName) || trackedRecord?.providerFlightId || ""
+  ).trim();
+
+  if (
+    !shouldSeedFlightAwareTrackTrail({
+      normalized,
+      providerName,
+      providerFlightId,
+      metadata: trackedRecord?.metadata,
+    })
+  ) {
+    return { normalized, metadataPatch: null };
+  }
+
+  try {
+    const trackTrail = await fetchFlightAwareTrackTrail(providerFlightId);
+    return {
+      normalized: mergeFlightAwareTrackTrailIntoNormalized(normalized, trackTrail),
+      metadataPatch: flightAwareTrackSeedMetadata({
+        providerFlightId,
+        source,
+        fetchedTrackPoints: trackTrail.trackPoints,
+        livePosition: trackTrail.livePosition,
+      }),
+    };
+  } catch (error) {
+    console.warn(
+      `FlightAware track trail lookup failed for ${providerFlightId}: ${error?.message || String(error)}`
+    );
+    return { normalized, metadataPatch: null };
+  }
+}
+
 function sortRecordsByDepartureDesc(records, normalizer) {
   return [...records].sort((a, b) => {
     const normalizedA = normalizer(a);
@@ -1405,7 +2252,8 @@ function scoreCandidate(record, query, normalizer) {
   const normalized = normalizer(record);
   const wantedFlight = normalizeFlightCode(query.flightNumber);
 
-  if (normalized.flightNumber === wantedFlight) score += 6;
+  const candidateFlightCodes = flightAwareMatchableFlightCodes(record, normalizer);
+  if (wantedFlight && candidateFlightCodes.includes(wantedFlight)) score += 6;
 
   if (
     normalized.departureAirportIata &&
@@ -1563,53 +2411,37 @@ async function fetchFlightAwareFlights(query) {
   }
 
   return withProviderRequestDedup(key, async () => {
-    const ident = normalizeFlightCode(query.flightNumber);
-    const params = new URLSearchParams({ max_pages: "1" });
+    let rows = [];
 
-    if (query.date) {
-      params.set("start", `${query.date}T00:00:00Z`);
-      params.set("end", `${query.date}T23:59:59Z`);
-    }
-
-    let url;
-    if (ident) {
-      url = `${FLIGHTAWARE_BASE_URL}/flights/${encodeURIComponent(ident)}?${params.toString()}`;
-    } else if (query.departureIata && query.arrivalIata) {
-      url =
-        `${FLIGHTAWARE_BASE_URL}/airports/${encodeURIComponent(query.departureIata.toUpperCase())}` +
-        `/flights/to/${encodeURIComponent(query.arrivalIata.toUpperCase())}?${params.toString()}`;
+    if (shouldUseHistoricalFlightAwareSearch(query)) {
+      rows = query.flightNumber
+        ? await fetchFlightAwareHistoricalFlights(query)
+        : await fetchFlightAwareHistoricalRouteFlights(query);
     } else {
-      return [];
-    }
+      const prioritizeSchedules = shouldPrioritizeFlightAwareSchedules(query);
+      const fetchers = prioritizeSchedules
+        ? [fetchFlightAwareScheduleFlights, fetchFlightAwareOperationalFlights]
+        : [fetchFlightAwareOperationalFlights, fetchFlightAwareScheduleFlights];
 
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        "x-apikey": FLIGHTAWARE_API_KEY,
-        Accept: "application/json",
-      },
-    });
-
-    // FlightAware can return 400/404 for unknown identifiers or no data windows.
-    // Treat these as "no candidates" so app search shows empty results instead of hard errors.
-    if (response.status === 400 || response.status === 404) {
-      if (providerCache.has(key)) {
-        providerCache.delete(key);
+      if (prioritizeSchedules) {
+        const mergedRows = [];
+        for (const fetcher of fetchers) {
+          const nextRows = await fetcher(query);
+          if (nextRows.length > 0) {
+            mergedRows.push(...nextRows);
+          }
+        }
+        rows = dedupeFlightAwareRecords(mergedRows);
+      } else {
+        for (const fetcher of fetchers) {
+          rows = await fetcher(query);
+          if (rows.length > 0) {
+            break;
+          }
+        }
       }
-      providerCache.set(key, {
-        data: [],
-        expiresAt: now + CACHE_TTL_MS,
-      });
-      enforceMapSizeLimit(providerCache, MAX_PROVIDER_CACHE_ENTRIES);
-      return [];
     }
 
-    if (!response.ok) {
-      throw new Error(`Provider error (${response.status})`);
-    }
-
-    const payload = await response.json();
-    const rows = extractFlightAwareSearchRows(payload);
     if (providerCache.has(key)) {
       providerCache.delete(key);
     }
@@ -1644,12 +2476,12 @@ function normalizeWithContext(record, records, query, normalizer, previousNormal
   const recentHistory = deriveRecentHistory(records, record, normalizer);
   const alerts = deriveAlertFlags(previousNormalized, normalized);
 
-  return {
+  return reconcileOperationalStatus(mergeRealtimeTelemetry(previousNormalized, {
     ...normalized,
     recentHistory,
     alerts,
     provider: FLIGHT_DATA_PROVIDER,
-  };
+  }));
 }
 
 const trackingStore = createTrackingStore({
@@ -1706,10 +2538,13 @@ async function enrichNormalizedWithLivePosition(normalized, providerName, rawRec
       return normalized;
     }
 
+    const trackPoints = mergeTrackPoints(normalized?.trackPoints, null, livePosition);
+
     return {
       ...reconcileOperationalStatus({
         ...normalized,
         livePosition,
+        trackPoints,
       }),
     };
   } catch (error) {
@@ -2090,11 +2925,16 @@ async function dispatchFlightStatusNotifications(flightId, normalized) {
 
         union
 
-        select fw.watcher_user_id as user_id
-        from public.flight_watchers fw
-        where fw.tracking_session_id = $1::uuid
-          and fw.watch_state = 'approved'
-          and fw.can_receive_notifications = true
+        select fp.viewer_user_id as user_id
+        from public.tracking_sessions ts
+        join public.friend_permissions fp
+          on fp.owner_user_id = ts.owner_user_id
+        join public.friend_relationships fr
+          on fr.id = fp.relationship_id
+        where ts.id = $1::uuid
+          and fr.relationship_status = 'active'
+          and fp.can_view_live = true
+          and fp.can_receive_alerts = true
       )
       insert into public.notifications (
         user_id,
@@ -2147,6 +2987,37 @@ async function dispatchFlightStatusNotifications(flightId, normalized) {
   }
 }
 
+async function findReusableTrackedRecordForUser({
+  userId,
+  providerFlightId,
+  query,
+}) {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId || !query?.flightNumber) {
+    return null;
+  }
+
+  let candidates = [];
+
+  if (providerFlightId) {
+    candidates = await listTrackedFlightsByProviderFlightId(providerFlightId, {
+      statuses: ["pending", "active"],
+    });
+  }
+
+  if (!candidates.length) {
+    candidates = await listTrackedFlightsByFlightNumber(query.flightNumber, {
+      statuses: ["pending", "active"],
+      startDate: query.date,
+      endDate: query.date,
+      departureIata: query.departureIata,
+      arrivalIata: query.arrivalIata,
+    });
+  }
+
+  return candidates.find((candidate) => String(candidate?.ownerUserId || "").trim() === normalizedUserId) || null;
+}
+
 async function refreshTrackedFlightRecord(trackedRecord, options = {}) {
   if (!PROVIDER_CALLS_ENABLED) {
     return trackedRecord;
@@ -2169,7 +3040,24 @@ async function refreshTrackedFlightRecord(trackedRecord, options = {}) {
     trackedRecord.normalized
   );
 
-  if (includeLivePosition) {
+  let trailSeedMetadataPatch = null;
+  const seededTrail = await maybeBuildFlightAwareTrackTrailSeed({
+    trackedRecord,
+    normalized,
+    providerName: provider.name,
+    rawRecord: selected,
+    source: "tracked_refresh",
+  });
+  normalized = seededTrail.normalized;
+  trailSeedMetadataPatch = seededTrail.metadataPatch;
+
+  if (
+    !trailSeedMetadataPatch &&
+    (
+      includeLivePosition ||
+      (!normalized.livePosition && (!Array.isArray(normalized.trackPoints) || normalized.trackPoints.length === 0))
+    )
+  ) {
     normalized = await enrichNormalizedWithLivePosition(normalized, provider.name, selected);
   }
   normalized.lastUpdated = normalized.livePosition?.recordedAt || normalized.lastUpdated || new Date().toISOString();
@@ -2184,6 +3072,9 @@ async function refreshTrackedFlightRecord(trackedRecord, options = {}) {
       providerFlightId: providerFlightIdentifier(selected, provider.name),
       rawProviderPayload: selected,
     });
+    if (trailSeedMetadataPatch) {
+      await mergeTrackingSessionMetadata(trackedRecord.flightId, trailSeedMetadataPatch);
+    }
   } else {
     const lastUpdated = new Date().toISOString();
     await upsertTrackedFlightRecord({
@@ -2379,6 +3270,17 @@ function isTrackedRecordRefreshDue(trackedRecord, nowMs = Date.now()) {
     return false;
   }
 
+  if (
+    shouldSeedFlightAwareTrackTrail({
+      normalized: trackedRecord.normalized,
+      providerName: String(trackedRecord.provider || FLIGHT_DATA_PROVIDER).toLowerCase(),
+      providerFlightId: trackedRecord.providerFlightId,
+      metadata: trackedRecord.metadata,
+    })
+  ) {
+    return true;
+  }
+
   const nextPollAt = new Date(trackedRecord.nextPollAfter || "").getTime();
   return Number.isFinite(nextPollAt) && nextPollAt <= nowMs;
 }
@@ -2434,8 +3336,30 @@ function firehoseMessageMatchesTrackedRecord(message, trackedRecord) {
     return true;
   }
 
-  const flightNumber = firehoseMessageFlightNumber(message);
-  if (!flightNumber || normalizeFlightCode(trackedRecord.query?.flightNumber) !== flightNumber) {
+  const messageFlightNumbers = Array.from(
+    new Set(
+      [message?.ident_iata, message?.ident, message?.flight_number]
+        .map((value) => normalizeFlightCode(value))
+        .filter(Boolean)
+    )
+  );
+  const trackedFlightNumbers = Array.from(
+    new Set(
+      [
+        trackedRecord.query?.flightNumber,
+        trackedRecord.normalized?.flightNumber,
+        String(trackedRecord.providerFlightId || "").split("-")[0],
+      ]
+        .map((value) => normalizeFlightCode(value))
+        .filter(Boolean)
+    )
+  );
+
+  if (
+    messageFlightNumbers.length === 0 ||
+    trackedFlightNumbers.length === 0 ||
+    !messageFlightNumbers.some((flightNumber) => trackedFlightNumbers.includes(flightNumber))
+  ) {
     return false;
   }
 
@@ -2597,6 +3521,9 @@ const firehoseRuntime = createFirehoseRuntime({
   firehoseMinSecondsBetweenAirborne: FIREHOSE_MIN_SECONDS_BETWEEN_AIRBORNE,
   firehoseTrackedSetRefreshMs: FIREHOSE_TRACKED_SET_REFRESH_MS,
   firehoseReconnectDelayMs: FIREHOSE_RECONNECT_DELAY_MS,
+  firehoseBackfillMaxHours: FIREHOSE_BACKFILL_MAX_HOURS,
+  firehoseBackfillPredepartureMinutes: FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES,
+  firehoseBackfillMinTrackPoints: FIREHOSE_BACKFILL_MIN_TRACK_POINTS,
   usesDatabase,
   ensureDatabaseSchema,
   listFirehoseTrackedRows: listFirehoseEligibleTrackingRows,
@@ -2612,6 +3539,7 @@ const {
 
 app.get("/health", async (_req, res) => {
   let trackingSummary = null;
+  let providerAuth = null;
 
   if (usesDatabase()) {
     try {
@@ -2623,8 +3551,25 @@ app.get("/health", async (_req, res) => {
     }
   }
 
+  try {
+    providerAuth = await getProviderAuthHealth();
+  } catch (error) {
+    providerAuth = {
+      provider: FLIGHT_DATA_PROVIDER,
+      endpoint: FLIGHT_DATA_PROVIDER === "flightaware" ? "schedules" : null,
+      checkedAt: new Date().toISOString(),
+      ok: null,
+      state: "health_probe_failed",
+      statusCode: null,
+      detail: error?.message || String(error),
+      cached: false,
+      cacheTtlMs: HEALTH_PROVIDER_AUTH_CACHE_TTL_MS,
+    };
+  }
+
   res.json({
     ok: true,
+    build: healthBuildInfo(),
     provider: FLIGHT_DATA_PROVIDER,
     providerCallsEnabled: PROVIDER_CALLS_ENABLED,
     nodeEnv: NODE_ENV,
@@ -2633,6 +3578,7 @@ app.get("/health", async (_req, res) => {
     pollerEnabled: isPollerRunning(),
     firehoseConfigured: isFirehoseConfigured(),
     firehoseEnabled: isFirehoseRunning(),
+    providerAuth,
     trackingSummary,
     safeguards: {
       maxActiveTrackingSessionsPerUser:
@@ -2643,11 +3589,14 @@ app.get("/health", async (_req, res) => {
       mapFallbackEnabled: FLIGHTAWARE_ENABLE_MAP_FALLBACK,
       webhookRefreshMinIntervalMs: WEBHOOK_REFRESH_MIN_INTERVAL_MS,
       providerCallsEnabled: PROVIDER_CALLS_ENABLED,
-      disableProviderCalls: DISABLE_PROVIDER_CALLS,
-      firehoseTrackLookaheadMs: FIREHOSE_TRACK_LOOKAHEAD_MS,
-      firehoseTrackedSetRefreshMs: FIREHOSE_TRACKED_SET_REFRESH_MS,
-    },
-  });
+    disableProviderCalls: DISABLE_PROVIDER_CALLS,
+    firehoseTrackLookaheadMs: FIREHOSE_TRACK_LOOKAHEAD_MS,
+    firehoseTrackedSetRefreshMs: FIREHOSE_TRACKED_SET_REFRESH_MS,
+    firehoseBackfillMaxHours: FIREHOSE_BACKFILL_MAX_HOURS,
+    firehoseBackfillPredepartureMinutes: FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES,
+    firehoseBackfillMinTrackPoints: FIREHOSE_BACKFILL_MIN_TRACK_POINTS,
+  },
+});
 });
 
 app.get("/v1/airports", (req, res) => {
@@ -2748,11 +3697,38 @@ app.post("/v1/track", async (req, res) => {
       return res.status(404).json({ error: "No matching flight found" });
     }
 
-    let normalized = normalizeWithContext(selected, records, query, provider.normalizeRecord, null);
-    normalized = await enrichNormalizedWithLivePosition(normalized, provider.name, selected);
+    const providerFlightId = providerFlightIdentifier(selected, provider.name);
+    const reusableTracked = await findReusableTrackedRecordForUser({
+      userId,
+      providerFlightId,
+      query,
+    });
+
+    let normalized = normalizeWithContext(
+      selected,
+      records,
+      query,
+      provider.normalizeRecord,
+      reusableTracked?.normalized || null
+    );
+    if (reusableTracked?.normalized) {
+      normalized = mergeFlightAwareTrackTrailIntoNormalized(normalized, {
+        trackPoints: reusableTracked.normalized.trackPoints,
+        livePosition: reusableTracked.normalized.livePosition,
+      });
+    }
+    const trackTrailSeedCandidate = shouldSeedFlightAwareTrackTrail({
+      normalized,
+      providerName: provider.name,
+      providerFlightId,
+      metadata: reusableTracked?.metadata || null,
+    });
+    if (!trackTrailSeedCandidate) {
+      normalized = await enrichNormalizedWithLivePosition(normalized, provider.name, selected);
+    }
     normalized.lastUpdated = normalized.livePosition?.recordedAt || normalized.lastUpdated || new Date().toISOString();
 
-    const tracked = await createOrReuseTrackingSession({
+    let tracked = await createOrReuseTrackingSession({
       query,
       normalized,
       rawProviderPayload: selected,
@@ -2763,6 +3739,49 @@ app.post("/v1/track", async (req, res) => {
 
     if (!tracked) {
       return res.status(500).json({ error: "Unable to create tracking session" });
+    }
+
+    if (trackTrailSeedCandidate) {
+      const seededTrail = await maybeBuildFlightAwareTrackTrailSeed({
+        trackedRecord: tracked,
+        normalized: tracked.normalized,
+        providerName: provider.name,
+        rawRecord: selected,
+        source: "manual_track",
+      });
+
+      let trackedNormalized = seededTrail.normalized;
+      if (
+        !seededTrail.metadataPatch &&
+        !trackedNormalized.livePosition &&
+        (!Array.isArray(trackedNormalized.trackPoints) || trackedNormalized.trackPoints.length === 0)
+      ) {
+        trackedNormalized = await enrichNormalizedWithLivePosition(trackedNormalized, provider.name, selected);
+        trackedNormalized.lastUpdated =
+          trackedNormalized.livePosition?.recordedAt ||
+          trackedNormalized.lastUpdated ||
+          new Date().toISOString();
+      }
+
+      if (
+        seededTrail.metadataPatch ||
+        trackedNormalized.livePosition ||
+        (Array.isArray(trackedNormalized.trackPoints) && trackedNormalized.trackPoints.length > 0)
+      ) {
+        await persistTrackingSnapshot({
+          flightId: tracked.flightId,
+          userId: tracked.ownerUserId,
+          query: tracked.query,
+          normalized: trackedNormalized,
+          provider: tracked.provider,
+          providerFlightId: providerFlightIdentifier(selected, provider.name) || tracked.providerFlightId || providerFlightId,
+          rawProviderPayload: selected,
+        });
+        if (seededTrail.metadataPatch) {
+          await mergeTrackingSessionMetadata(tracked.flightId, seededTrail.metadataPatch);
+        }
+        tracked = await fetchTrackingRowByID(tracked.flightId);
+      }
     }
 
     ensureFlightAwareAlertForTrackedSession(req, tracked).catch((error) => {
@@ -2791,12 +3810,12 @@ app.get("/v1/flights/:flightId", async (req, res) => {
     return res.status(401).json({ error: "Sign in is required" });
   }
 
-  const tracked = await fetchAccessibleTrackingRow(flightId, userId);
-  if (!tracked) {
-    return res.status(404).json({ error: "Unknown flightId" });
-  }
-
   try {
+    const tracked = await fetchAccessibleTrackingRow(flightId, userId);
+    if (!tracked) {
+      return res.status(404).json({ error: "Unknown flightId" });
+    }
+
     const shouldRefresh = isTrackedRecordRefreshDue(tracked);
     const current = shouldRefresh ? await refreshTrackedFlightRecord(tracked) : tracked;
 
@@ -2805,12 +3824,13 @@ app.get("/v1/flights/:flightId", async (req, res) => {
       normalized: current.normalized,
       lastUpdated: current.lastUpdated,
     });
-  } catch (_error) {
-    return res.status(200).json({
+  } catch (error) {
+    console.error("Failed to load tracked flight details", {
       flightId,
-      normalized: tracked.normalized,
-      lastUpdated: tracked.lastUpdated,
+      userId,
+      error: error?.message || String(error),
     });
+    return res.status(500).json({ error: "Failed to load flight details" });
   }
 });
 
@@ -2822,7 +3842,7 @@ async function buildSearchCandidates(query) {
   const normalized = await Promise.all(
     topRecords.map(async (record, index) => {
       let candidate = normalizeWithContext(record, records, query, provider.normalizeRecord, null);
-      if (index < SEARCH_LIVE_ENRICH_LIMIT) {
+      if (query?.historical !== true && index < SEARCH_LIVE_ENRICH_LIMIT) {
         candidate = await enrichNormalizedWithLivePosition(candidate, provider.name, record);
       }
       candidate.lastUpdated = candidate.livePosition?.recordedAt || candidate.lastUpdated || new Date().toISOString();
@@ -2839,14 +3859,14 @@ app.get("/v1/search", async (req, res) => {
     return res.status(400).json({ error: validated.error });
   }
 
-  const { flightNumber, date, departureIata, arrivalIata } = validated.value;
+  const { flightNumber, date, departureIata, arrivalIata, historical, preferSchedules } = validated.value;
 
   if (!PROVIDER_CALLS_ENABLED) {
     return res.json({ candidates: [], providerDisabled: true });
   }
 
   try {
-    const query = { flightNumber, date, departureIata, arrivalIata };
+    const query = { flightNumber, date, departureIata, arrivalIata, historical, preferSchedules };
     const normalized = await buildSearchCandidates(query);
     return res.json({ candidates: normalized });
   } catch (error) {
@@ -2856,6 +3876,8 @@ app.get("/v1/search", async (req, res) => {
       date,
       departureIata,
       arrivalIata,
+      historical,
+      preferSchedules,
       error: error?.message || String(error),
     });
     return res.status(502).json({ error: "Failed to fetch provider data" });
@@ -2868,14 +3890,14 @@ app.get("/v1/search/route", async (req, res) => {
     return res.status(400).json({ error: validated.error });
   }
 
-  const { date, departureIata, arrivalIata } = validated.value;
+  const { date, departureIata, arrivalIata, historical, preferSchedules } = validated.value;
 
   if (!PROVIDER_CALLS_ENABLED) {
     return res.json({ candidates: [], providerDisabled: true });
   }
 
   try {
-    const query = { date, departureIata, arrivalIata };
+    const query = { date, departureIata, arrivalIata, historical, preferSchedules };
     const normalized = await buildSearchCandidates(query);
     return res.json({ candidates: normalized });
   } catch (error) {
@@ -2884,9 +3906,37 @@ app.get("/v1/search/route", async (req, res) => {
       date,
       departureIata,
       arrivalIata,
+      historical,
+      preferSchedules,
       error: error?.message || String(error),
     });
     return res.status(502).json({ error: "Failed to fetch provider data" });
+  }
+});
+
+app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req, res) => {
+  if (!PROVIDER_CALLS_ENABLED) {
+    return res.status(503).json({ error: "Provider calls are temporarily disabled" });
+  }
+
+  const providerFlightId = String(req.params?.providerFlightId || "").trim();
+  if (!providerFlightId) {
+    return res.status(400).json({ error: "Missing provider flight id" });
+  }
+
+  try {
+    const trackTrail = await fetchFlightAwareTrackTrail(providerFlightId);
+    return res.json({
+      providerFlightId,
+      trackPoints: Array.isArray(trackTrail.trackPoints) ? trackTrail.trackPoints : [],
+      livePosition: trackTrail.livePosition || null,
+    });
+  } catch (error) {
+    console.error("FlightAware track fetch failed", {
+      providerFlightId,
+      error: error?.message || String(error),
+    });
+    return res.status(502).json({ error: "Failed to fetch provider track" });
   }
 });
 
@@ -3004,4 +4054,14 @@ module.exports = {
   startTrackingPoller,
   startTrackingPollerWorker,
   usesDatabase,
+  __test__: {
+    classifyFlightAwareAuthProbeResult,
+    extractFlightAwareSearchRows,
+    flightAwareHistoryBounds,
+    healthBuildInfo,
+    isFutureFlightAwareQueryDate,
+    normalizeRecordFromFlightAware,
+    scoreCandidate,
+    shouldPreferFlightAwareSchedules,
+  },
 };
