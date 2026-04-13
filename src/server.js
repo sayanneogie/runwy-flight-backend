@@ -2333,6 +2333,7 @@ function deriveAlertFlags(previousNormalized, nextNormalized) {
       statusChanged: false,
       delayedNow: false,
       cancelledNow: false,
+      gateChangedNow: false,
       previousStatus: previousNormalized?.status || null,
       currentStatus: nextNormalized?.status || null,
     };
@@ -2340,6 +2341,8 @@ function deriveAlertFlags(previousNormalized, nextNormalized) {
 
   const previousDelay = Number(previousNormalized.delayMinutes || 0);
   const nextDelay = Number(nextNormalized.delayMinutes || 0);
+  const previousGate = `${previousNormalized.gate || ""}`.trim();
+  const nextGate = `${nextNormalized.gate || ""}`.trim();
 
   return {
     statusChanged: previousNormalized.status !== nextNormalized.status,
@@ -2348,6 +2351,9 @@ function deriveAlertFlags(previousNormalized, nextNormalized) {
       (previousNormalized.status !== "delayed" || nextDelay > previousDelay),
     cancelledNow:
       nextNormalized.status === "cancelled" && previousNormalized.status !== "cancelled",
+    gateChangedNow:
+      Boolean(nextGate) &&
+      previousGate !== nextGate,
     previousStatus: previousNormalized.status || null,
     currentStatus: nextNormalized.status || null,
   };
@@ -2853,6 +2859,28 @@ function notificationPayloadFor(normalized, flightId) {
     };
   }
 
+  if (alerts.gateChangedNow) {
+    const gate = `${normalized?.gate || ""}`.trim();
+    const gateText = gate ? ` to gate ${gate}` : "";
+
+    return {
+      aps: {
+        alert: {
+          title: "Gate Changed",
+          body: `${code} (${route}) moved${gateText}.`,
+        },
+        sound: "default",
+      },
+      runwy: {
+        type: "flight_gate_change",
+        flightId,
+        status: normalized.status || null,
+        gate: gate || null,
+        route,
+      },
+    };
+  }
+
   return null;
 }
 
@@ -3193,7 +3221,7 @@ async function refreshTrackedFlightRecord(trackedRecord, options = {}) {
     });
   }
 
-  if (normalized.alerts?.cancelledNow || normalized.alerts?.delayedNow) {
+  if (normalized.alerts?.cancelledNow || normalized.alerts?.delayedNow || normalized.alerts?.gateChangedNow) {
     await dispatchFlightStatusNotifications(trackedRecord.flightId, normalized);
   }
 
@@ -3574,7 +3602,7 @@ async function applyFirehoseMessageToTrackedRecord(trackedRecord, message) {
     rawProviderPayload: message,
   });
 
-  if (normalized.alerts?.cancelledNow || normalized.alerts?.delayedNow) {
+  if (normalized.alerts?.cancelledNow || normalized.alerts?.delayedNow || normalized.alerts?.gateChangedNow) {
     await dispatchFlightStatusNotifications(trackedRecord.flightId, normalized);
   }
 
