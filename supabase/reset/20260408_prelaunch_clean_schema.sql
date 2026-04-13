@@ -142,9 +142,25 @@ create table public.user_flights (
   calendar_source_text text,
   provider_name text,
   provider_flight_id text,
+  notifications_enabled boolean not null default true,
+  alert_settings_json jsonb not null default jsonb_build_object(
+    'gateChange', true,
+    'delayUpdates', true,
+    'boardingTime', true,
+    'takeoffLanding', false,
+    'baggageClaim', true,
+    'quietHours', jsonb_build_object(
+      'startHour', 22,
+      'startMinute', 0,
+      'endHour', 7,
+      'endMinute', 0
+    )
+  ),
   deleted_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
+  constraint user_flights_alert_settings_is_object
+    check (jsonb_typeof(alert_settings_json) = 'object'),
   constraint user_flights_user_tracking_unique unique (user_id, tracking_session_id)
 );
 

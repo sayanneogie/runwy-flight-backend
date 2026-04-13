@@ -2511,7 +2511,6 @@ const {
   listFirehoseTrackedRows,
   listDueTrackingRows,
   listTrackedFlightsByProviderFlightId,
-  listPushTokensForFlight,
   listTrackedFlightsByFlightNumber,
   markTrackingRowErrored,
   mergeTrackingSessionMetadata,
@@ -2875,6 +2874,99 @@ function notificationEventFor(normalized, flightId) {
   };
 }
 
+function ownerNotificationPreferenceConditionForEventType(eventType) {
+  switch (eventType) {
+    case "flight_delayed":
+      return "coalesce((uf.alert_settings_json ->> 'delayUpdates')::boolean, true) = true";
+    case "flight_gate_change":
+      return "coalesce((uf.alert_settings_json ->> 'gateChange')::boolean, true) = true";
+    case "flight_departed":
+    case "flight_arrived":
+      return "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true";
+    case "flight_baggage_claim":
+      return "coalesce((uf.alert_settings_json ->> 'baggageClaim')::boolean, true) = true";
+    default:
+      return "true";
+  }
+}
+
+function circleNotificationPreferenceConditionForEventType(eventType) {
+  switch (eventType) {
+    case "flight_delayed":
+      return "fp.notify_delay = true";
+    case "flight_gate_change":
+      return "fp.notify_gate_change = true";
+    case "flight_departed":
+      return "fp.notify_departure = true";
+    case "flight_arrived":
+      return "fp.notify_arrival = true";
+    default:
+      return "true";
+  }
+}
+
+async function listNotificationRecipientsForFlight(flightId, eventType) {
+  if (!usesDatabase()) return [];
+
+  const ownerCondition = ownerNotificationPreferenceConditionForEventType(eventType);
+  const circleCondition = circleNotificationPreferenceConditionForEventType(eventType);
+  const result = await pool.query(
+    `
+    with base as (
+      select ts.id as tracking_session_id, ts.owner_user_id
+      from public.tracking_sessions ts
+      where ts.id = $1::uuid
+    ),
+    owner_recipient as (
+      select
+        base.owner_user_id as user_id,
+        null::uuid as friend_relationship_id
+      from base
+      left join public.user_flights uf
+        on uf.user_id = base.owner_user_id
+       and uf.tracking_session_id = base.tracking_session_id
+       and uf.deleted_at is null
+      where coalesce(uf.notifications_enabled, true) = true
+        and ${ownerCondition}
+    ),
+    circle_recipients as (
+      select
+        fp.viewer_user_id as user_id,
+        fp.relationship_id as friend_relationship_id
+      from base
+      join public.friend_permissions fp
+        on fp.owner_user_id = base.owner_user_id
+      join public.friend_relationships fr
+        on fr.id = fp.relationship_id
+      where fr.relationship_status = 'active'
+        and fp.can_view_live = true
+        and fp.can_receive_alerts = true
+        and ${circleCondition}
+    ),
+    recipients as (
+      select * from owner_recipient
+      union
+      select * from circle_recipients
+    )
+    select
+      recipients.user_id::text as user_id,
+      recipients.friend_relationship_id::text as friend_relationship_id,
+      pd.apns_token
+    from recipients
+    left join public.push_devices pd
+      on pd.user_id = recipients.user_id
+     and pd.push_enabled = true
+    `,
+    [flightId]
+  );
+
+  return result.rows.map((row) => ({
+    userId: row.user_id,
+    friendRelationshipId: row.friend_relationship_id || null,
+    apnsToken: row.apns_token || null,
+  }));
+}
+
 async function sendApnsNotification(apnsToken, payload) {
   if (!isApnsConfigured()) {
     return { skipped: true };
@@ -2915,30 +3007,27 @@ async function dispatchFlightStatusNotifications(flightId, normalized) {
   const event = notificationEventFor(normalized, flightId);
   if (!event) return;
 
-  if (usesDatabase()) {
+  const recipients = await listNotificationRecipientsForFlight(flightId, event.type);
+
+  if (usesDatabase() && recipients.length) {
+    const uniqueRecipients = Array.from(
+      new Map(
+        recipients.map((recipient) => [
+          `${recipient.userId}|${recipient.friendRelationshipId || ""}`,
+          {
+            user_id: recipient.userId,
+            friend_relationship_id: recipient.friendRelationshipId || "",
+          },
+        ])
+      ).values()
+    );
+
     await pool.query(
       `
-      with recipients as (
-        select ts.owner_user_id as user_id
-        from public.tracking_sessions ts
-        where ts.id = $1::uuid
-
-        union
-
-        select fp.viewer_user_id as user_id
-        from public.tracking_sessions ts
-        join public.friend_permissions fp
-          on fp.owner_user_id = ts.owner_user_id
-        join public.friend_relationships fr
-          on fr.id = fp.relationship_id
-        where ts.id = $1::uuid
-          and fr.relationship_status = 'active'
-          and fp.can_view_live = true
-          and fp.can_receive_alerts = true
-      )
       insert into public.notifications (
         user_id,
         tracking_session_id,
+        friend_relationship_id,
         notification_type,
         delivery_channel,
         delivery_status,
@@ -2948,8 +3037,9 @@ async function dispatchFlightStatusNotifications(flightId, normalized) {
         scheduled_for
       )
       select
-        recipients.user_id,
+        recipients.user_id::uuid,
         $1::uuid,
+        nullif(recipients.friend_relationship_id, '')::uuid,
         $2,
         'push',
         $3,
@@ -2957,13 +3047,30 @@ async function dispatchFlightStatusNotifications(flightId, normalized) {
         $5,
         $6::jsonb,
         now()
-      from recipients
+      from jsonb_to_recordset($7::jsonb) as recipients(
+        user_id text,
+        friend_relationship_id text
+      )
       `,
-      [flightId, event.type, isApnsConfigured() ? "queued" : "pending", event.title, event.body, JSON.stringify(event.payload)]
+      [
+        flightId,
+        event.type,
+        isApnsConfigured() ? "queued" : "pending",
+        event.title,
+        event.body,
+        JSON.stringify(event.payload),
+        JSON.stringify(uniqueRecipients),
+      ]
     );
   }
 
-  const tokens = await listPushTokensForFlight(flightId);
+  const tokens = Array.from(
+    new Set(
+      recipients
+        .map((recipient) => recipient.apnsToken)
+        .filter(Boolean)
+    )
+  );
   if (!tokens.length || !isApnsConfigured()) return;
 
   const results = await Promise.all(tokens.map((token) => sendApnsNotification(token, event.payload)));
