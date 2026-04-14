@@ -3733,6 +3733,18 @@ const {
   startFirehoseWorker,
 } = firehoseRuntime;
 
+function backgroundTrackingMode() {
+  if (isFirehoseRunning()) {
+    return "firehose";
+  }
+
+  if (isPollerRunning()) {
+    return "poller";
+  }
+
+  return "on_demand_only";
+}
+
 app.get("/health", async (_req, res) => {
   let trackingSummary = null;
   let providerAuth = null;
@@ -3774,6 +3786,7 @@ app.get("/health", async (_req, res) => {
     pollerEnabled: isPollerRunning(),
     firehoseConfigured: isFirehoseConfigured(),
     firehoseEnabled: isFirehoseRunning(),
+    backgroundTrackingMode: backgroundTrackingMode(),
     providerAuth,
     trackingSummary,
     safeguards: {
@@ -3785,14 +3798,14 @@ app.get("/health", async (_req, res) => {
       mapFallbackEnabled: FLIGHTAWARE_ENABLE_MAP_FALLBACK,
       webhookRefreshMinIntervalMs: WEBHOOK_REFRESH_MIN_INTERVAL_MS,
       providerCallsEnabled: PROVIDER_CALLS_ENABLED,
-    disableProviderCalls: DISABLE_PROVIDER_CALLS,
-    firehoseTrackLookaheadMs: FIREHOSE_TRACK_LOOKAHEAD_MS,
-    firehoseTrackedSetRefreshMs: FIREHOSE_TRACKED_SET_REFRESH_MS,
-    firehoseBackfillMaxHours: FIREHOSE_BACKFILL_MAX_HOURS,
-    firehoseBackfillPredepartureMinutes: FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES,
-    firehoseBackfillMinTrackPoints: FIREHOSE_BACKFILL_MIN_TRACK_POINTS,
-  },
-});
+      disableProviderCalls: DISABLE_PROVIDER_CALLS,
+      firehoseTrackLookaheadMs: FIREHOSE_TRACK_LOOKAHEAD_MS,
+      firehoseTrackedSetRefreshMs: FIREHOSE_TRACKED_SET_REFRESH_MS,
+      firehoseBackfillMaxHours: FIREHOSE_BACKFILL_MAX_HOURS,
+      firehoseBackfillPredepartureMinutes: FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES,
+      firehoseBackfillMinTrackPoints: FIREHOSE_BACKFILL_MIN_TRACK_POINTS,
+    },
+  });
 });
 
 app.get("/v1/airports", (req, res) => {
@@ -4228,7 +4241,7 @@ async function startApiServer() {
 
   return app.listen(PORT, () => {
     console.log(
-      `Flight proxy running on port ${PORT} provider=${FLIGHT_DATA_PROVIDER} persistence=${usesDatabase() ? "supabase-postgres" : "memory"} poller=${isPollerRunning() ? "on" : "off"}`
+      `Flight proxy running on port ${PORT} provider=${FLIGHT_DATA_PROVIDER} persistence=${usesDatabase() ? "supabase-postgres" : "memory"} poller=${isPollerRunning() ? "on" : "off"} backgroundTracking=${backgroundTrackingMode()}`
     );
   });
 }

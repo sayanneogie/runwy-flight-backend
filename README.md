@@ -8,6 +8,7 @@ Supported providers:
 
 Optional live-tracking transport:
 - FlightAware Firehose
+- Poller fallback when Firehose is unavailable
 
 ## Why this exists
 - The iOS app never receives or stores provider API keys.
@@ -15,8 +16,9 @@ Optional live-tracking transport:
 - In-memory caching reduces repeated provider calls.
 - Response format is normalized into a provider-agnostic tracked-flight model.
 - Optional Postgres persistence stores tracking sessions, live snapshots, and push devices.
-- Optional APNs dispatch sends delay/cancellation pushes to subscribed devices.
+- Optional APNs dispatch sends status-change pushes to subscribed devices.
 - Optional FlightAware Firehose worker streams live tracked-flight updates into `live_snapshots` for the iOS app.
+- Optional poller worker refreshes tracked flights in the background when Firehose is unavailable or expired.
 
 ## Requirements
 - Node.js 18+
@@ -63,9 +65,11 @@ Returns runtime configuration summary:
 - whether APNs keys are configured
 - whether the poller is running in this process
 - whether a Firehose worker is configured/running in this process
+- background tracking mode (`firehose`, `poller`, or `on_demand_only`)
 
 Note:
 - when you deploy the Firehose worker as a separate Railway service, the API service can still report `firehoseEnabled: false` because `/health` only reflects the current process.
+- `backgroundTrackingMode=on_demand_only` means the API is healthy, but takeoff/landing updates will only happen when tracked flights are manually refreshed.
 
 ### GET `/v1/airports`
 Returns the airport catalog used by the iOS app to resolve IATA codes into names, cities, and coordinates.
@@ -92,7 +96,7 @@ Response (shape):
 
 Notes:
 - `/v1/track` still uses AeroAPI for the initial flight lookup and session creation.
-- Continuous live movement should come from the Firehose worker writing new `live_snapshots` rows, which the iOS app already consumes through Supabase realtime.
+- Continuous live movement should come from the Firehose worker or poller worker writing new `live_snapshots` rows, which the iOS app already consumes through Supabase realtime.
 
 Notes:
 - This endpoint is intentionally readable without bearer auth so the app can refresh airport metadata on launch.
@@ -187,6 +191,9 @@ Headers:
 Provider webhook endpoint that refreshes matched tracked flights and dispatches APNs when status transitions indicate:
 - `delayedNow`
 - `cancelledNow`
+- `departedNow`
+- `arrivedNow`
+- `gateChangedNow`
 
 If `WEBHOOK_SHARED_SECRET` is set, authenticate either way:
 - query string: `/v1/webhooks/flightaware?secret=<secret>`
@@ -200,7 +207,7 @@ If `WEBHOOK_SHARED_SECRET` is set, authenticate either way:
 - Railway should be split into at least two services:
   - API service: `node src/server.js`
   - Firehose worker: `node src/flight-firehose.js`
-- Poller is now optional and should stay off unless you intentionally want it as a fallback:
+- If your Firehose access is unavailable or expired, add the poller as the fallback worker:
   - Poller worker: `node src/flight-poller.js`
 - On Railway, prefer direct Node start commands over `npm run ...` to avoid npm runtime warnings.
 - If you use a custom API command, keep `ENABLE_TRACKING_POLLER=false`.

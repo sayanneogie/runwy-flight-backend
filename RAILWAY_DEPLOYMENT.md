@@ -5,7 +5,7 @@ This backend now expects two Railway services:
 - `runwy-api`
 - `runwy-flight-firehose`
 
-Optional fallback only:
+Recommended fallback when Firehose is unavailable:
 
 - `runwy-flight-poller`
 
@@ -165,12 +165,14 @@ Expected API health response:
 - `persistence: "supabase-postgres"`
 - `pollerEnabled: false`
 - `firehoseEnabled: false`
+- `backgroundTrackingMode: "on_demand_only"` when the API is running by itself
 - `providerCallsEnabled: true` unless you intentionally enable the hard stop
 
 Important:
 
 - `firehoseConfigured` and `firehoseEnabled` on `/health` only describe the API process.
 - A separately deployed `runwy-flight-firehose` worker can be healthy and streaming even while the API health still shows `firehoseEnabled: false`.
+- If Firehose access is expired or disabled, promote `runwy-flight-poller` from optional to required so landing/takeoff notifications still have a background source.
 
 ## Rollout Order
 

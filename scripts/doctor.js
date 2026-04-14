@@ -100,6 +100,38 @@ function checkAuthEnv(results) {
   });
 }
 
+function checkBackgroundTrackingStrategy(results) {
+  const firehoseEnabled =
+    String(process.env.ENABLE_FIREHOSE_WORKER || "false").toLowerCase() === "true";
+  const pollerEnabled =
+    String(process.env.ENABLE_TRACKING_POLLER || "false").toLowerCase() === "true";
+  const serviceName = String(process.env.RAILWAY_SERVICE_NAME || "").trim();
+
+  let detail = "on-demand only in this process";
+  if (firehoseEnabled) {
+    detail = "firehose worker mode enabled";
+  } else if (pollerEnabled) {
+    detail = "poller worker mode enabled";
+  } else if (serviceName === "runwy-api") {
+    detail =
+      "API mode only; deploy runwy-flight-firehose or runwy-flight-poller for background takeoff/landing updates";
+  } else if (serviceName === "runwy-flight-firehose") {
+    detail = "service is named runwy-flight-firehose but ENABLE_FIREHOSE_WORKER is false";
+  } else if (serviceName === "runwy-flight-poller") {
+    detail = "service is named runwy-flight-poller but ENABLE_TRACKING_POLLER is false";
+  }
+
+  const misconfiguredWorker =
+    (serviceName === "runwy-flight-firehose" && !firehoseEnabled) ||
+    (serviceName === "runwy-flight-poller" && !pollerEnabled);
+
+  results.push({
+    area: "tracking-workers",
+    ok: !misconfiguredWorker,
+    detail,
+  });
+}
+
 async function checkFlightAware(results) {
   const apiKey = String(process.env.FLIGHTAWARE_API_KEY || "").trim();
   const baseURL = String(process.env.FLIGHTAWARE_BASE_URL || "https://aeroapi.flightaware.com/aeroapi").trim();
@@ -181,6 +213,7 @@ async function main() {
   const results = [];
 
   checkAuthEnv(results);
+  checkBackgroundTrackingStrategy(results);
   await checkDatabase(results);
   await checkFlightAware(results);
   await checkAviationstack(results);
