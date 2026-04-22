@@ -2328,16 +2328,37 @@ function deriveRecentHistory(records, selectedRecord, normalizer) {
 }
 
 function deriveAlertFlags(previousNormalized, nextNormalized) {
+  const recentEventWindowMs = 30 * 60 * 1000;
+  const toMs = (value) => {
+    const instant = value ? new Date(value).getTime() : NaN;
+    return Number.isFinite(instant) ? instant : null;
+  };
+  const isRecent = (value) => {
+    const instant = toMs(value);
+    if (instant == null) return false;
+    return Math.abs(Date.now() - instant) <= recentEventWindowMs;
+  };
+
   if (!previousNormalized || !nextNormalized) {
+    const currentStatus = nextNormalized?.status || null;
+    const currentInAir = ["departed", "enroute"].includes(currentStatus);
+    const recentDeparture =
+      isRecent(nextNormalized?.takeoffTimes?.actual) ||
+      isRecent(nextNormalized?.departureTimes?.actual) ||
+      isRecent(nextNormalized?.takeoffTimes?.estimated);
+    const recentArrival =
+      isRecent(nextNormalized?.landingTimes?.actual) ||
+      isRecent(nextNormalized?.arrivalTimes?.actual);
+
     return {
       statusChanged: false,
       delayedNow: false,
       cancelledNow: false,
       gateChangedNow: false,
-      departedNow: false,
-      arrivedNow: false,
+      departedNow: currentInAir && recentDeparture,
+      arrivedNow: currentStatus === "landed" && recentArrival,
       previousStatus: previousNormalized?.status || null,
-      currentStatus: nextNormalized?.status || null,
+      currentStatus,
     };
   }
 
