@@ -1337,6 +1337,7 @@ function makeProviderQueryKey(providerName, query) {
     arrivalIata: (query.arrivalIata || "").toUpperCase(),
     historical: query.historical === true,
     preferSchedules: query.preferSchedules === true,
+    timezoneOffsetMinutes: normalizedTimezoneOffsetMinutes(query.timezoneOffsetMinutes),
   });
 }
 
@@ -1414,24 +1415,87 @@ function flightAwareMatchableFlightCodes(record, normalizer) {
   );
 }
 
-function flightAwareDateWindow(queryDate) {
-  const date = new Date(`${String(queryDate || "").slice(0, 10)}T12:00:00Z`);
-  return Number.isFinite(date.getTime()) ? date.getTime() : null;
-}
-
 function normalizedQueryDateString(queryDate) {
   const normalizedDate = String(queryDate || "").slice(0, 10);
   return /^\d{4}-\d{2}-\d{2}$/.test(normalizedDate) ? normalizedDate : null;
 }
 
-function currentUTCDateString(referenceTimeMs = Date.now()) {
+function normalizedTimezoneOffsetMinutes(rawOffsetMinutes) {
+  const numericValue = Number(rawOffsetMinutes);
+  if (!Number.isFinite(numericValue)) {
+    return 0;
+  }
+
+  const roundedValue = Math.trunc(numericValue);
+  return Math.max(-840, Math.min(840, roundedValue));
+}
+
+function utcDateStringFromMs(referenceTimeMs) {
   const reference = new Date(referenceTimeMs);
   return Number.isFinite(reference.getTime()) ? reference.toISOString().slice(0, 10) : null;
 }
 
-function isFutureFlightAwareQueryDate(queryDate, referenceTimeMs = Date.now()) {
+function currentDateStringForTimezone(referenceTimeMs = Date.now(), timezoneOffsetMinutes = 0) {
+  const shiftedReferenceTimeMs =
+    referenceTimeMs + normalizedTimezoneOffsetMinutes(timezoneOffsetMinutes) * 60 * 1000;
+  return utcDateStringFromMs(shiftedReferenceTimeMs);
+}
+
+function flightAwareLocalDayInterval(queryDate, timezoneOffsetMinutes = 0) {
   const normalizedDate = normalizedQueryDateString(queryDate);
-  const currentDate = currentUTCDateString(referenceTimeMs);
+  if (!normalizedDate) {
+    return null;
+  }
+
+  const [year, month, day] = normalizedDate.split("-").map((part) => Number.parseInt(part, 10));
+  if (![year, month, day].every(Number.isFinite)) {
+    return null;
+  }
+
+  const offsetMs = normalizedTimezoneOffsetMinutes(timezoneOffsetMinutes) * 60 * 1000;
+  const startMs = Date.UTC(year, month - 1, day, 0, 0, 0) - offsetMs;
+  if (!Number.isFinite(startMs)) {
+    return null;
+  }
+
+  return {
+    startMs,
+    endMs: startMs + 24 * 60 * 60 * 1000,
+  };
+}
+
+function secondPrecisionISOString(referenceTimeMs) {
+  const reference = new Date(referenceTimeMs);
+  if (!Number.isFinite(reference.getTime())) {
+    return null;
+  }
+
+  return reference.toISOString().replace(".000Z", "Z");
+}
+
+function nextUTCDateString(referenceTimeMs) {
+  const dateString = utcDateStringFromMs(referenceTimeMs);
+  if (!dateString) {
+    return null;
+  }
+
+  const date = new Date(`${dateString}T00:00:00Z`);
+  if (!Number.isFinite(date.getTime())) {
+    return null;
+  }
+
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+function flightAwareDateWindow(queryDate, timezoneOffsetMinutes = 0) {
+  const interval = flightAwareLocalDayInterval(queryDate, timezoneOffsetMinutes);
+  return interval ? interval.startMs + 12 * 60 * 60 * 1000 : null;
+}
+
+function isFutureFlightAwareQueryDate(queryDate, referenceTimeMs = Date.now(), timezoneOffsetMinutes = 0) {
+  const normalizedDate = normalizedQueryDateString(queryDate);
+  const currentDate = currentDateStringForTimezone(referenceTimeMs, timezoneOffsetMinutes);
   if (!normalizedDate || !currentDate) {
     return false;
   }
@@ -1439,23 +1503,21 @@ function isFutureFlightAwareQueryDate(queryDate, referenceTimeMs = Date.now()) {
   return normalizedDate > currentDate;
 }
 
-function flightAwareHistoryBounds(queryDate) {
-  const normalizedDate = normalizedQueryDateString(queryDate);
-  if (!normalizedDate) {
+function flightAwareHistoryBounds(queryDate, timezoneOffsetMinutes = 0) {
+  const interval = flightAwareLocalDayInterval(queryDate, timezoneOffsetMinutes);
+  if (!interval) {
     return null;
   }
 
-  const startDate = new Date(`${normalizedDate}T00:00:00Z`);
-  if (!Number.isFinite(startDate.getTime())) {
+  const start = utcDateStringFromMs(interval.startMs);
+  const end = nextUTCDateString(interval.endMs - 1);
+  if (!start || !end) {
     return null;
   }
-
-  const endDate = new Date(startDate);
-  endDate.setUTCDate(endDate.getUTCDate() + 1);
 
   return {
-    start: normalizedDate,
-    end: endDate.toISOString().slice(0, 10),
+    start,
+    end,
   };
 }
 
@@ -1464,15 +1526,16 @@ function shouldUseHistoricalFlightAwareSearch(query) {
 }
 
 function shouldPrioritizeFlightAwareSchedules(query, referenceTimeMs = Date.now()) {
+  const timezoneOffsetMinutes = query?.timezoneOffsetMinutes;
   return (
     query?.preferSchedules === true ||
-    isFutureFlightAwareQueryDate(query?.date, referenceTimeMs) ||
-    shouldPreferFlightAwareSchedules(query?.date, referenceTimeMs)
+    isFutureFlightAwareQueryDate(query?.date, referenceTimeMs, timezoneOffsetMinutes) ||
+    shouldPreferFlightAwareSchedules(query?.date, referenceTimeMs, timezoneOffsetMinutes)
   );
 }
 
-function shouldPreferFlightAwareSchedules(queryDate, referenceTimeMs = Date.now()) {
-  const targetMs = flightAwareDateWindow(queryDate);
+function shouldPreferFlightAwareSchedules(queryDate, referenceTimeMs = Date.now(), timezoneOffsetMinutes = 0) {
+  const targetMs = flightAwareDateWindow(queryDate, timezoneOffsetMinutes);
   if (!Number.isFinite(targetMs)) {
     return false;
   }
@@ -1480,16 +1543,20 @@ function shouldPreferFlightAwareSchedules(queryDate, referenceTimeMs = Date.now(
   return Math.abs(targetMs - referenceTimeMs) > FLIGHTAWARE_SCHEDULE_WINDOW_MS;
 }
 
-function flightAwareScheduleBounds(queryDate) {
-  const normalizedDate = String(queryDate || "").slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDate)) {
+function flightAwareOperationalBounds(queryDate, timezoneOffsetMinutes = 0) {
+  const interval = flightAwareLocalDayInterval(queryDate, timezoneOffsetMinutes);
+  if (!interval) {
     return null;
   }
 
   return {
-    start: `${normalizedDate}T00:00:00Z`,
-    end: `${normalizedDate}T23:59:59Z`,
+    start: secondPrecisionISOString(interval.startMs),
+    end: secondPrecisionISOString(interval.endMs - 1000),
   };
+}
+
+function flightAwareScheduleBounds(queryDate, timezoneOffsetMinutes = 0) {
+  return flightAwareOperationalBounds(queryDate, timezoneOffsetMinutes);
 }
 
 function flightAwareScheduleQueryItems(query) {
@@ -1518,10 +1585,11 @@ function flightAwareScheduleQueryItems(query) {
 async function fetchFlightAwareOperationalFlights(query) {
   const ident = normalizeFlightCode(query.flightNumber);
   const params = new URLSearchParams({ max_pages: "1" });
+  const bounds = flightAwareOperationalBounds(query.date, query.timezoneOffsetMinutes);
 
-  if (query.date) {
-    params.set("start", `${query.date}T00:00:00Z`);
-    params.set("end", `${query.date}T23:59:59Z`);
+  if (bounds) {
+    params.set("start", bounds.start);
+    params.set("end", bounds.end);
   }
 
   let url;
@@ -1556,7 +1624,7 @@ async function fetchFlightAwareOperationalFlights(query) {
 }
 
 async function fetchFlightAwareScheduleFlights(query) {
-  const bounds = flightAwareScheduleBounds(query.date);
+  const bounds = flightAwareScheduleBounds(query.date, query.timezoneOffsetMinutes);
   if (!bounds) {
     return [];
   }
@@ -1589,7 +1657,7 @@ async function fetchFlightAwareScheduleFlights(query) {
 
 async function fetchFlightAwareHistoricalFlights(query) {
   const ident = normalizeFlightCode(query.flightNumber);
-  const bounds = flightAwareHistoryBounds(query.date);
+  const bounds = flightAwareHistoryBounds(query.date, query.timezoneOffsetMinutes);
   if (!ident || !bounds) {
     return [];
   }
@@ -1626,7 +1694,7 @@ async function fetchFlightAwareHistoricalFlights(query) {
 }
 
 async function fetchFlightAwareHistoricalRouteFlights(query) {
-  const bounds = flightAwareHistoryBounds(query.date);
+  const bounds = flightAwareHistoryBounds(query.date, query.timezoneOffsetMinutes);
   const departureIata = normalizeAirportCode(query.departureIata);
   const arrivalIata = normalizeAirportCode(query.arrivalIata);
   if (!bounds || !departureIata || !arrivalIata) {
@@ -4119,14 +4187,30 @@ app.get("/v1/search", async (req, res) => {
     return res.status(400).json({ error: validated.error });
   }
 
-  const { flightNumber, date, departureIata, arrivalIata, historical, preferSchedules } = validated.value;
+  const {
+    flightNumber,
+    date,
+    departureIata,
+    arrivalIata,
+    historical,
+    preferSchedules,
+    timezoneOffsetMinutes,
+  } = validated.value;
 
   if (!PROVIDER_CALLS_ENABLED) {
     return res.json({ candidates: [], providerDisabled: true });
   }
 
   try {
-    const query = { flightNumber, date, departureIata, arrivalIata, historical, preferSchedules };
+    const query = {
+      flightNumber,
+      date,
+      departureIata,
+      arrivalIata,
+      historical,
+      preferSchedules,
+      timezoneOffsetMinutes,
+    };
     const normalized = await buildSearchCandidates(query);
     return res.json({ candidates: normalized });
   } catch (error) {
@@ -4138,6 +4222,7 @@ app.get("/v1/search", async (req, res) => {
       arrivalIata,
       historical,
       preferSchedules,
+      timezoneOffsetMinutes,
       error: error?.message || String(error),
     });
     return res.status(502).json({ error: "Failed to fetch provider data" });
@@ -4150,14 +4235,28 @@ app.get("/v1/search/route", async (req, res) => {
     return res.status(400).json({ error: validated.error });
   }
 
-  const { date, departureIata, arrivalIata, historical, preferSchedules } = validated.value;
+  const {
+    date,
+    departureIata,
+    arrivalIata,
+    historical,
+    preferSchedules,
+    timezoneOffsetMinutes,
+  } = validated.value;
 
   if (!PROVIDER_CALLS_ENABLED) {
     return res.json({ candidates: [], providerDisabled: true });
   }
 
   try {
-    const query = { date, departureIata, arrivalIata, historical, preferSchedules };
+    const query = {
+      date,
+      departureIata,
+      arrivalIata,
+      historical,
+      preferSchedules,
+      timezoneOffsetMinutes,
+    };
     const normalized = await buildSearchCandidates(query);
     return res.json({ candidates: normalized });
   } catch (error) {
@@ -4168,6 +4267,7 @@ app.get("/v1/search/route", async (req, res) => {
       arrivalIata,
       historical,
       preferSchedules,
+      timezoneOffsetMinutes,
       error: error?.message || String(error),
     });
     return res.status(502).json({ error: "Failed to fetch provider data" });
@@ -4319,10 +4419,12 @@ module.exports = {
     classifyFlightAwareAuthProbeResult,
     deriveAlertFlags,
     extractFlightAwareSearchRows,
+    flightAwareOperationalBounds,
     flightAwareHistoryBounds,
     healthBuildInfo,
     isFutureFlightAwareQueryDate,
     normalizeRecordFromFlightAware,
+    normalizedTimezoneOffsetMinutes,
     ownerNotificationPreferenceConditionForEventType,
     scoreCandidate,
     shouldPreferFlightAwareSchedules,

@@ -75,18 +75,26 @@ test("shouldPreferFlightAwareSchedules switches outside the live window", () => 
   assert.equal(__test__.shouldPreferFlightAwareSchedules("2026-03-14", reference), true);
 });
 
-test("isFutureFlightAwareQueryDate flags future dates using UTC day boundaries", () => {
+test("isFutureFlightAwareQueryDate respects the request timezone boundary", () => {
   const reference = Date.parse("2026-03-19T18:30:00Z");
 
-  assert.equal(__test__.isFutureFlightAwareQueryDate("2026-03-19", reference), false);
-  assert.equal(__test__.isFutureFlightAwareQueryDate("2026-03-20", reference), true);
+  assert.equal(__test__.isFutureFlightAwareQueryDate("2026-03-20", reference, 330), false);
+  assert.equal(__test__.isFutureFlightAwareQueryDate("2026-03-21", reference, 330), true);
   assert.equal(__test__.isFutureFlightAwareQueryDate("2026-03-18", reference), false);
 });
 
-test("flightAwareHistoryBounds expands a selected day into an exclusive next-day range", () => {
-  assert.deepEqual(__test__.flightAwareHistoryBounds("2026-03-19"), {
-    start: "2026-03-19",
-    end: "2026-03-20",
+test("flightAwareOperationalBounds expands a local day into the correct UTC instants", () => {
+  assert.deepEqual(__test__.flightAwareOperationalBounds("2026-04-23", 330), {
+    start: "2026-04-22T18:30:00Z",
+    end: "2026-04-23T18:29:59Z",
+  });
+  assert.equal(__test__.flightAwareOperationalBounds("bad-date", 330), null);
+});
+
+test("flightAwareHistoryBounds widens to UTC day coverage for the selected local day", () => {
+  assert.deepEqual(__test__.flightAwareHistoryBounds("2026-04-23", 330), {
+    start: "2026-04-22",
+    end: "2026-04-24",
   });
   assert.equal(__test__.flightAwareHistoryBounds("bad-date"), null);
 });

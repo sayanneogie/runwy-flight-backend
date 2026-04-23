@@ -32,6 +32,19 @@ const optionalBooleanQuerySchema = z.preprocess((value) => {
   return value;
 }, z.boolean().optional());
 
+const optionalTimezoneOffsetMinutesSchema = z.preprocess((value) => {
+  if (value == null) return undefined;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+
+  const normalized = String(value).trim();
+  if (!normalized) return undefined;
+
+  const parsed = Number.parseInt(normalized, 10);
+  return Number.isFinite(parsed) ? parsed : value;
+}, z.number().int().min(-840).max(840).optional());
+
 const pushPlatformSchema = z
   .string()
   .trim()
@@ -53,6 +66,7 @@ const trackPayloadSchema = z.object({
   date: dateSchema,
   departureIata: optionalIataSchema,
   arrivalIata: optionalIataSchema,
+  timezoneOffsetMinutes: optionalTimezoneOffsetMinutesSchema,
 });
 
 const searchQuerySchema = z.object({
@@ -62,6 +76,7 @@ const searchQuerySchema = z.object({
   arr: optionalIataSchema,
   historical: optionalBooleanQuerySchema,
   preferSchedules: optionalBooleanQuerySchema,
+  timezoneOffsetMinutes: optionalTimezoneOffsetMinutesSchema,
 });
 
 const routeSearchQuerySchema = z.object({
@@ -70,6 +85,7 @@ const routeSearchQuerySchema = z.object({
   arr: optionalIataSchema,
   historical: optionalBooleanQuerySchema,
   preferSchedules: optionalBooleanQuerySchema,
+  timezoneOffsetMinutes: optionalTimezoneOffsetMinutesSchema,
 }).superRefine((value, ctx) => {
   if (!value.dep || !value.arr) {
     ctx.addIssue({
@@ -112,6 +128,7 @@ function validateSearchQuery(query) {
       arrivalIata: parsed.value.arr,
       historical: parsed.value.historical === true,
       preferSchedules: parsed.value.preferSchedules === true,
+      timezoneOffsetMinutes: parsed.value.timezoneOffsetMinutes,
     },
   };
 }
@@ -127,6 +144,7 @@ function validateRouteSearchQuery(query) {
       arrivalIata: parsed.value.arr,
       historical: parsed.value.historical === true,
       preferSchedules: parsed.value.preferSchedules === true,
+      timezoneOffsetMinutes: parsed.value.timezoneOffsetMinutes,
     },
   };
 }
