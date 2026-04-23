@@ -3067,6 +3067,13 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
 
 async function sendApnsNotification(apnsToken, payload) {
   if (!isApnsConfigured()) {
+    console.warn("Skipping APNs delivery because APNs is not fully configured", {
+      bundleId: APNS_BUNDLE_ID || null,
+      sandbox: APNS_USE_SANDBOX,
+      hasKeyID: Boolean(APNS_KEY_ID),
+      hasTeamID: Boolean(APNS_TEAM_ID),
+      hasPrivateKey: Boolean(apnsPrivateKeyMaterial()),
+    });
     return { skipped: true };
   }
 
@@ -3098,6 +3105,14 @@ async function sendApnsNotification(apnsToken, payload) {
     await disablePushToken(apnsToken);
   }
 
+  console.warn("APNs delivery failed", {
+    apnsHost: apnsHost(),
+    bundleId: APNS_BUNDLE_ID,
+    sandbox: APNS_USE_SANDBOX,
+    status: response.status,
+    reason,
+  });
+
   return { ok: false, status: response.status, reason };
 }
 
@@ -3106,6 +3121,13 @@ async function dispatchFlightStatusNotifications(flightId, normalized) {
   if (!event) return;
 
   const recipients = await listNotificationRecipientsForFlight(flightId, event.type);
+  if (!recipients.length) {
+    console.warn("Skipping flight notification because no recipients were resolved", {
+      flightId,
+      eventType: event.type,
+    });
+    return;
+  }
 
   if (usesDatabase() && recipients.length) {
     const uniqueRecipients = Array.from(
@@ -3169,7 +3191,15 @@ async function dispatchFlightStatusNotifications(flightId, normalized) {
         .filter(Boolean)
     )
   );
-  if (!tokens.length || !isApnsConfigured()) return;
+  if (!tokens.length) {
+    console.warn("Skipping APNs delivery because no enabled device tokens were found", {
+      flightId,
+      eventType: event.type,
+      recipientCount: recipients.length,
+    });
+    return;
+  }
+  if (!isApnsConfigured()) return;
 
   const results = await Promise.all(tokens.map((token) => sendApnsNotification(token, event.payload)));
 
@@ -4262,7 +4292,7 @@ async function startApiServer() {
 
   return app.listen(PORT, () => {
     console.log(
-      `Flight proxy running on port ${PORT} provider=${FLIGHT_DATA_PROVIDER} persistence=${usesDatabase() ? "supabase-postgres" : "memory"} poller=${isPollerRunning() ? "on" : "off"} backgroundTracking=${backgroundTrackingMode()}`
+      `Flight proxy running on port ${PORT} provider=${FLIGHT_DATA_PROVIDER} persistence=${usesDatabase() ? "supabase-postgres" : "memory"} poller=${isPollerRunning() ? "on" : "off"} backgroundTracking=${backgroundTrackingMode()} apnsConfigured=${isApnsConfigured() ? "yes" : "no"} apnsHost=${apnsHost()} apnsTopic=${APNS_BUNDLE_ID || "missing"}`
     );
   });
 }
@@ -4285,12 +4315,15 @@ module.exports = {
   startTrackingPollerWorker,
   usesDatabase,
   __test__: {
+    circleNotificationPreferenceConditionForEventType,
     classifyFlightAwareAuthProbeResult,
+    deriveAlertFlags,
     extractFlightAwareSearchRows,
     flightAwareHistoryBounds,
     healthBuildInfo,
     isFutureFlightAwareQueryDate,
     normalizeRecordFromFlightAware,
+    ownerNotificationPreferenceConditionForEventType,
     scoreCandidate,
     shouldPreferFlightAwareSchedules,
   },
