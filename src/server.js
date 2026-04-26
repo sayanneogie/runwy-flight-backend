@@ -2769,9 +2769,9 @@ function flightAwareAlertIDFromPayload(payload) {
   return null;
 }
 
-async function createFlightAwareAlert({ targetUrl, context }) {
+function buildFlightAwareAlertPayload({ targetUrl, context }) {
   const payload = {
-    ident_iata: context.flightNumber,
+    ident: context.flightNumber,
     start: context.startDate,
     end: context.endDate,
     impending_departure: [...FLIGHTAWARE_AUTO_ALERT_IMPENDING_DEPARTURE_MINUTES],
@@ -2781,11 +2781,17 @@ async function createFlightAwareAlert({ targetUrl, context }) {
   };
 
   if (context.departureIata) {
-    payload.origin_iata = context.departureIata;
+    payload.origin = context.departureIata;
   }
   if (context.arrivalIata) {
-    payload.destination_iata = context.arrivalIata;
+    payload.destination = context.arrivalIata;
   }
+
+  return payload;
+}
+
+async function createFlightAwareAlert({ targetUrl, context }) {
+  const payload = buildFlightAwareAlertPayload({ targetUrl, context });
 
   const response = await fetch(`${FLIGHTAWARE_BASE_URL}/alerts`, {
     method: "POST",
@@ -4467,6 +4473,7 @@ module.exports = {
   startTrackingPollerWorker,
   usesDatabase,
   __test__: {
+    buildFlightAwareAlertPayload,
     circleNotificationPreferenceConditionForEventType,
     classifyFlightAwareAuthProbeResult,
     deriveAlertFlags,

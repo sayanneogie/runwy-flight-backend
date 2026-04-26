@@ -83,3 +83,26 @@ test("same-day FlightAware alerts are skipped while future alerts remain eligibl
     }
   );
 });
+
+test("FlightAware alert payload uses canonical ident/origin/destination keys", () => {
+  const payload = __test__.buildFlightAwareAlertPayload({
+    targetUrl: "https://runwy.example.com/v1/webhooks/flightaware?secret=test",
+    context: {
+      flightNumber: "AI2418",
+      departureIata: "DEL",
+      arrivalIata: "BOM",
+      startDate: "2026-04-27",
+      endDate: "2026-04-29",
+    },
+  });
+
+  assert.equal(payload.ident, "AI2418");
+  assert.equal(payload.origin, "DEL");
+  assert.equal(payload.destination, "BOM");
+  assert.equal(payload.start, "2026-04-27");
+  assert.equal(payload.end, "2026-04-29");
+  assert.equal(payload.target_url, "https://runwy.example.com/v1/webhooks/flightaware?secret=test");
+  assert.ok(!("ident_iata" in payload));
+  assert.ok(!("origin_iata" in payload));
+  assert.ok(!("destination_iata" in payload));
+});
