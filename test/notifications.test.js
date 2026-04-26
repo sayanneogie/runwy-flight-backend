@@ -56,30 +56,59 @@ test("flight circle recipients honor departure and arrival alert toggles", () =>
   );
 });
 
-test("same-day FlightAware alerts are skipped while future alerts remain eligible", () => {
+test("same-day upcoming FlightAware alerts use open windows while past departures are skipped", () => {
   const today = "2026-04-26";
 
   assert.deepEqual(
     __test__.flightAwareAlertCreationDisposition(
-      { startDate: today, endDate: "2026-04-28" },
-      `${today}T08:00:00.000Z`
-    ),
-    {
-      eligible: false,
-      reason: "start_date_not_in_future",
-      detail: `Skipping FlightAware alert auto-create because start date ${today} is not after current UTC date ${today}.`,
-    }
-  );
-
-  assert.deepEqual(
-    __test__.flightAwareAlertCreationDisposition(
-      { startDate: "2026-04-27", endDate: "2026-04-29" },
+      {
+        startDate: today,
+        endDate: "2026-04-28",
+        departureTime: `${today}T18:30:00.000Z`,
+        timezoneOffsetMinutes: 0,
+      },
       `${today}T08:00:00.000Z`
     ),
     {
       eligible: true,
       reason: null,
       detail: null,
+      windowStrategy: "open",
+    }
+  );
+
+  assert.deepEqual(
+    __test__.flightAwareAlertCreationDisposition(
+      {
+        startDate: today,
+        endDate: "2026-04-28",
+        departureTime: `${today}T06:30:00.000Z`,
+        timezoneOffsetMinutes: 0,
+      },
+      `${today}T08:00:00.000Z`
+    ),
+    {
+      eligible: false,
+      reason: "departure_not_in_future",
+      detail: `Skipping FlightAware alert auto-create because departure time ${today}T06:30:00.000Z is not in the future.`,
+      windowStrategy: "bounded",
+    }
+  );
+
+  assert.deepEqual(
+    __test__.flightAwareAlertCreationDisposition(
+      {
+        startDate: "2026-04-27",
+        endDate: "2026-04-29",
+        timezoneOffsetMinutes: 0,
+      },
+      `${today}T08:00:00.000Z`
+    ),
+    {
+      eligible: true,
+      reason: null,
+      detail: null,
+      windowStrategy: "bounded",
     }
   );
 });
@@ -93,6 +122,7 @@ test("FlightAware alert payload uses canonical ident/origin/destination keys", (
       arrivalIata: "BOM",
       startDate: "2026-04-27",
       endDate: "2026-04-29",
+      windowStrategy: "bounded",
     },
   });
 
@@ -105,4 +135,25 @@ test("FlightAware alert payload uses canonical ident/origin/destination keys", (
   assert.ok(!("ident_iata" in payload));
   assert.ok(!("origin_iata" in payload));
   assert.ok(!("destination_iata" in payload));
+});
+
+test("same-day FlightAware alert payload omits date bounds for open window alerts", () => {
+  const payload = __test__.buildFlightAwareAlertPayload({
+    targetUrl: "https://runwy.example.com/v1/webhooks/flightaware?secret=test",
+    context: {
+      flightNumber: "SQ509",
+      departureIata: "BLR",
+      arrivalIata: "SIN",
+      startDate: "2026-04-26",
+      endDate: "2026-04-28",
+      windowStrategy: "open",
+    },
+  });
+
+  assert.equal(payload.ident, "SQ509");
+  assert.equal(payload.origin, "BLR");
+  assert.equal(payload.destination, "SIN");
+  assert.equal(payload.target_url, "https://runwy.example.com/v1/webhooks/flightaware?secret=test");
+  assert.ok(!("start" in payload));
+  assert.ok(!("end" in payload));
 });

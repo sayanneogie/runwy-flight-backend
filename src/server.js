@@ -2696,6 +2696,14 @@ function flightAwareAlertContextForTrackedRecord(trackedRecord) {
         trackedRecord.normalized?.departureTimes?.estimated?.slice(0, 10) ||
         ""
     ).slice(0, 10) || null;
+  const departureTime =
+    trackedRecord.normalized?.departureTimes?.estimated ||
+    trackedRecord.normalized?.departureTimes?.scheduled ||
+    trackedRecord.normalized?.departureTimes?.actual ||
+    null;
+  const timezoneOffsetMinutes = normalizedTimezoneOffsetMinutes(
+    trackedRecord.query?.timezoneOffsetMinutes
+  );
 
   if (!flightNumber || !startDate) {
     return null;
@@ -2712,6 +2720,8 @@ function flightAwareAlertContextForTrackedRecord(trackedRecord) {
     arrivalIata,
     startDate,
     endDate,
+    departureTime,
+    timezoneOffsetMinutes,
   };
 }
 
@@ -2721,21 +2731,46 @@ function flightAwareAlertFingerprint(context) {
 
 function flightAwareAlertCreationDisposition(context, nowISO = new Date().toISOString()) {
   const startDate = String(context?.startDate || "").slice(0, 10);
-  const todayUTC = String(nowISO || "").slice(0, 10);
+  const referenceTimeMs = new Date(nowISO || "").getTime();
+  const currentDate = currentDateStringForTimezone(
+    referenceTimeMs,
+    context?.timezoneOffsetMinutes
+  );
 
-  if (!startDate || !todayUTC) {
+  if (!startDate || !currentDate || !Number.isFinite(referenceTimeMs)) {
     return {
       eligible: true,
       reason: null,
       detail: null,
+      windowStrategy: "bounded",
     };
   }
 
-  if (startDate <= todayUTC) {
+  if (startDate < currentDate) {
     return {
       eligible: false,
-      reason: "start_date_not_in_future",
-      detail: `Skipping FlightAware alert auto-create because start date ${startDate} is not after current UTC date ${todayUTC}.`,
+      reason: "start_date_in_past",
+      detail: `Skipping FlightAware alert auto-create because start date ${startDate} is before current local date ${currentDate}.`,
+      windowStrategy: "bounded",
+    };
+  }
+
+  if (startDate === currentDate) {
+    const departureTimeMs = new Date(context?.departureTime || "").getTime();
+    if (Number.isFinite(departureTimeMs) && departureTimeMs <= referenceTimeMs) {
+      return {
+        eligible: false,
+        reason: "departure_not_in_future",
+        detail: `Skipping FlightAware alert auto-create because departure time ${context.departureTime} is not in the future.`,
+        windowStrategy: "bounded",
+      };
+    }
+
+    return {
+      eligible: true,
+      reason: null,
+      detail: null,
+      windowStrategy: "open",
     };
   }
 
@@ -2743,6 +2778,7 @@ function flightAwareAlertCreationDisposition(context, nowISO = new Date().toISOS
     eligible: true,
     reason: null,
     detail: null,
+    windowStrategy: "bounded",
   };
 }
 
@@ -2772,13 +2808,16 @@ function flightAwareAlertIDFromPayload(payload) {
 function buildFlightAwareAlertPayload({ targetUrl, context }) {
   const payload = {
     ident: context.flightNumber,
-    start: context.startDate,
-    end: context.endDate,
     impending_departure: [...FLIGHTAWARE_AUTO_ALERT_IMPENDING_DEPARTURE_MINUTES],
     impending_arrival: [...FLIGHTAWARE_AUTO_ALERT_IMPENDING_ARRIVAL_MINUTES],
     events: FLIGHTAWARE_AUTO_ALERT_EVENTS,
     target_url: targetUrl,
   };
+
+  if (context.windowStrategy !== "open") {
+    payload.start = context.startDate;
+    payload.end = context.endDate;
+  }
 
   if (context.departureIata) {
     payload.origin = context.departureIata;
@@ -2835,7 +2874,12 @@ async function ensureFlightAwareAlertForTrackedSession(req, trackedRecord) {
     return;
   }
 
-  const fingerprint = flightAwareAlertFingerprint(context);
+  const creationDisposition = flightAwareAlertCreationDisposition(context);
+  const creationContext = {
+    ...context,
+    windowStrategy: creationDisposition.windowStrategy,
+  };
+  const fingerprint = flightAwareAlertFingerprint(creationContext);
   const existing = trackedRecord.metadata?.flightawareAlert;
   if (
     existing?.fingerprint === fingerprint &&
@@ -2848,6 +2892,7 @@ async function ensureFlightAwareAlertForTrackedSession(req, trackedRecord) {
     autoCreated: true,
     provider: "flightaware",
     fingerprint,
+    windowStrategy: creationDisposition.windowStrategy,
     startDate: context.startDate,
     endDate: context.endDate,
     flightNumber: context.flightNumber,
@@ -2856,7 +2901,6 @@ async function ensureFlightAwareAlertForTrackedSession(req, trackedRecord) {
     lastAttemptAt: new Date().toISOString(),
   };
 
-  const creationDisposition = flightAwareAlertCreationDisposition(context);
   if (!creationDisposition.eligible) {
     await mergeTrackingSessionMetadata(trackedRecord.flightId, {
       flightawareAlert: {
@@ -2873,7 +2917,7 @@ async function ensureFlightAwareAlertForTrackedSession(req, trackedRecord) {
   }
 
   try {
-    const createdAlert = await createFlightAwareAlert({ targetUrl, context });
+    const createdAlert = await createFlightAwareAlert({ targetUrl, context: creationContext });
     await mergeTrackingSessionMetadata(trackedRecord.flightId, {
       flightawareAlert: {
         ...baseMetadata,
