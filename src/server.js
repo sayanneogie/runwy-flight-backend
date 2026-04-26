@@ -1310,7 +1310,7 @@ function normalizedFromFirehoseMessage(previousNormalized, message) {
     terminal: firehoseNormalized.terminal || previousNormalized?.terminal || null,
     gate: firehoseNormalized.gate || previousNormalized?.gate || null,
     delayMinutes: calculateDelayMinutes(mergedDepartureTimes),
-    inboundFlight: previousNormalized?.inboundFlight || null,
+    inboundFlight: firehoseNormalized.inboundFlight || previousNormalized?.inboundFlight || null,
     recentHistory: previousNormalized?.recentHistory || [],
     livePosition: nextLivePosition,
     trackPoints: nextTrackPoints,
@@ -2406,6 +2406,8 @@ function deriveAlertFlags(previousNormalized, nextNormalized) {
     if (instant == null) return false;
     return Math.abs(Date.now() - instant) <= recentEventWindowMs;
   };
+  const normalizedInboundStatus = (value) =>
+    String(value?.inboundFlight?.status || "").toLowerCase() || null;
 
   if (!previousNormalized || !nextNormalized) {
     const currentStatus = nextNormalized?.status || null;
@@ -2425,6 +2427,7 @@ function deriveAlertFlags(previousNormalized, nextNormalized) {
       gateChangedNow: false,
       departedNow: currentInAir && recentDeparture,
       arrivedNow: currentStatus === "landed" && recentArrival,
+      inboundArrivedNow: false,
       previousStatus: previousNormalized?.status || null,
       currentStatus,
     };
@@ -2438,6 +2441,8 @@ function deriveAlertFlags(previousNormalized, nextNormalized) {
   const currentStatus = nextNormalized.status || null;
   const previousInAir = ["departed", "enroute"].includes(previousStatus);
   const currentInAir = ["departed", "enroute"].includes(currentStatus);
+  const previousInboundStatus = normalizedInboundStatus(previousNormalized);
+  const currentInboundStatus = normalizedInboundStatus(nextNormalized);
 
   return {
     statusChanged: previousStatus !== currentStatus,
@@ -2456,9 +2461,55 @@ function deriveAlertFlags(previousNormalized, nextNormalized) {
     arrivedNow:
       currentStatus === "landed" &&
       previousStatus !== "landed",
+    inboundArrivedNow:
+      currentInboundStatus === "landed" &&
+      previousInboundStatus !== "landed" &&
+      !["cancelled", "landed"].includes(currentStatus),
     previousStatus,
     currentStatus,
   };
+}
+
+function departureTimeForNotification(normalized) {
+  const candidates = [
+    normalized?.departureTimes?.estimated,
+    normalized?.departureTimes?.scheduled,
+    normalized?.departureTimes?.actual,
+  ];
+
+  for (const candidate of candidates) {
+    const instant = candidate ? new Date(candidate).getTime() : NaN;
+    if (Number.isFinite(instant)) {
+      return instant;
+    }
+  }
+
+  return null;
+}
+
+function formatMinutesForNotification(totalMinutes) {
+  const normalizedMinutes = Math.max(1, Math.round(Number(totalMinutes) || 0));
+  const hours = Math.floor(normalizedMinutes / 60);
+  const minutes = normalizedMinutes % 60;
+
+  if (hours > 0 && minutes > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+
+  if (hours > 0) {
+    return `${hours}h`;
+  }
+
+  return `${minutes}m`;
+}
+
+function departureCountdownTextForNotification(normalized, referenceMs = Date.now()) {
+  const departureTimeMs = departureTimeForNotification(normalized);
+  if (!Number.isFinite(departureTimeMs) || departureTimeMs <= referenceMs) {
+    return null;
+  }
+
+  return `Departure is in ${formatMinutesForNotification((departureTimeMs - referenceMs) / 60000)}.`;
 }
 
 async function fetchAviationstackFlights(query) {
@@ -3155,6 +3206,33 @@ function notificationPayloadFor(normalized, flightId) {
     };
   }
 
+  if (alerts.inboundArrivedNow) {
+    const departureAirport = normalized?.departureAirportIata || "the departure airport";
+    const inboundFlightCode = String(normalized?.inboundFlight?.flightNumber || "").trim();
+    const inboundText = inboundFlightCode
+      ? `Inbound ${inboundFlightCode} for ${code}`
+      : `Your inbound aircraft for ${code}`;
+    const departureCountdown = departureCountdownTextForNotification(normalized);
+
+    return {
+      aps: {
+        alert: {
+          title: "Inbound Aircraft Landed",
+          body: `${inboundText} has landed at ${departureAirport}.${departureCountdown ? ` ${departureCountdown}` : ""}`,
+        },
+        sound: "default",
+      },
+      runwy: {
+        type: "flight_inbound_arrived",
+        flightId,
+        status: normalized.status || null,
+        route,
+        departureAirportIata: normalized?.departureAirportIata || null,
+        inboundFlightNumber: inboundFlightCode || null,
+      },
+    };
+  }
+
   return null;
 }
 
@@ -3184,6 +3262,7 @@ function ownerNotificationPreferenceConditionForEventType(eventType) {
       return "coalesce((uf.alert_settings_json ->> 'gateChange')::boolean, true) = true";
     case "flight_departed":
     case "flight_arrived":
+    case "flight_inbound_arrived":
       return "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true";
     case "flight_baggage_claim":
       return "coalesce((uf.alert_settings_json ->> 'baggageClaim')::boolean, true) = true";
@@ -3199,6 +3278,7 @@ function circleNotificationPreferenceConditionForEventType(eventType) {
     case "flight_gate_change":
       return "fp.notify_gate_change = true";
     case "flight_departed":
+    case "flight_inbound_arrived":
       return "fp.notify_departure = true";
     case "flight_arrived":
       return "fp.notify_arrival = true";
@@ -3524,7 +3604,8 @@ async function refreshTrackedFlightRecord(trackedRecord, options = {}) {
     normalized.alerts?.departedNow ||
     normalized.alerts?.arrivedNow ||
     normalized.alerts?.delayedNow ||
-    normalized.alerts?.gateChangedNow
+    normalized.alerts?.gateChangedNow ||
+    normalized.alerts?.inboundArrivedNow
   ) {
     await dispatchFlightStatusNotifications(trackedRecord.flightId, normalized);
   }
@@ -4558,6 +4639,7 @@ module.exports = {
     isFutureFlightAwareQueryDate,
     normalizeRecordFromFlightAware,
     normalizedTimezoneOffsetMinutes,
+    notificationPayloadFor,
     ownerNotificationPreferenceConditionForEventType,
     scoreCandidate,
     shouldPreferFlightAwareSchedules,

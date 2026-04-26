@@ -34,6 +34,28 @@ test("initial in-air snapshots emit departure notifications when takeoff is rece
   assert.equal(alerts.arrivedNow, false);
 });
 
+test("inbound aircraft landing emits a pre-departure alert flag", () => {
+  const alerts = __test__.deriveAlertFlags(
+    {
+      status: "scheduled",
+      inboundFlight: {
+        status: "enroute",
+      },
+    },
+    {
+      status: "scheduled",
+      inboundFlight: {
+        flightNumber: "AS533",
+        status: "landed",
+      },
+    }
+  );
+
+  assert.equal(alerts.inboundArrivedNow, true);
+  assert.equal(alerts.departedNow, false);
+  assert.equal(alerts.arrivedNow, false);
+});
+
 test("owner arrival notifications honor takeoff and landing alert preferences", () => {
   assert.equal(
     __test__.ownerNotificationPreferenceConditionForEventType("flight_arrived"),
@@ -53,6 +75,17 @@ test("flight circle recipients honor departure and arrival alert toggles", () =>
   assert.equal(
     __test__.circleNotificationPreferenceConditionForEventType("flight_arrived"),
     "fp.notify_arrival = true"
+  );
+  assert.equal(
+    __test__.circleNotificationPreferenceConditionForEventType("flight_inbound_arrived"),
+    "fp.notify_departure = true"
+  );
+});
+
+test("owner inbound-aircraft notifications honor takeoff and landing alert preferences", () => {
+  assert.equal(
+    __test__.ownerNotificationPreferenceConditionForEventType("flight_inbound_arrived"),
+    "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true"
   );
 });
 
@@ -156,4 +189,34 @@ test("same-day FlightAware alert payload omits date bounds for open window alert
   assert.equal(payload.target_url, "https://runwy.example.com/v1/webhooks/flightaware?secret=test");
   assert.ok(!("start" in payload));
   assert.ok(!("end" in payload));
+});
+
+test("inbound aircraft notifications include arrival airport and departure countdown", () => {
+  const departureTime = new Date(Date.now() + 76 * 60 * 1000).toISOString();
+  const payload = __test__.notificationPayloadFor(
+    {
+      flightNumber: "AS533",
+      airlineCode: "AS",
+      departureAirportIata: "SEA",
+      arrivalAirportIata: "LAX",
+      departureTimes: {
+        scheduled: null,
+        estimated: departureTime,
+        actual: null,
+      },
+      inboundFlight: {
+        flightNumber: "AS204",
+        status: "landed",
+      },
+      alerts: {
+        inboundArrivedNow: true,
+      },
+    },
+    "flight-id"
+  );
+
+  assert.equal(payload.aps.alert.title, "Inbound Aircraft Landed");
+  assert.equal(payload.runwy.type, "flight_inbound_arrived");
+  assert.match(payload.aps.alert.body, /has landed at SEA\./);
+  assert.match(payload.aps.alert.body, /Departure is in 1h 16m\./);
 });
