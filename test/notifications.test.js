@@ -55,3 +55,31 @@ test("flight circle recipients honor departure and arrival alert toggles", () =>
     "fp.notify_arrival = true"
   );
 });
+
+test("same-day FlightAware alerts are skipped while future alerts remain eligible", () => {
+  const today = "2026-04-26";
+
+  assert.deepEqual(
+    __test__.flightAwareAlertCreationDisposition(
+      { startDate: today, endDate: "2026-04-28" },
+      `${today}T08:00:00.000Z`
+    ),
+    {
+      eligible: false,
+      reason: "start_date_not_in_future",
+      detail: `Skipping FlightAware alert auto-create because start date ${today} is not after current UTC date ${today}.`,
+    }
+  );
+
+  assert.deepEqual(
+    __test__.flightAwareAlertCreationDisposition(
+      { startDate: "2026-04-27", endDate: "2026-04-29" },
+      `${today}T08:00:00.000Z`
+    ),
+    {
+      eligible: true,
+      reason: null,
+      detail: null,
+    }
+  );
+});
