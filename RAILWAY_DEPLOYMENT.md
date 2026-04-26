@@ -62,7 +62,7 @@ Set these on the API service if needed:
 - `APNS_BUNDLE_ID`
 - `APNS_PRIVATE_KEY`
 - `APNS_PRIVATE_KEY_BASE64`
-- `APNS_USE_SANDBOX`
+- `APNS_USE_SANDBOX` (`true` for Xcode-installed debug builds on a real device, `false` for TestFlight/App Store)
 
 ## Firehose-only Variables
 

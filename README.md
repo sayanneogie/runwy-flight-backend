@@ -202,7 +202,8 @@ If `WEBHOOK_SHARED_SECRET` is set, authenticate either way:
 ## Deployment notes
 - Put this service behind HTTPS and a reverse proxy in production.
 - Set `DATABASE_URL` for production so tracking/push subscriptions survive restarts.
-- Use `APNS_USE_SANDBOX=false` for production APNs.
+- Use `APNS_USE_SANDBOX=true` when testing an Xcode-installed build on a real iPhone.
+- Use `APNS_USE_SANDBOX=false` for TestFlight, App Store, or other production APNs builds.
 - Keep logs generic; never log secrets.
 - Railway should be split into at least two services:
   - API service: `node src/server.js`

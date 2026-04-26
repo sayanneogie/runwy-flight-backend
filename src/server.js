@@ -2915,8 +2915,42 @@ function apnsPrivateKeyMaterial() {
   return "";
 }
 
+function apnsPrivateKeySource() {
+  if (APNS_PRIVATE_KEY_BASE64) return "base64";
+  if (APNS_PRIVATE_KEY) return "inline";
+  return null;
+}
+
+function apnsConfigStatus() {
+  const privateKeySource = apnsPrivateKeySource();
+  const privateKeyMaterial = apnsPrivateKeyMaterial();
+  const missingEnv = [];
+
+  if (!APNS_KEY_ID) missingEnv.push("APNS_KEY_ID");
+  if (!APNS_TEAM_ID) missingEnv.push("APNS_TEAM_ID");
+  if (!APNS_BUNDLE_ID) missingEnv.push("APNS_BUNDLE_ID");
+  if (!privateKeySource) {
+    missingEnv.push("APNS_PRIVATE_KEY or APNS_PRIVATE_KEY_BASE64");
+  } else if (!privateKeyMaterial) {
+    missingEnv.push(`${privateKeySource} private key material`);
+  }
+
+  return {
+    configured: missingEnv.length === 0,
+    bundleId: APNS_BUNDLE_ID || null,
+    sandbox: APNS_USE_SANDBOX,
+    host: apnsHost(),
+    hasKeyId: Boolean(APNS_KEY_ID),
+    hasTeamId: Boolean(APNS_TEAM_ID),
+    hasBundleId: Boolean(APNS_BUNDLE_ID),
+    privateKeySource,
+    hasPrivateKeyMaterial: Boolean(privateKeyMaterial),
+    missingEnv,
+  };
+}
+
 function isApnsConfigured() {
-  return Boolean(APNS_KEY_ID && APNS_TEAM_ID && APNS_BUNDLE_ID && apnsPrivateKeyMaterial());
+  return apnsConfigStatus().configured;
 }
 
 function base64UrlEncode(input) {
@@ -3193,13 +3227,7 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
 
 async function sendApnsNotification(apnsToken, payload) {
   if (!isApnsConfigured()) {
-    console.warn("Skipping APNs delivery because APNs is not fully configured", {
-      bundleId: APNS_BUNDLE_ID || null,
-      sandbox: APNS_USE_SANDBOX,
-      hasKeyID: Boolean(APNS_KEY_ID),
-      hasTeamID: Boolean(APNS_TEAM_ID),
-      hasPrivateKey: Boolean(apnsPrivateKeyMaterial()),
-    });
+    console.warn("Skipping APNs delivery because APNs is not fully configured", apnsConfigStatus());
     return { skipped: true };
   }
 
@@ -3960,6 +3988,7 @@ app.get("/health", async (_req, res) => {
     nodeEnv: NODE_ENV,
     persistence: usesDatabase() ? "supabase-postgres" : "memory",
     apnsConfigured: isApnsConfigured(),
+    apns: apnsConfigStatus(),
     pollerEnabled: isPollerRunning(),
     firehoseConfigured: isFirehoseConfigured(),
     firehoseEnabled: isFirehoseRunning(),
