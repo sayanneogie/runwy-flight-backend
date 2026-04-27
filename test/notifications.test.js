@@ -56,6 +56,38 @@ test("inbound aircraft landing emits a pre-departure alert flag", () => {
   assert.equal(alerts.arrivedNow, false);
 });
 
+test("delay increases emit notifications even when provider status stays scheduled", () => {
+  const alerts = __test__.deriveAlertFlags(
+    {
+      status: "scheduled",
+      delayMinutes: 0,
+    },
+    {
+      status: "scheduled",
+      delayMinutes: 24,
+    }
+  );
+
+  assert.equal(alerts.delayedNow, true);
+  assert.equal(alerts.departedNow, false);
+});
+
+test("delay notifications are suppressed for landed flights", () => {
+  const alerts = __test__.deriveAlertFlags(
+    {
+      status: "enroute",
+      delayMinutes: 12,
+    },
+    {
+      status: "landed",
+      delayMinutes: 24,
+    }
+  );
+
+  assert.equal(alerts.delayedNow, false);
+  assert.equal(alerts.arrivedNow, true);
+});
+
 test("owner arrival notifications honor takeoff and landing alert preferences", () => {
   assert.equal(
     __test__.ownerNotificationPreferenceConditionForEventType("flight_arrived"),

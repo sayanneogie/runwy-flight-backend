@@ -2443,12 +2443,20 @@ function deriveAlertFlags(previousNormalized, nextNormalized) {
   const currentInAir = ["departed", "enroute"].includes(currentStatus);
   const previousInboundStatus = normalizedInboundStatus(previousNormalized);
   const currentInboundStatus = normalizedInboundStatus(nextNormalized);
+  const delayIncreased = nextDelay > previousDelay;
+  const hasPositiveDelay = nextDelay > 0;
+  const delayEligibleStatuses = !["cancelled", "landed"].includes(currentStatus);
 
   return {
     statusChanged: previousStatus !== currentStatus,
     delayedNow:
-      currentStatus === "delayed" &&
-      (previousStatus !== "delayed" || nextDelay > previousDelay),
+      delayEligibleStatuses &&
+      hasPositiveDelay &&
+      (
+        (currentStatus === "delayed" &&
+          (previousStatus !== "delayed" || delayIncreased)) ||
+        (currentStatus !== "delayed" && delayIncreased)
+      ),
     cancelledNow:
       currentStatus === "cancelled" && previousStatus !== "cancelled",
     gateChangedNow:
