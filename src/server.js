@@ -2185,6 +2185,26 @@ async function fetchFlightAwareTrackTrail(providerFlightId) {
   });
 }
 
+function coalesceFlightAwareTrackTrail(trackTrail, livePosition = null) {
+  const normalizedTrackPoints = Array.isArray(trackTrail?.trackPoints) ? trackTrail.trackPoints : [];
+  const normalizedLivePosition = trackTrail?.livePosition || livePosition || null;
+
+  return {
+    trackPoints: normalizedTrackPoints,
+    livePosition: normalizedLivePosition,
+  };
+}
+
+async function fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId) {
+  const trackTrail = await fetchFlightAwareTrackTrail(providerFlightId);
+  if ((trackTrail?.trackPoints || []).length > 0 || trackTrail?.livePosition) {
+    return coalesceFlightAwareTrackTrail(trackTrail);
+  }
+
+  const livePosition = await fetchFlightAwareLivePosition(providerFlightId);
+  return coalesceFlightAwareTrackTrail(trackTrail, livePosition);
+}
+
 async function fetchFlightAwareLivePosition(providerFlightId) {
   if (!PROVIDER_CALLS_ENABLED) {
     return null;
@@ -2283,7 +2303,7 @@ async function maybeBuildFlightAwareTrackTrailSeed({
   }
 
   try {
-    const trackTrail = await fetchFlightAwareTrackTrail(providerFlightId);
+    const trackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId);
     return {
       normalized: mergeFlightAwareTrackTrailIntoNormalized(normalized, trackTrail),
       metadataPatch: flightAwareTrackSeedMetadata({
@@ -4505,7 +4525,7 @@ app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req,
   }
 
   try {
-    const trackTrail = await fetchFlightAwareTrackTrail(providerFlightId);
+    const trackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId);
     return res.json({
       providerFlightId,
       trackPoints: Array.isArray(trackTrail.trackPoints) ? trackTrail.trackPoints : [],
@@ -4635,6 +4655,7 @@ module.exports = {
   startTrackingPollerWorker,
   usesDatabase,
   __test__: {
+    coalesceFlightAwareTrackTrail,
     buildFlightAwareAlertPayload,
     circleNotificationPreferenceConditionForEventType,
     classifyFlightAwareAuthProbeResult,

@@ -223,6 +223,32 @@ test("same-day FlightAware alert payload omits date bounds for open window alert
   assert.ok(!("end" in payload));
 });
 
+test("empty FlightAware track trails preserve a fallback live position", () => {
+  const livePosition = {
+    latitude: 12.9716,
+    longitude: 77.5946,
+    altitudeFeet: 34000,
+    heading: 12,
+    groundspeedKnots: 431,
+    recordedAt: "2026-04-27T11:32:00.000Z",
+    source: "flightaware",
+  };
+
+  assert.deepEqual(
+    __test__.coalesceFlightAwareTrackTrail(
+      {
+        trackPoints: [],
+        livePosition: null,
+      },
+      livePosition
+    ),
+    {
+      trackPoints: [],
+      livePosition,
+    }
+  );
+});
+
 test("inbound aircraft notifications include arrival airport and departure countdown", () => {
   const departureTime = new Date(Date.now() + 76 * 60 * 1000).toISOString();
   const payload = __test__.notificationPayloadFor(
