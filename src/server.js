@@ -634,6 +634,12 @@ function normalizeIataAirportCode(input) {
   return /^[A-Z0-9]{3}$/.test(value) ? value : null;
 }
 
+function normalizeAircraftType(input) {
+  const value = String(input || "").toUpperCase().trim();
+  if (!value || value === "UNKNOWN" || value === "N/A" || value === "NA") return null;
+  return value.replace(/\s+/g, "");
+}
+
 function normalizeStatus(rawStatus) {
   const value = String(rawStatus || "").toLowerCase().trim();
   if (!value) return "scheduled";
@@ -972,6 +978,14 @@ function normalizeRecordFromAviationstack(record) {
     takeoffTimes,
     landingTimes,
     arrivalTimes,
+    aircraftType: normalizeAircraftType(
+      record?.aircraft?.iata ||
+        record?.aircraft?.icao ||
+        record?.aircraft?.type ||
+        record?.aircraft_type ||
+        record?.aircraftType ||
+        record?.equipment
+    ),
     status: normalizeStatus(record?.flight_status),
     terminal: departure.terminal || arrival.terminal || null,
     gate: departure.gate || arrival.gate || null,
@@ -1077,6 +1091,17 @@ function normalizeRecordFromFlightAware(record) {
     takeoffTimes,
     landingTimes,
     arrivalTimes,
+    aircraftType: normalizeAircraftType(
+      record?.aircraft_type ||
+        record?.aircraftType ||
+        record?.aircraft_type_iata ||
+        record?.aircraft_type_icao ||
+        record?.equipment ||
+        record?.equipment_type ||
+        record?.aircraft?.type ||
+        record?.aircraft?.iata ||
+        record?.aircraft?.icao
+    ),
     status: normalizeStatus(record?.status || record?.flight_status),
     terminal:
       record?.terminal_origin ||
@@ -3816,6 +3841,10 @@ function webhookStatusFromEvent(event) {
 function isTrackedRecordRefreshDue(trackedRecord, nowMs = Date.now()) {
   if (!trackedRecord || isTerminalFlightStatus(trackedRecord.normalized?.status)) {
     return false;
+  }
+
+  if (!normalizeAircraftType(trackedRecord.normalized?.aircraftType)) {
+    return true;
   }
 
   if (

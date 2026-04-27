@@ -847,11 +847,11 @@ function createTrackingStore({
         $13::timestamptz,
         $14,
         $15,
-        null,
         $16,
         $17,
         $18,
-        $19
+        $19,
+        $20
       )
       on conflict (user_id, tracking_session_id)
       do update set
@@ -895,6 +895,7 @@ function createTrackingStore({
         normalized?.arrivalTimes?.actual || null,
         normalized.terminal || null,
         normalized.gate || null,
+        normalized.aircraftType || null,
         normalized.status || "scheduled",
         Number.isFinite(Number(normalized.delayMinutes)) ? Number(normalized.delayMinutes) : null,
         provider,

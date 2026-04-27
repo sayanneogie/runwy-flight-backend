@@ -35,11 +35,13 @@ test("normalizeRecordFromFlightAware keeps schedule IATA fields", () => {
     origin_iata: "DEL",
     destination: "VABB",
     destination_iata: "BOM",
+    aircraft_type: "A20N",
   });
 
   assert.equal(normalized.flightNumber, "6E6992");
   assert.equal(normalized.departureAirportIata, "DEL");
   assert.equal(normalized.arrivalAirportIata, "BOM");
+  assert.equal(normalized.aircraftType, "A20N");
   assert.equal(normalized.departureTimes.scheduled, "2026-03-24T10:30:00.000Z");
   assert.equal(normalized.arrivalTimes.scheduled, "2026-03-24T12:40:00.000Z");
 });
