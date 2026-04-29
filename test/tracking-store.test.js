@@ -164,10 +164,32 @@ test("flights within 2 hours poll every 15 minutes", async () => {
   assertApproxDuration(nextPollAfterMs - now, 15 * 60_000);
 });
 
-test("departed flights schedule a single final arrival-based refresh", async () => {
+test("departed flights keep polling before the final arrival refresh", async () => {
   const now = Date.now();
   const departure = new Date(now - 30 * 60_000).toISOString();
   const arrival = new Date(now + 3 * 60 * 60_000).toISOString();
+  const params = await persistSnapshot(
+    makeNormalized({
+      status: "enroute",
+      departureTimes: { actual: departure },
+      arrivalTimes: { estimated: arrival },
+    }),
+    {
+      flightNumber: "AI203",
+      date: arrival.slice(0, 10),
+      departureIata: "DEL",
+      arrivalIata: "BOM",
+    }
+  );
+
+  const nextPollAfterMs = new Date(params[9]).getTime();
+  assertApproxDuration(nextPollAfterMs - now, 15 * 60_000);
+});
+
+test("departed flights still schedule a final refresh after estimated arrival", async () => {
+  const now = Date.now();
+  const departure = new Date(now - 4 * 60 * 60_000).toISOString();
+  const arrival = new Date(now - 5 * 60_000).toISOString();
   const params = await persistSnapshot(
     makeNormalized({
       status: "enroute",

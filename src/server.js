@@ -717,11 +717,12 @@ function parseAirlineCode(flightNumber) {
 }
 
 function calculateDelayMinutes(departureTimes) {
-  if (!departureTimes?.scheduled || !departureTimes?.estimated) return null;
+  const actualOrEstimate = departureTimes?.actual || departureTimes?.estimated;
+  if (!departureTimes?.scheduled || !actualOrEstimate) return null;
   const scheduled = new Date(departureTimes.scheduled).getTime();
-  const estimated = new Date(departureTimes.estimated).getTime();
-  if (!Number.isFinite(scheduled) || !Number.isFinite(estimated)) return null;
-  return Math.max(0, Math.round((estimated - scheduled) / 60_000));
+  const displayed = new Date(actualOrEstimate).getTime();
+  if (!Number.isFinite(scheduled) || !Number.isFinite(displayed)) return null;
+  return Math.max(0, Math.round((displayed - scheduled) / 60_000));
 }
 
 function finiteNumberOrNull(value) {

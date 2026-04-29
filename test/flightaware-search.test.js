@@ -46,6 +46,18 @@ test("normalizeRecordFromFlightAware keeps schedule IATA fields", () => {
   assert.equal(normalized.arrivalTimes.scheduled, "2026-03-24T12:40:00.000Z");
 });
 
+test("normalizeRecordFromFlightAware derives delay from actual departure", () => {
+  const normalized = __test__.normalizeRecordFromFlightAware({
+    ident_iata: "TG324",
+    scheduled_out: "2026-04-29T06:10:00Z",
+    actual_out: "2026-04-29T06:18:00Z",
+    origin_iata: "DEL",
+    destination_iata: "BKK",
+  });
+
+  assert.equal(normalized.delayMinutes, 8);
+});
+
 test("scoreCandidate matches schedule codeshares through actual_ident_iata", () => {
   const score = __test__.scoreCandidate(
     {
