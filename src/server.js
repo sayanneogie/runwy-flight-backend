@@ -678,7 +678,7 @@ function reconcileOperationalStatus(normalized) {
     };
   }
 
-  const departedSignal = normalized.departureTimes?.actual || normalized.takeoffTimes?.estimated;
+  const departedSignal = normalized.departureTimes?.actual || normalized.takeoffTimes?.actual;
   if (departedSignal && ["cancelled", "scheduled", "boarding", "delayed"].includes(normalized.status)) {
     return {
       ...normalized,
@@ -4700,6 +4700,7 @@ module.exports = {
     normalizedTimezoneOffsetMinutes,
     notificationPayloadFor,
     ownerNotificationPreferenceConditionForEventType,
+    reconcileOperationalStatus,
     scoreCandidate,
     shouldPreferFlightAwareSchedules,
   },

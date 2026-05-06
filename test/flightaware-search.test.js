@@ -58,6 +58,27 @@ test("normalizeRecordFromFlightAware derives delay from actual departure", () =>
   assert.equal(normalized.delayMinutes, 8);
 });
 
+test("reconcileOperationalStatus does not depart future scheduled flights with estimated takeoff", () => {
+  const normalized = __test__.normalizeRecordFromFlightAware({
+    ident: "AIC2418",
+    ident_iata: "AI2418",
+    fa_flight_id: "AIC2418-1777979795-schedule-1141p",
+    status: "Scheduled",
+    scheduled_out: "2026-05-07T11:00:00Z",
+    scheduled_off: "2026-05-07T11:10:00Z",
+    estimated_off: "2026-05-07T11:10:00Z",
+    scheduled_in: "2026-05-07T13:55:00Z",
+    origin_iata: "BLR",
+    destination_iata: "DEL",
+  });
+
+  const reconciled = __test__.reconcileOperationalStatus(normalized);
+
+  assert.equal(reconciled.status, "scheduled");
+  assert.equal(reconciled.departureTimes.scheduled, "2026-05-07T11:00:00.000Z");
+  assert.equal(reconciled.takeoffTimes.estimated, "2026-05-07T11:10:00.000Z");
+});
+
 test("scoreCandidate matches schedule codeshares through actual_ident_iata", () => {
   const score = __test__.scoreCandidate(
     {
