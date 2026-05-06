@@ -293,6 +293,67 @@ test("expired due rows are paused before returning to the poller", async () => {
   assert.deepEqual(pauseUpdate.params[0], ["11111111-1111-1111-1111-111111111111"]);
 });
 
+test("stale enroute due rows are paused before returning to the poller", async () => {
+  const staleTravelDate = "2026-03-10";
+  const { store, queries } = makeStore({
+    queryHandler(sql) {
+      if (sql.includes("from public.tracking_sessions ts") && sql.includes("ts.next_poll_after <=")) {
+        return {
+          rows: [
+            {
+              id: "11111111-1111-1111-1111-111111111111",
+              owner_user_id: "22222222-2222-2222-2222-222222222222",
+              provider: "flightaware",
+              provider_flight_id: "FAKE123",
+              flight_number: "AI203",
+              airline_code: "AI",
+              origin_iata: "DEL",
+              destination_iata: "BOM",
+              travel_date: staleTravelDate,
+              metadata_json: {
+                query: {
+                  flightNumber: "AI203",
+                  date: staleTravelDate,
+                  departureIata: "DEL",
+                  arrivalIata: "BOM",
+                },
+              },
+              session_status: "active",
+              next_poll_after: "2026-03-11T03:00:00.000Z",
+              polling_stopped_reason: null,
+              last_snapshot_at: "2026-03-10T14:00:00.000Z",
+              updated_at: "2026-03-10T14:00:00.000Z",
+              canonical_snapshot_json: {
+                airlineCode: "AI",
+                flightNumber: "AI203",
+                departureAirportIata: "DEL",
+                arrivalAirportIata: "BOM",
+                status: "enroute",
+                departureTimes: { actual: "2026-03-10T10:00:00.000Z" },
+                arrivalTimes: { estimated: "2026-03-10T12:00:00.000Z" },
+                lastUpdated: "2026-03-10T14:00:00.000Z",
+              },
+              provider_last_updated_at: "2026-03-10T14:00:00.000Z",
+              snapshot_updated_at: "2026-03-10T14:00:00.000Z",
+            },
+          ],
+        };
+      }
+
+      return { rows: [] };
+    },
+  });
+
+  const dueRows = await store.listDueTrackingRows();
+  assert.equal(dueRows.length, 0);
+
+  const pauseUpdate = queries.find(
+    ({ sql }) => sql.includes("update public.tracking_sessions") && sql.includes("expired_tracking_window")
+  );
+  assert.ok(pauseUpdate, "expected stale enroute rows to be paused");
+  assert.deepEqual(pauseUpdate.params[0], ["11111111-1111-1111-1111-111111111111"]);
+});
+
 test("providerFlightIdentifier prefers FlightAware ICAO ident when fa_flight_id is missing", () => {
   const { store } = makeStore();
 

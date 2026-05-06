@@ -503,7 +503,7 @@ function createTrackingStore({
 
   function trackingWindowExpired(normalized, query, now = new Date()) {
     const status = String(normalized?.status || "").toLowerCase();
-    if (["departed", "enroute", "landed", "cancelled", "diverted"].includes(status)) {
+    if (["landed", "cancelled", "diverted"].includes(status)) {
       return false;
     }
 
@@ -673,7 +673,6 @@ function createTrackingStore({
         ls.alerts_json,
         ls.metrics_json,
         ls.canonical_snapshot_json,
-        ls.raw_provider_payload_json,
         ls.provider_last_updated_at,
         ls.updated_at as snapshot_updated_at
       from public.tracking_sessions ts
@@ -707,7 +706,6 @@ function createTrackingStore({
         ls.alerts_json,
         ls.metrics_json,
         ls.canonical_snapshot_json,
-        ls.raw_provider_payload_json,
         ls.provider_last_updated_at,
         ls.updated_at as snapshot_updated_at
       from public.tracking_sessions ts
@@ -1169,13 +1167,19 @@ function createTrackingStore({
         ls.alerts_json,
         ls.metrics_json,
         ls.canonical_snapshot_json,
-        ls.raw_provider_payload_json,
         ls.provider_last_updated_at,
         ls.updated_at as snapshot_updated_at
       from public.tracking_sessions ts
       left join public.live_snapshots ls
         on ls.tracking_session_id = ts.id
       where ts.session_status in ('pending', 'active', 'errored')
+        and (
+          ts.travel_date is null
+          or (
+            ts.travel_date >= (now() - interval '1 day')::date
+            and ts.travel_date <= (now() + interval '2 days')::date
+          )
+        )
       order by ts.updated_at desc
       `
     );
