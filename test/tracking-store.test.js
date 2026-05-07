@@ -107,7 +107,7 @@ async function persistSnapshot(normalized, query) {
   return trackingSessionUpdateParams(queries);
 }
 
-test("far future flights poll once per day", async () => {
+test("far future flights sleep until the pre-departure polling window", async () => {
   const now = Date.now();
   const departure = new Date(now + 15 * 24 * 60 * 60_000).toISOString();
   const params = await persistSnapshot(
@@ -123,7 +123,7 @@ test("far future flights poll once per day", async () => {
   );
 
   const nextPollAfterMs = new Date(params[9]).getTime();
-  assertApproxDuration(nextPollAfterMs - now, 24 * 60 * 60_000);
+  assertApproxDuration(nextPollAfterMs - now, (15 * 24 - 12) * 60 * 60_000);
 });
 
 test("flights within 12 hours poll every 2 hours", async () => {

@@ -1,5 +1,6 @@
 const IMMINENT_DEPARTURE_POLL_INTERVAL_MS = 15 * 60_000;
 const PRE_DEPARTURE_POLL_INTERVAL_MS = 2 * 60 * 60_000;
+const PRE_DEPARTURE_POLL_WINDOW_MS = 12 * 60 * 60_000;
 const FAR_FUTURE_POLL_INTERVAL_MS = 24 * 60 * 60_000;
 const ENROUTE_POLL_INTERVAL_MS = 15 * 60_000;
 const POST_DEPARTURE_FINAL_REFRESH_BUFFER_MS = 15 * 60_000;
@@ -600,6 +601,7 @@ function createTrackingStore({
       if (secondsUntilDeparture <= 12 * 60 * 60) {
         return new Date(now.getTime() + PRE_DEPARTURE_POLL_INTERVAL_MS).toISOString();
       }
+      return new Date(departureMs - PRE_DEPARTURE_POLL_WINDOW_MS).toISOString();
     }
 
     if (status === "boarding" || status === "delayed") {
