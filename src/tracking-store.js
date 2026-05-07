@@ -1098,6 +1098,8 @@ function createTrackingStore({
   async function listDueTrackingRows(limit = defaultPollerBatchSize) {
     if (!usesDatabase()) return [];
 
+    await pauseTrackingRowsWithoutActiveUserFlights();
+
     const result = await pool.query(
       `
       select
@@ -1113,6 +1115,13 @@ function createTrackingStore({
       where ts.session_status in ('pending', 'active', 'errored')
         and ts.next_poll_after is not null
         and ts.next_poll_after <= now()
+        and exists (
+          select 1
+          from public.user_flights uf
+          where uf.tracking_session_id = ts.id
+            and uf.deleted_at is null
+            and coalesce(uf.lifecycle_state, '') <> 'deleted'
+        )
       order by coalesce(ts.next_poll_after, ts.created_at) asc
       limit $1
       `,
@@ -1153,6 +1162,8 @@ function createTrackingStore({
   async function listFirehoseTrackedRows() {
     if (!usesDatabase()) return [];
 
+    await pauseTrackingRowsWithoutActiveUserFlights();
+
     const result = await pool.query(
       `
       select
@@ -1175,6 +1186,13 @@ function createTrackingStore({
       left join public.live_snapshots ls
         on ls.tracking_session_id = ts.id
       where ts.session_status in ('pending', 'active', 'errored')
+        and exists (
+          select 1
+          from public.user_flights uf
+          where uf.tracking_session_id = ts.id
+            and uf.deleted_at is null
+            and coalesce(uf.lifecycle_state, '') <> 'deleted'
+        )
         and (
           ts.travel_date is null
           or (
@@ -1187,6 +1205,29 @@ function createTrackingStore({
     );
 
     return result.rows.map(mapTrackingRow).filter(Boolean);
+  }
+
+  async function pauseTrackingRowsWithoutActiveUserFlights() {
+    if (!usesDatabase()) return;
+
+    await pool.query(
+      `
+      update public.tracking_sessions ts
+      set
+        session_status = 'paused',
+        next_poll_after = null,
+        polling_stopped_reason = 'no_active_user_flights',
+        updated_at = now()
+      where ts.session_status in ('pending', 'active', 'errored')
+        and not exists (
+          select 1
+          from public.user_flights uf
+          where uf.tracking_session_id = ts.id
+            and uf.deleted_at is null
+            and coalesce(uf.lifecycle_state, '') <> 'deleted'
+        )
+      `
+    );
   }
 
   async function markTrackingRowErrored(flightId, reason) {
