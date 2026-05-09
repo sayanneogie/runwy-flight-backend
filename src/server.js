@@ -23,6 +23,14 @@ const { createFirehoseRuntime } = require("./firehose-runtime");
 const { mergeRealtimeTelemetry } = require("./realtime-telemetry");
 const { createTrackingStore } = require("./tracking-store");
 const { createTrackingPollerRuntime } = require("./tracking-poller-runtime");
+const { createProviderAdapter: createSharedProviderAdapter } = require("./shared-flight/provider-adapter");
+const {
+  createMemorySharedFlightRepository,
+  createPostgresSharedFlightRepository,
+} = require("./shared-flight/repository");
+const { createApnsSender: createSharedApnsSender } = require("./shared-flight/notifications");
+const { createSharedFlightService } = require("./shared-flight/service");
+const { mountSharedFlightRoutes } = require("./shared-flight/routes");
 
 const PORT = Number(process.env.PORT || 8787);
 const FLIGHT_DATA_PROVIDER = (process.env.FLIGHT_DATA_PROVIDER || "aviationstack").toLowerCase();
@@ -70,6 +78,10 @@ const FIREHOSE_BACKFILL_MIN_TRACK_POINTS = Math.max(
 );
 const ENABLE_FIREHOSE_WORKER =
   String(process.env.ENABLE_FIREHOSE_WORKER || "false").toLowerCase() === "true";
+const SHARED_FLIGHT_STREAMING_ENABLED =
+  String(process.env.SHARED_FLIGHT_STREAMING_ENABLED || process.env.ENABLE_FIREHOSE_WORKER || "false").toLowerCase() === "true";
+const SHARED_FLIGHT_TRACK_BRIDGE_ENABLED =
+  String(process.env.SHARED_FLIGHT_TRACK_BRIDGE_ENABLED || "true").toLowerCase() !== "false";
 const FIREHOSE_EVENTS = Object.freeze(
   parseListEnv(process.env.FIREHOSE_EVENTS, [
     "flifo",
@@ -104,7 +116,7 @@ const FLIGHTAWARE_POSITION_CACHE_TTL_MS = toPositiveNumber(
 );
 const FLIGHTAWARE_SCHEDULE_WINDOW_MS = 48 * 60 * 60_000;
 const RATE_LIMIT_PER_MINUTE = toPositiveNumber(process.env.RATE_LIMIT_PER_MINUTE, 60);
-const WEBHOOK_SHARED_SECRET = (process.env.WEBHOOK_SHARED_SECRET || "").trim();
+const WEBHOOK_SHARED_SECRET = (process.env.FLIGHTAWARE_WEBHOOK_SECRET || process.env.WEBHOOK_SHARED_SECRET || "").trim();
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
 const SUPABASE_ANON_KEY = (process.env.SUPABASE_ANON_KEY || "").trim();
@@ -502,6 +514,11 @@ function webhookSecretFromRequest(req) {
   if (headerSecret) {
     return headerSecret;
   }
+  const authorization = String(req.get("Authorization") || "").trim();
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  if (bearer) {
+    return bearer;
+  }
 
   const secretQueryValue =
     req.query?.secret ||
@@ -532,7 +549,7 @@ function flightAwareWebhookTargetURL(req) {
   const baseURL = inferredHTTPSBaseURLFromRequest(req) || WEBHOOK_PUBLIC_BASE_URL;
   if (!baseURL) return null;
 
-  const target = new URL("/v1/webhooks/flightaware", `${baseURL}/`);
+  const target = new URL("/webhooks/flightaware/alerts", `${baseURL}/`);
   target.searchParams.set("secret", WEBHOOK_SHARED_SECRET);
   return target.toString();
 }
@@ -645,7 +662,11 @@ function normalizeStatus(rawStatus) {
   if (!value) return "scheduled";
   if (value.includes("cancel")) return "cancelled";
   if (value.includes("divert")) return "diverted";
+  if (value.includes("onblock") || value.includes("inblock") || value.includes("arrived_at_gate")) return "arrived_at_gate";
   if (value.includes("land")) return "landed";
+  if (value.includes("taxi in") || value.includes("taxi_in")) return "taxi_in";
+  if (value.includes("takeoff roll") || value.includes("takeoff_roll")) return "takeoff_roll";
+  if (value.includes("taxi") || value.includes("offblock")) return "taxiing";
   if (value.includes("board")) return "boarding";
   if (value.includes("delay")) return "delayed";
   if (value.includes("active") || value.includes("airborne") || value.includes("en-route") || value.includes("enroute")) return "enroute";
@@ -658,7 +679,14 @@ function reconcileOperationalStatus(normalized) {
     return normalized;
   }
 
-  const landingActual = normalized.landingTimes?.actual || normalized.arrivalTimes?.actual;
+  if (normalized.arrivalTimes?.actual) {
+    return {
+      ...normalized,
+      status: "arrived_at_gate",
+    };
+  }
+
+  const landingActual = normalized.landingTimes?.actual;
   if (landingActual) {
     return {
       ...normalized,
@@ -672,6 +700,10 @@ function reconcileOperationalStatus(normalized) {
     (Number.isFinite(Number(normalized.progressPercent)) && Number(normalized.progressPercent) > 0);
 
   if (airborneSignal) {
+    const onGround = String(normalized.livePosition?.airGround || normalized.livePosition?.air_ground || "").toUpperCase() === "G";
+    if (onGround && normalized.status === "taxi_in") {
+      return normalized;
+    }
     return {
       ...normalized,
       status: "enroute",
@@ -682,7 +714,7 @@ function reconcileOperationalStatus(normalized) {
   if (departedSignal && ["cancelled", "scheduled", "boarding", "delayed"].includes(normalized.status)) {
     return {
       ...normalized,
-      status: "departed",
+      status: normalized.takeoffTimes?.actual ? "airborne" : "taxiing",
     };
   }
 
@@ -1104,6 +1136,30 @@ function normalizeRecordFromFlightAware(record) {
         record?.aircraft?.icao
     ),
     status: normalizeStatus(record?.status || record?.flight_status),
+    departureTerminal:
+      record?.terminal_origin ||
+      record?.departure_terminal ||
+      record?.scheduled_departure_terminal ||
+      null,
+    departureGate:
+      record?.gate_origin ||
+      record?.departure_gate ||
+      record?.scheduled_departure_gate ||
+      null,
+    arrivalTerminal:
+      record?.terminal_destination ||
+      record?.arrival_terminal ||
+      record?.actual_arrival_terminal ||
+      record?.estimated_arrival_terminal ||
+      record?.scheduled_arrival_terminal ||
+      null,
+    arrivalGate:
+      record?.gate_destination ||
+      record?.arrival_gate ||
+      record?.actual_arrival_gate ||
+      record?.estimated_arrival_gate ||
+      record?.scheduled_arrival_gate ||
+      null,
     terminal:
       record?.terminal_origin ||
       record?.departure_terminal ||
@@ -1113,6 +1169,12 @@ function normalizeRecordFromFlightAware(record) {
       record?.gate_origin ||
       record?.departure_gate ||
       record?.gate ||
+      null,
+    baggageClaim:
+      record?.baggage_claim ||
+      record?.baggage_belt ||
+      record?.arrival_baggage_claim ||
+      record?.estimated_arrival_baggage_claim ||
       null,
     delayMinutes: calculateDelayMinutes(departureTimes),
     inboundFlight,
@@ -1158,10 +1220,17 @@ function firehoseStatusFromMessage(message, previousStatus = "scheduled") {
   const type = firehoseMessageType(message);
 
   if (type === "cancellation") return "cancelled";
-  if (type === "arrival" || type === "onblock") return "landed";
-  if (type === "departure" || type === "offblock") return "departed";
+  if (type === "onblock") return "arrived_at_gate";
+  if (type === "arrival") return "landed";
+  if (type === "offblock") return "taxiing";
+  if (type === "departure") return "airborne";
   if (type === "position") {
-    return String(message?.air_ground || "").trim().toUpperCase() === "G" ? "departed" : "enroute";
+    const airGround = String(message?.air_ground || "").trim().toUpperCase();
+    if (airGround !== "G") return "enroute";
+    if (["landed", "taxi_in", "arrived_at_gate"].includes(String(previousStatus || "").toLowerCase())) {
+      return "taxi_in";
+    }
+    return "taxiing";
   }
 
   const statusCode = String(message?.status || "").trim().toUpperCase();
@@ -1169,11 +1238,17 @@ function firehoseStatusFromMessage(message, previousStatus = "scheduled") {
   if (statusCode === "A") return "enroute";
   if (statusCode === "F") return "scheduled";
 
-  if (message?.actual_in || message?.actual_on || message?.aat) {
+  if (message?.actual_in) {
+    return "arrived_at_gate";
+  }
+  if (message?.actual_on || message?.aat) {
     return "landed";
   }
-  if (message?.actual_out || message?.actual_off || message?.adt) {
-    return "departed";
+  if (message?.actual_off || message?.adt) {
+    return "airborne";
+  }
+  if (message?.actual_out) {
+    return "taxiing";
   }
 
   return normalizeStatus(previousStatus);
@@ -1265,17 +1340,27 @@ function pseudoFlightAwareRecordFromFirehoseMessage(message, previousNormalized)
       message?.actual_departure_terminal ||
       message?.estimated_departure_terminal ||
       message?.scheduled_departure_terminal ||
-      message?.actual_arrival_terminal ||
-      message?.estimated_arrival_terminal ||
-      message?.scheduled_arrival_terminal ||
       null,
     gate:
       message?.actual_departure_gate ||
       message?.estimated_departure_gate ||
       message?.scheduled_departure_gate ||
+      null,
+    terminal_destination:
+      message?.actual_arrival_terminal ||
+      message?.estimated_arrival_terminal ||
+      message?.scheduled_arrival_terminal ||
+      null,
+    gate_destination:
       message?.actual_arrival_gate ||
       message?.estimated_arrival_gate ||
       message?.scheduled_arrival_gate ||
+      null,
+    baggage_claim:
+      message?.baggage_claim ||
+      message?.baggage_belt ||
+      message?.arrival_baggage_claim ||
+      message?.estimated_arrival_baggage_claim ||
       null,
     progress_percent: previousNormalized?.progressPercent ?? null,
     last_position: livePosition,
@@ -1335,6 +1420,11 @@ function normalizedFromFirehoseMessage(previousNormalized, message) {
     status: nextStatus,
     terminal: firehoseNormalized.terminal || previousNormalized?.terminal || null,
     gate: firehoseNormalized.gate || previousNormalized?.gate || null,
+    departureTerminal: firehoseNormalized.departureTerminal || previousNormalized?.departureTerminal || null,
+    departureGate: firehoseNormalized.departureGate || previousNormalized?.departureGate || null,
+    arrivalTerminal: firehoseNormalized.arrivalTerminal || previousNormalized?.arrivalTerminal || null,
+    arrivalGate: firehoseNormalized.arrivalGate || previousNormalized?.arrivalGate || null,
+    baggageClaim: firehoseNormalized.baggageClaim || previousNormalized?.baggageClaim || null,
     delayMinutes: calculateDelayMinutes(mergedDepartureTimes),
     inboundFlight: firehoseNormalized.inboundFlight || previousNormalized?.inboundFlight || null,
     recentHistory: previousNormalized?.recentHistory || [],
@@ -2457,7 +2547,7 @@ function deriveAlertFlags(previousNormalized, nextNormalized) {
 
   if (!previousNormalized || !nextNormalized) {
     const currentStatus = nextNormalized?.status || null;
-    const currentInAir = ["departed", "enroute"].includes(currentStatus);
+    const currentInAir = ["departed", "airborne", "enroute"].includes(currentStatus);
     const recentDeparture =
       isRecent(nextNormalized?.takeoffTimes?.actual) ||
       isRecent(nextNormalized?.departureTimes?.actual) ||
@@ -2472,7 +2562,10 @@ function deriveAlertFlags(previousNormalized, nextNormalized) {
       cancelledNow: false,
       gateChangedNow: false,
       departedNow: currentInAir && recentDeparture,
-      arrivedNow: currentStatus === "landed" && recentArrival,
+      arrivedNow: ["landed", "arrived", "arrived_at_gate"].includes(currentStatus) && recentArrival,
+      taxiingNow: ["taxiing", "taxi_out", "taxi_in"].includes(currentStatus),
+      takeoffNow: currentStatus === "takeoff_roll",
+      baggageBeltAssignedNow: Boolean(nextNormalized?.baggageClaim || nextNormalized?.baggageBelt),
       inboundArrivedNow: false,
       previousStatus: previousNormalized?.status || null,
       currentStatus,
@@ -2485,8 +2578,12 @@ function deriveAlertFlags(previousNormalized, nextNormalized) {
   const nextGate = `${nextNormalized.gate || ""}`.trim();
   const previousStatus = previousNormalized.status || null;
   const currentStatus = nextNormalized.status || null;
-  const previousInAir = ["departed", "enroute"].includes(previousStatus);
-  const currentInAir = ["departed", "enroute"].includes(currentStatus);
+  const previousInAir = ["departed", "airborne", "enroute"].includes(previousStatus);
+  const currentInAir = ["departed", "airborne", "enroute"].includes(currentStatus);
+  const previousTaxi = ["taxiing", "taxi_out", "taxi_in"].includes(previousStatus);
+  const currentTaxi = ["taxiing", "taxi_out", "taxi_in"].includes(currentStatus);
+  const previousBaggage = `${previousNormalized.baggageClaim || previousNormalized.baggageBelt || ""}`.trim();
+  const nextBaggage = `${nextNormalized.baggageClaim || nextNormalized.baggageBelt || ""}`.trim();
   const previousInboundStatus = normalizedInboundStatus(previousNormalized);
   const currentInboundStatus = normalizedInboundStatus(nextNormalized);
   const delayIncreased = nextDelay > previousDelay;
@@ -2513,8 +2610,17 @@ function deriveAlertFlags(previousNormalized, nextNormalized) {
       !previousInAir &&
       previousStatus !== "landed",
     arrivedNow:
-      currentStatus === "landed" &&
-      previousStatus !== "landed",
+      ["landed", "arrived", "arrived_at_gate"].includes(currentStatus) &&
+      !["landed", "arrived", "arrived_at_gate"].includes(previousStatus),
+    taxiingNow:
+      currentTaxi &&
+      !previousTaxi,
+    takeoffNow:
+      currentStatus === "takeoff_roll" &&
+      previousStatus !== "takeoff_roll",
+    baggageBeltAssignedNow:
+      Boolean(nextBaggage) &&
+      previousBaggage !== nextBaggage,
     inboundArrivedNow:
       currentInboundStatus === "landed" &&
       previousInboundStatus !== "landed" &&
@@ -2696,6 +2802,28 @@ function normalizeWithContext(record, records, query, normalizer, previousNormal
     provider: FLIGHT_DATA_PROVIDER,
   }));
 }
+
+const sharedFlightRepository = pool
+  ? createPostgresSharedFlightRepository(pool)
+  : createMemorySharedFlightRepository();
+
+const sharedFlightService = createSharedFlightService({
+  repository: sharedFlightRepository,
+  streamingEnabled: SHARED_FLIGHT_STREAMING_ENABLED,
+  apns: createSharedApnsSender({
+    send: async ({ token, payload }) => sendApnsNotification(token, payload),
+  }),
+  provider: createSharedProviderAdapter({
+    providerName: FLIGHT_DATA_PROVIDER,
+    fetchFlights: (query) => providerAdapter().fetchFlights(query),
+    normalizeRecord: (record) => providerAdapter().normalizeRecord(record),
+    normalizeSelected: (record, records, query) =>
+      normalizeWithContext(record, records, query, providerAdapter().normalizeRecord, null),
+    enrichNormalized: (normalized, record) =>
+      enrichNormalizedWithLivePosition(normalized, providerAdapter().name, record),
+    selectRecord: (records, query, normalizer) => bestMatch(records, query, normalizer),
+  }),
+});
 
 const trackingStore = createTrackingStore({
   pool,
@@ -3216,6 +3344,42 @@ function notificationPayloadFor(normalized, flightId) {
     };
   }
 
+  if (alerts.takeoffNow) {
+    return {
+      aps: {
+        alert: {
+          title: "Taking Off",
+          body: `${code} (${route}) is about to take off.`,
+        },
+        sound: "default",
+      },
+      runwy: {
+        type: "flight_takeoff_roll",
+        flightId,
+        status: normalized.status || null,
+        route,
+      },
+    };
+  }
+
+  if (alerts.taxiingNow) {
+    return {
+      aps: {
+        alert: {
+          title: "Taxiing",
+          body: `${code} (${route}) is taxiing.`,
+        },
+        sound: "default",
+      },
+      runwy: {
+        type: "flight_taxiing",
+        flightId,
+        status: normalized.status || null,
+        route,
+      },
+    };
+  }
+
   if (alerts.delayedNow) {
     const delay = Number(normalized?.delayMinutes || 0);
     const delayText = delay > 0 ? ` by ${delay}m` : "";
@@ -3258,6 +3422,28 @@ function notificationPayloadFor(normalized, flightId) {
         route,
       },
     };
+  }
+
+  if (alerts.baggageBeltAssignedNow) {
+    const belt = `${normalized?.baggageClaim || normalized?.baggageBelt || ""}`.trim();
+    if (belt) {
+      return {
+        aps: {
+          alert: {
+            title: "Baggage Belt",
+            body: `${code} bags are expected at belt ${belt}.`,
+          },
+          sound: "default",
+        },
+        runwy: {
+          type: "flight_baggage_claim",
+          flightId,
+          status: normalized.status || null,
+          baggageBelt: belt,
+          route,
+        },
+      };
+    }
   }
 
   if (alerts.inboundArrivedNow) {
@@ -3316,6 +3502,8 @@ function ownerNotificationPreferenceConditionForEventType(eventType) {
       return "coalesce((uf.alert_settings_json ->> 'gateChange')::boolean, true) = true";
     case "flight_departed":
     case "flight_arrived":
+    case "flight_takeoff_roll":
+    case "flight_taxiing":
     case "flight_inbound_arrived":
       return "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true";
     case "flight_baggage_claim":
@@ -3332,6 +3520,8 @@ function circleNotificationPreferenceConditionForEventType(eventType) {
     case "flight_gate_change":
       return "fp.notify_gate_change = true";
     case "flight_departed":
+    case "flight_takeoff_roll":
+    case "flight_taxiing":
     case "flight_inbound_arrived":
       return "fp.notify_departure = true";
     case "flight_arrived":
@@ -3657,8 +3847,11 @@ async function refreshTrackedFlightRecord(trackedRecord, options = {}) {
     normalized.alerts?.cancelledNow ||
     normalized.alerts?.departedNow ||
     normalized.alerts?.arrivedNow ||
+    normalized.alerts?.taxiingNow ||
+    normalized.alerts?.takeoffNow ||
     normalized.alerts?.delayedNow ||
     normalized.alerts?.gateChangedNow ||
+    normalized.alerts?.baggageBeltAssignedNow ||
     normalized.alerts?.inboundArrivedNow
   ) {
     await dispatchFlightStatusNotifications(trackedRecord.flightId, normalized);
@@ -3841,6 +4034,10 @@ function webhookStatusFromEvent(event) {
 
 function isTrackedRecordRefreshDue(trackedRecord, nowMs = Date.now()) {
   if (!trackedRecord || isTerminalFlightStatus(trackedRecord.normalized?.status)) {
+    return false;
+  }
+
+  if (trackedRecord.metadata?.providerRefreshOwner === "shared_flight_instance") {
     return false;
   }
 
@@ -4049,8 +4246,11 @@ async function applyFirehoseMessageToTrackedRecord(trackedRecord, message) {
     normalized.alerts?.cancelledNow ||
     normalized.alerts?.departedNow ||
     normalized.alerts?.arrivedNow ||
+    normalized.alerts?.taxiingNow ||
+    normalized.alerts?.takeoffNow ||
     normalized.alerts?.delayedNow ||
-    normalized.alerts?.gateChangedNow
+    normalized.alerts?.gateChangedNow ||
+    normalized.alerts?.baggageBeltAssignedNow
   ) {
     await dispatchFlightStatusNotifications(trackedRecord.flightId, normalized);
   }
@@ -4058,11 +4258,107 @@ async function applyFirehoseMessageToTrackedRecord(trackedRecord, message) {
   return fetchTrackingRowByID(trackedRecord.flightId);
 }
 
+function sharedNormalizedFromFirehoseNormalized(normalized, message) {
+  if (!normalized) return null;
+  const flightNumber = normalizeFlightCode(normalized.flightNumber || firehoseMessageFlightNumber(message));
+  const airlineCode = normalized.airlineCode || parseAirlineCode(flightNumber) || null;
+  const numericFlightNumber = airlineCode && flightNumber.startsWith(airlineCode)
+    ? flightNumber.slice(airlineCode.length)
+    : flightNumber.replace(/^[A-Z]+/, "");
+  return {
+    providerFlightId: firehoseMessageProviderFlightId(message) || normalized.providerFlightId || null,
+    airlineCode,
+    flightNumber: numericFlightNumber || flightNumber,
+    origin: normalized.departureAirportIata || null,
+    destination: normalized.arrivalAirportIata || null,
+    status: normalized.status || "unknown",
+    statusDetail: normalized.statusDetail || null,
+    scheduledDepartureAt: normalized.departureTimes?.scheduled || null,
+    scheduledArrivalAt: normalized.arrivalTimes?.scheduled || null,
+    estimatedDepartureAt: normalized.departureTimes?.estimated || normalized.takeoffTimes?.estimated || null,
+    estimatedArrivalAt: normalized.arrivalTimes?.estimated || normalized.landingTimes?.estimated || null,
+    actualDepartureAt: normalized.departureTimes?.actual || normalized.takeoffTimes?.actual || null,
+    actualArrivalAt: normalized.arrivalTimes?.actual || normalized.landingTimes?.actual || null,
+    gate: normalized.gate || null,
+    terminal: normalized.terminal || null,
+    departureTerminal: normalized.departureTerminal || normalized.terminal || null,
+    departureGate: normalized.departureGate || normalized.gate || null,
+    arrivalTerminal: normalized.arrivalTerminal || null,
+    arrivalGate: normalized.arrivalGate || null,
+    baggageBelt: normalized.baggageClaim || normalized.baggageBelt || null,
+    position: {
+      lat: normalized.livePosition?.latitude ?? null,
+      lon: normalized.livePosition?.longitude ?? null,
+      altitude: normalized.livePosition?.altitudeFeet ?? null,
+      groundSpeed: normalized.livePosition?.groundSpeedKnots ?? null,
+      heading: normalized.livePosition?.headingDegrees ?? null,
+    },
+    provider: "flightaware",
+    liveDataSource: "streaming",
+    streamingStatus: "active",
+    dataConfidence: "high",
+    rawProviderResponse: message,
+  };
+}
+
+async function applyFirehoseMessageToSharedFlights(message) {
+  if (!sharedFlightService?.repository?.listStreamUpdateTargets) return;
+  const providerFlightId = firehoseMessageProviderFlightId(message) || null;
+  const flightNumber = normalizeFlightCode(firehoseMessageFlightNumber(message));
+  const timestampMs = firehoseMessageTimestampMs(message);
+  const departureDate = Number.isFinite(timestampMs) ? new Date(timestampMs).toISOString().slice(0, 10) : null;
+  const targets = await sharedFlightService.repository.listStreamUpdateTargets({
+    providerFlightId,
+    flightNumber,
+    departureDate,
+  });
+
+  for (const target of targets) {
+    const previousNormalized = trackedPayloadFromSharedFlight({
+      flightInstanceId: target.id,
+      flightKey: target.flight_key,
+      providerFlightId: target.provider_flight_id,
+      airlineCode: target.airline_code,
+      flightNumber: target.flight_number,
+      origin: target.origin_airport,
+      destination: target.destination_airport,
+      status: target.status,
+      scheduledDepartureAt: target.scheduled_departure_at,
+      scheduledArrivalAt: target.scheduled_arrival_at,
+      estimatedDepartureAt: target.estimated_departure_at,
+      estimatedArrivalAt: target.estimated_arrival_at,
+      actualDepartureAt: target.actual_departure_at,
+      actualArrivalAt: target.actual_arrival_at,
+      gate: target.gate,
+      terminal: target.terminal,
+      baggageBelt: target.baggage_belt,
+      position: {
+        lat: target.position_lat,
+        lon: target.position_lon,
+        altitude: target.altitude,
+        groundSpeed: target.ground_speed,
+        heading: target.heading,
+      },
+      provider: target.provider,
+      lastUpdatedAt: target.last_fetched_at || target.updated_at,
+    });
+    const nextTrackedNormalized = normalizedFromFirehoseMessage(previousNormalized, message);
+    const sharedNormalized = sharedNormalizedFromFirehoseNormalized(nextTrackedNormalized, message);
+    if (sharedNormalized) {
+      await sharedFlightService.applyStreamedFlightUpdate(target.id, sharedNormalized, {
+        eventTime: Number.isFinite(timestampMs) ? new Date(timestampMs).toISOString() : new Date().toISOString(),
+      });
+    }
+  }
+}
+
 async function processFirehoseMessage(message, trackedRowsById) {
   const trackedRows = Array.from(trackedRowsById.values());
   const matchedRows = trackedRows.filter((trackedRecord) =>
     firehoseMessageMatchesTrackedRecord(message, trackedRecord)
   );
+
+  await applyFirehoseMessageToSharedFlights(message);
 
   for (const trackedRecord of matchedRows) {
     const updated = await applyFirehoseMessageToTrackedRecord(trackedRecord, message);
@@ -4242,6 +4538,13 @@ app.post("/v1/devices/push-token", async (req, res) => {
       userId,
       platform: validated.value.platform,
     });
+    if (sharedFlightService?.upsertDeviceToken) {
+      await sharedFlightService.upsertDeviceToken(userId, {
+        deviceToken: validated.value.token,
+        platform: validated.value.platform,
+        environment: APNS_USE_SANDBOX ? "sandbox" : "production",
+      });
+    }
 
     return res.json({ ok: true });
   } catch (_error) {
@@ -4261,11 +4564,153 @@ app.post("/v1/devices/push-token/remove", async (req, res) => {
 
   try {
     await disablePushTokensForDevice(deviceId, userId);
+    if (usesDatabase()) {
+      await pool.query(
+        `
+        update public.device_tokens
+        set is_active = false, updated_at = now()
+        where user_id = $1::uuid
+          and device_token in (
+            select apns_token
+            from public.push_devices
+            where device_id = $2
+              and user_id = $1::uuid
+          )
+        `,
+        [userId, deviceId]
+      );
+    }
     return res.json({ ok: true });
   } catch (_error) {
     return res.status(500).json({ error: "Unable to disable push token" });
   }
 });
+
+function sharedTrackInputFromQuery(query) {
+  const flightCode = normalizeFlightCode(query.flightNumber);
+  const airline = parseAirlineCode(flightCode);
+  const number = airline ? flightCode.slice(airline.length) : flightCode.replace(/^[A-Z]+/, "");
+  if (!airline || !number) return null;
+  return {
+    airline,
+    number,
+    date: query.date,
+    origin: query.departureIata || undefined,
+    destination: query.arrivalIata || undefined,
+    notificationEnabled: true,
+  };
+}
+
+function trackedPayloadFromSharedFlight(flight) {
+  const status = String(flight.status || "scheduled").toLowerCase();
+  const scheduledDeparture = flight.scheduledDepartureAt || flight.estimatedDepartureAt || null;
+  const estimatedDeparture = flight.estimatedDepartureAt || flight.scheduledDepartureAt || null;
+  const actualDeparture = flight.actualDepartureAt || null;
+  const scheduledArrival = flight.scheduledArrivalAt || flight.estimatedArrivalAt || null;
+  const estimatedArrival = flight.estimatedArrivalAt || flight.scheduledArrivalAt || null;
+  const actualArrival = flight.actualArrivalAt || null;
+  const livePosition =
+    flight.position?.lat != null && flight.position?.lon != null
+      ? {
+          latitude: flight.position.lat,
+          longitude: flight.position.lon,
+          headingDegrees: flight.position.heading ?? null,
+          groundSpeedKnots: flight.position.groundSpeed ?? null,
+          altitudeFeet: flight.position.altitude ?? null,
+          recordedAt: flight.lastUpdatedAt || new Date().toISOString(),
+        }
+      : null;
+
+  return {
+    airlineCode: flight.airlineCode || null,
+    providerFlightId: flight.providerFlightId || null,
+    flightNumber: flight.airlineCode && !String(flight.flightNumber || "").startsWith(flight.airlineCode)
+      ? `${flight.airlineCode}${flight.flightNumber}`
+      : String(flight.flightNumber || ""),
+    departureAirportIata: flight.origin || null,
+    arrivalAirportIata: flight.destination || null,
+    departureTimes: {
+      scheduled: scheduledDeparture,
+      estimated: estimatedDeparture,
+      actual: actualDeparture,
+    },
+    takeoffTimes: {
+      scheduled: scheduledDeparture,
+      estimated: estimatedDeparture,
+      actual: ["airborne", "enroute", "landed", "arrived", "arrived_at_gate"].includes(status) ? actualDeparture : null,
+    },
+    landingTimes: {
+      scheduled: scheduledArrival,
+      estimated: estimatedArrival,
+      actual: ["landed", "arrived", "arrived_at_gate", "taxi_in"].includes(status) ? actualArrival : null,
+    },
+    arrivalTimes: {
+      scheduled: scheduledArrival,
+      estimated: estimatedArrival,
+      actual: actualArrival,
+    },
+    status,
+    statusDetail: flight.statusDetail || null,
+    terminal: flight.terminal || null,
+    gate: flight.gate || null,
+    departureTerminal: flight.departureTerminal || flight.terminal || null,
+    departureGate: flight.departureGate || flight.gate || null,
+    arrivalTerminal: flight.arrivalTerminal || null,
+    arrivalGate: flight.arrivalGate || null,
+    baggageBelt: flight.baggageBelt || null,
+    baggageClaim: flight.baggageBelt || null,
+    weatherInsight: flight.weatherInsight || null,
+    delayMinutes: calculateDelayMinutes({ scheduled: scheduledDeparture, estimated: estimatedDeparture, actual: actualDeparture }),
+    inboundFlight: null,
+    recentHistory: [],
+    alerts: null,
+    progressPercent: null,
+    livePosition,
+    trackPoints: livePosition ? [livePosition] : [],
+    provider: flight.provider || null,
+    freshness: flight.freshness || null,
+    source: flight.source || null,
+    isRefreshing: flight.isRefreshing === true,
+    dataConfidence: flight.dataConfidence || null,
+    lastUpdated: flight.lastUpdatedAt || new Date().toISOString(),
+  };
+}
+
+async function createTrackingSessionFromSharedFlight({ sharedFlight, query, userId, providerName }) {
+  const normalized = trackedPayloadFromSharedFlight(sharedFlight);
+  const tracked = await createOrReuseTrackingSession({
+    query,
+    normalized,
+    rawProviderPayload: {
+      source: "shared_flight_instance",
+      flightInstanceId: sharedFlight.flightInstanceId,
+      flightKey: sharedFlight.flightKey,
+    },
+    userId,
+    provider: providerName || sharedFlight.provider || FLIGHT_DATA_PROVIDER,
+    createdSource: "shared_manual_track",
+  });
+  if (tracked?.flightId && usesDatabase()) {
+    await pool.query(
+      `
+      update public.tracking_sessions
+      set
+        metadata_json = coalesce(metadata_json, '{}'::jsonb) || jsonb_build_object(
+          'sharedFlightInstanceId', $2::text,
+          'sharedFlightKey', $3::text,
+          'providerRefreshOwner', 'shared_flight_instance'
+        ),
+        next_poll_after = null,
+        polling_stopped_reason = 'shared_flight_instance',
+        updated_at = now()
+      where id = $1::uuid
+      `,
+      [tracked.flightId, sharedFlight.flightInstanceId, sharedFlight.flightKey]
+    );
+    return fetchTrackingRowByID(tracked.flightId);
+  }
+  return tracked;
+}
 
 app.post("/v1/track", async (req, res) => {
   const validated = validateTrackPayload(req.body);
@@ -4288,6 +4733,36 @@ app.post("/v1/track", async (req, res) => {
 
   try {
     const query = validated.value;
+    if (SHARED_FLIGHT_TRACK_BRIDGE_ENABLED && sharedFlightService) {
+      const sharedInput = sharedTrackInputFromQuery(query);
+      if (sharedInput) {
+        try {
+          const shared = await sharedFlightService.saveUserFlight(userId, sharedInput);
+          if (shared?.flight?.flightInstanceId && shared.flight.freshness !== "pending") {
+            const tracked = await createTrackingSessionFromSharedFlight({
+              sharedFlight: shared.flight,
+              query,
+              userId,
+              providerName: shared.flight.provider,
+            });
+            if (tracked) {
+              await sharedFlightService.ensureLiveSource(shared.flight.flightInstanceId, "manual_track_bridge");
+              return res.json({
+                flightId: tracked.flightId,
+                normalized: tracked.normalized,
+              });
+            }
+          }
+        } catch (error) {
+          console.warn("Shared flight track bridge failed; falling back to provider track", {
+            error: error?.message || String(error),
+            flightNumber: query.flightNumber,
+            date: query.date,
+          });
+        }
+      }
+    }
+
     const provider = providerAdapter();
     const records = await provider.fetchFlights(query);
     const selected = bestMatch(records, query, provider.normalizeRecord);
@@ -4400,6 +4875,8 @@ app.post("/v1/track", async (req, res) => {
   }
 });
 
+mountSharedFlightRoutes(app, sharedFlightService);
+
 app.get("/v1/flights/:flightId", async (req, res) => {
   const flightId = req.params.flightId;
   const userId = String(req.auth?.userId || "").trim() || null;
@@ -4411,7 +4888,30 @@ app.get("/v1/flights/:flightId", async (req, res) => {
   try {
     const tracked = await fetchAccessibleTrackingRow(flightId, userId);
     if (!tracked) {
-      return res.status(404).json({ error: "Unknown flightId" });
+      const sharedRows = sharedFlightService ? await sharedFlightService.listUserFlights(userId) : [];
+      const shared = sharedRows.find((item) => item.flight?.flightInstanceId === flightId);
+      if (!shared?.flight) {
+        return res.status(404).json({ error: "Unknown flightId" });
+      }
+      const weatherAwareFlight = await sharedFlightService.flightWithWeatherInsight(flightId, { userId, cacheStatus: "detail_view" }) || shared.flight;
+      return res.json({
+        flightId,
+        normalized: trackedPayloadFromSharedFlight(weatherAwareFlight),
+        lastUpdated: weatherAwareFlight.lastUpdatedAt || shared.flight.lastUpdatedAt || new Date().toISOString(),
+      });
+    }
+
+    if (tracked.metadata?.providerRefreshOwner === "shared_flight_instance" && tracked.metadata?.sharedFlightInstanceId) {
+      const sharedRows = sharedFlightService ? await sharedFlightService.listUserFlights(userId) : [];
+      const shared = sharedRows.find((item) => item.flight?.flightInstanceId === tracked.metadata.sharedFlightInstanceId);
+      if (shared?.flight) {
+        const weatherAwareFlight = await sharedFlightService.flightWithWeatherInsight(tracked.metadata.sharedFlightInstanceId, { userId, cacheStatus: "detail_view" }) || shared.flight;
+        return res.json({
+          flightId,
+          normalized: trackedPayloadFromSharedFlight(weatherAwareFlight),
+          lastUpdated: weatherAwareFlight.lastUpdatedAt || shared.flight.lastUpdatedAt || new Date().toISOString(),
+        });
+      }
     }
 
     const shouldRefresh = isTrackedRecordRefreshDue(tracked);
@@ -4481,6 +4981,25 @@ app.get("/v1/search", async (req, res) => {
       preferSchedules,
       timezoneOffsetMinutes,
     };
+    if (SHARED_FLIGHT_TRACK_BRIDGE_ENABLED && !historical && sharedFlightService) {
+      const sharedInput = sharedTrackInputFromQuery(query);
+      if (sharedInput && departureIata && arrivalIata) {
+        try {
+          const sharedFlight = await sharedFlightService.searchFlight(sharedInput, {
+            userId: String(req.auth?.userId || "").trim() || null,
+          });
+          if (sharedFlight?.flightInstanceId && sharedFlight.freshness !== "pending") {
+            return res.json({ candidates: [trackedPayloadFromSharedFlight(sharedFlight)] });
+          }
+        } catch (error) {
+          console.warn("Shared flight search bridge failed; falling back to provider search", {
+            error: error?.message || String(error),
+            flightNumber,
+            date,
+          });
+        }
+      }
+    }
     const normalized = await buildSearchCandidates(query);
     return res.json({ candidates: normalized });
   } catch (error) {
@@ -4570,6 +5089,36 @@ app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req,
   }
 });
 
+async function handleFlightAwareAlertsWebhook(req, res) {
+  if (!WEBHOOK_SHARED_SECRET) {
+    return res.status(503).json({ error: "Webhook secret is not configured" });
+  }
+
+  const incomingSecret = webhookSecretFromRequest(req);
+  if (!timingSafeEqualText(incomingSecret, WEBHOOK_SHARED_SECRET)) {
+    return res.status(401).json({ error: "Unauthorized webhook" });
+  }
+
+  if (!req.body || typeof req.body !== "object") {
+    return res.status(400).json({ error: "Malformed FlightAware alert payload" });
+  }
+
+  if (!sharedFlightService?.processFlightAwareAlertWebhook) {
+    return res.status(503).json({ error: "Shared flight event pipeline is unavailable" });
+  }
+
+  try {
+    const result = await sharedFlightService.processFlightAwareAlertWebhook(req.body);
+    return res.json(result);
+  } catch (error) {
+    console.error("FlightAware alert webhook processing failed", error?.message || String(error));
+    return res.status(500).json({ error: "Unable to process FlightAware alert" });
+  }
+}
+
+app.post("/webhooks/flightaware/alerts", handleFlightAwareAlertsWebhook);
+app.post("/v1/webhooks/flightaware/alerts", handleFlightAwareAlertsWebhook);
+
 app.post("/v1/webhooks/flightaware", async (req, res) => {
   if (!WEBHOOK_SHARED_SECRET) {
     return res.status(503).json({ error: "Webhook secret is not configured" });
@@ -4580,11 +5129,21 @@ app.post("/v1/webhooks/flightaware", async (req, res) => {
     return res.status(401).json({ error: "Unauthorized webhook" });
   }
 
+  let sharedAlertResult = null;
+  if (sharedFlightService?.processFlightAwareAlertWebhook && req.body && typeof req.body === "object") {
+    try {
+      sharedAlertResult = await sharedFlightService.processFlightAwareAlertWebhook(req.body);
+    } catch (error) {
+      console.warn("Shared FlightAware alert processing failed", error?.message || String(error));
+    }
+  }
+
   if (!PROVIDER_CALLS_ENABLED) {
     const events = extractWebhookEvents(req.body);
     return res.json({
       ok: true,
       providerCallsEnabled: false,
+      sharedAlertResult,
       receivedEvents: events.length,
       matchedFlights: 0,
       refreshedFlights: 0,
@@ -4646,6 +5205,7 @@ app.post("/v1/webhooks/flightaware", async (req, res) => {
 
   return res.json({
     ok: true,
+    sharedAlertResult,
     receivedEvents: events.length,
     matchedFlights,
     refreshedFlights,
@@ -4702,6 +5262,7 @@ module.exports = {
     ownerNotificationPreferenceConditionForEventType,
     reconcileOperationalStatus,
     scoreCandidate,
+    sharedFlightService,
     shouldPreferFlightAwareSchedules,
   },
 };

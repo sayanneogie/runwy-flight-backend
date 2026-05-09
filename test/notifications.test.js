@@ -97,6 +97,14 @@ test("owner arrival notifications honor takeoff and landing alert preferences", 
     __test__.ownerNotificationPreferenceConditionForEventType("flight_departed"),
     "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true"
   );
+  assert.equal(
+    __test__.ownerNotificationPreferenceConditionForEventType("flight_takeoff_roll"),
+    "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true"
+  );
+  assert.equal(
+    __test__.ownerNotificationPreferenceConditionForEventType("flight_taxiing"),
+    "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true"
+  );
 });
 
 test("flight circle recipients honor departure and arrival alert toggles", () => {
@@ -110,6 +118,10 @@ test("flight circle recipients honor departure and arrival alert toggles", () =>
   );
   assert.equal(
     __test__.circleNotificationPreferenceConditionForEventType("flight_inbound_arrived"),
+    "fp.notify_departure = true"
+  );
+  assert.equal(
+    __test__.circleNotificationPreferenceConditionForEventType("flight_takeoff_roll"),
     "fp.notify_departure = true"
   );
 });

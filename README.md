@@ -187,15 +187,46 @@ Disables push delivery for the calling device.
 Headers:
 - `X-Device-Id: <stable-device-id-from-app>`
 
+### POST `/webhooks/flightaware/alerts`
+FlightAware AeroAPI POST Alerts endpoint for the shared flight-state pipeline.
+
+The endpoint:
+- validates `FLIGHTAWARE_WEBHOOK_SECRET` or `WEBHOOK_SHARED_SECRET`
+- normalizes the FlightAware payload into a Runwy event
+- stores a deduped `flight_event_logs` row
+- matches the exact shared flight instance by provider id or flight number/date/route
+- updates `flight_instances`
+- creates meaningful `flight_events`
+- fans out APNs through existing `notification_deliveries` and `device_tokens`
+
+Authenticate either way:
+- header: `X-Runwy-Webhook-Secret: <secret>`
+- header: `Authorization: Bearer <secret>`
+
+Local simulation:
+```bash
+curl -X POST http://localhost:8787/webhooks/flightaware/alerts \
+  -H "Content-Type: application/json" \
+  -H "X-Runwy-Webhook-Secret: test_secret" \
+  -d '{
+    "event": "departure",
+    "ident": "SQ509",
+    "fa_flight_id": "SQ509-2026-05-27",
+    "origin": { "code": "BLR", "city": "Bengaluru" },
+    "destination": { "code": "SIN", "city": "Singapore" },
+    "actual_out": "2026-05-27T04:10:00Z"
+  }'
+```
+
 ### POST `/v1/webhooks/flightaware`
-Provider webhook endpoint that refreshes matched tracked flights and dispatches APNs when status transitions indicate:
+Legacy-compatible provider webhook endpoint. It now also forwards received payloads through the shared alert ingestion layer above, then refreshes matched legacy tracked flights and dispatches APNs when status transitions indicate:
 - `delayedNow`
 - `cancelledNow`
 - `departedNow`
 - `arrivedNow`
 - `gateChangedNow`
 
-If `WEBHOOK_SHARED_SECRET` is set, authenticate either way:
+If `FLIGHTAWARE_WEBHOOK_SECRET` or `WEBHOOK_SHARED_SECRET` is set, authenticate either way:
 - query string: `/v1/webhooks/flightaware?secret=<secret>`
 - or header: `X-Runwy-Webhook-Secret: <secret>`
 
