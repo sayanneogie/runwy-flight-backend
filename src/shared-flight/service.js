@@ -215,6 +215,10 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     return { flight, userFlight };
   }
 
+  async function deleteUserFlight(userId, id) {
+    return repository.deleteUserFlight(userId, id);
+  }
+
   async function ensureLiveSource(flightInstanceId, reason) {
     if (streamingEnabled) {
       const stream = await ensureStreamingRegistration(flightInstanceId, reason);
@@ -578,6 +582,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
   return {
     searchFlight,
     saveUserFlight,
+    deleteUserFlight,
     listUserFlights,
     updateUserFlight: repository.updateUserFlight,
     upsertDeviceToken: repository.upsertDeviceToken,

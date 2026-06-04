@@ -226,13 +226,16 @@ Legacy-compatible provider webhook endpoint. It now also forwards received paylo
 - `arrivedNow`
 - `gateChangedNow`
 
-If `FLIGHTAWARE_WEBHOOK_SECRET` or `WEBHOOK_SHARED_SECRET` is set, authenticate either way:
-- query string: `/v1/webhooks/flightaware?secret=<secret>`
-- or header: `X-Runwy-Webhook-Secret: <secret>`
+If `FLIGHTAWARE_WEBHOOK_SECRET` or `WEBHOOK_SHARED_SECRET` is set, authenticate with:
+- header: `X-Runwy-Webhook-Secret: <secret>`
+
+Legacy query-string webhook secrets are still accepted for backward compatibility, but avoid using them for new provider targets because URLs are commonly retained in logs and provider dashboards.
 
 ## Deployment notes
 - Put this service behind HTTPS and a reverse proxy in production.
 - Set `DATABASE_URL` for production so tracking/push subscriptions survive restarts.
+- Do not enable `ALLOW_INSECURE_NO_AUTH` in production; the API refuses to start with that combination.
+- Set `MAX_ACTIVE_TRACKING_SESSIONS_PER_USER` to match your provider-cost tolerance.
 - Use `APNS_USE_SANDBOX=true` when testing an Xcode-installed build on a real iPhone.
 - Use `APNS_USE_SANDBOX=false` for TestFlight, App Store, or other production APNs builds.
 - Keep logs generic; never log secrets.

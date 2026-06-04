@@ -123,7 +123,7 @@ function createMemorySharedFlightRepository() {
     },
     async listUserFlights(userId) {
       return [...userFlights.values()]
-        .filter((row) => row.user_id === userId)
+        .filter((row) => row.user_id === userId && !row.deleted_at && row.lifecycle_state !== "deleted")
         .map((userFlight) => ({ userFlight, flight: [...flights.values()].find((flight) => flight.id === userFlight.flight_instance_id) || null }))
         .filter((item) => item.flight);
     },
@@ -132,6 +132,21 @@ function createMemorySharedFlightRepository() {
       if (!entry) return null;
       const [key, row] = entry;
       const saved = { ...row, ...patch };
+      userFlights.set(key, saved);
+      return saved;
+    },
+    async deleteUserFlight(userId, id) {
+      const entry = [...userFlights.entries()].find(([, row]) => row.user_id === userId && row.id === id);
+      if (!entry) return null;
+      const [key, row] = entry;
+      const saved = {
+        ...row,
+        notification_enabled: false,
+        notifications_enabled: false,
+        lifecycle_state: "deleted",
+        deleted_at: row.deleted_at || new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
       userFlights.set(key, saved);
       return saved;
     },
@@ -436,6 +451,8 @@ function createPostgresSharedFlightRepository(pool) {
          from public.user_flights uf
          join public.flight_instances fi on fi.id = uf.flight_instance_id
          where uf.user_id = $1
+           and uf.deleted_at is null
+           and coalesce(uf.lifecycle_state, '') <> 'deleted'
          order by uf.added_at desc`,
         [userId]
       );
@@ -452,6 +469,21 @@ function createPostgresSharedFlightRepository(pool) {
          where user_id = $1 and id = $2
          returning *`,
         [userId, id, patch.notification_enabled, patch.alert_preferences, patch.user_label, patch.visibility]
+      ));
+    },
+    async deleteUserFlight(userId, id) {
+      return one(await pool.query(
+        `update public.user_flights set
+          notification_enabled = false,
+          notifications_enabled = false,
+          lifecycle_state = 'deleted',
+          deleted_at = coalesce(deleted_at, now()),
+          updated_at = now()
+         where user_id = $1 and id = $2
+           and deleted_at is null
+           and coalesce(lifecycle_state, '') <> 'deleted'
+         returning *`,
+        [userId, id]
       ));
     },
     async upsertDeviceToken(userId, input) {

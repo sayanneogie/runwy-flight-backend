@@ -295,7 +295,7 @@ test("webhook-backed stale flights do not poll inside the 24 hour departure wind
   await repository.updateProviderAlert(row.id, {
     providerAlertId: "alert-sq509",
     status: "active",
-    expiresAt: "2026-05-28T23:00:00.000Z",
+    expiresAt: new Date(Date.now() + 30 * 60 * 60_000).toISOString(),
   });
   const alerted = await repository.findFlightById(row.id);
   alerted.scheduled_departure_at = new Date(Date.now() + 3 * 60 * 60_000).toISOString();
@@ -440,16 +440,21 @@ test("stream-backed stale flights do not enqueue provider refreshes", async () =
 
 test("active detail fetch refreshes overdue scheduled shared flights into live state", async () => {
   const pastDeparture = new Date(Date.now() - 12 * 60_000).toISOString();
+  const futureArrival = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
   const { service, repository, providerCalls } = makeService((calls) => calls === 1
     ? normalizedFlight({
         scheduledDepartureAt: pastDeparture,
         estimatedDepartureAt: pastDeparture,
+        scheduledArrivalAt: futureArrival,
+        estimatedArrivalAt: futureArrival,
       })
     : normalizedFlight({
         status: "enroute",
         scheduledDepartureAt: pastDeparture,
         estimatedDepartureAt: pastDeparture,
         actualDepartureAt: pastDeparture,
+        scheduledArrivalAt: futureArrival,
+        estimatedArrivalAt: futureArrival,
         position: { lat: 13.5, lon: 77.8, altitude: 18000, groundSpeed: 430, heading: 12 },
       }));
   const flight = await service.searchFlight({ airline: "SQ", number: "509", date: pastDeparture.slice(0, 10), origin: "BLR", destination: "SIN" });
@@ -489,16 +494,21 @@ test("saved flights schedule low-call departure and arrival catchups without pol
 
 test("departure catchup performs one live refresh after overdue departure", async () => {
   const departure = new Date(Date.now() - 4 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
   const { service, repository, providerCalls } = makeService((calls) => calls === 1
     ? normalizedFlight({
         scheduledDepartureAt: departure,
         estimatedDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
       })
     : normalizedFlight({
         status: "enroute",
         scheduledDepartureAt: departure,
         estimatedDepartureAt: departure,
         actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
       }));
   const flight = await service.searchFlight({ airline: "SQ", number: "509", date: departure.slice(0, 10), origin: "BLR", destination: "SIN" });
   await service.departureCatchupJob({ data: { flight_instance_id: flight.flightInstanceId, stage: "first" } });

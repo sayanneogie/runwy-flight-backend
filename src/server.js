@@ -138,7 +138,7 @@ const TRACKING_POLLER_LOG_SUMMARY =
   String(process.env.TRACKING_POLLER_LOG_SUMMARY || "true").toLowerCase() === "true";
 const MAX_ACTIVE_TRACKING_SESSIONS_PER_USER = toNonNegativeNumber(
   process.env.MAX_ACTIVE_TRACKING_SESSIONS_PER_USER,
-  IS_PRODUCTION ? Number.MAX_SAFE_INTEGER : 20
+  IS_PRODUCTION ? 100 : 20
 );
 const WEBHOOK_REFRESH_MIN_INTERVAL_MS = toPositiveNumber(
   process.env.WEBHOOK_REFRESH_MIN_INTERVAL_MS,
@@ -218,6 +218,11 @@ if (!["aviationstack", "flightaware"].includes(FLIGHT_DATA_PROVIDER)) {
   process.exit(1);
 }
 
+if (IS_PRODUCTION && ALLOW_INSECURE_NO_AUTH) {
+  console.error("ALLOW_INSECURE_NO_AUTH cannot be enabled when NODE_ENV=production.");
+  process.exit(1);
+}
+
 if (!ALLOW_INSECURE_NO_AUTH && !SUPABASE_JWT_SECRET && !(SUPABASE_URL && SUPABASE_ANON_KEY)) {
   console.error(
     "Missing auth verification config. Set SUPABASE_JWT_SECRET or both SUPABASE_URL and SUPABASE_ANON_KEY."
@@ -265,10 +270,16 @@ const providerInFlightRequests = new Map();
 const memoryTrackedFlights = new Map();
 const memoryPushDevices = new Map();
 
+function postgresSSLConfig() {
+  if (!DATABASE_SSL) return undefined;
+  if (IS_PRODUCTION) return true;
+  return { rejectUnauthorized: false };
+}
+
 const pool = DATABASE_URL
   ? new Pool({
       connectionString: DATABASE_URL,
-      ssl: DATABASE_SSL ? { rejectUnauthorized: false } : undefined,
+      ssl: postgresSSLConfig(),
     })
   : null;
 
@@ -550,7 +561,6 @@ function flightAwareWebhookTargetURL(req) {
   if (!baseURL) return null;
 
   const target = new URL("/webhooks/flightaware/alerts", `${baseURL}/`);
-  target.searchParams.set("secret", WEBHOOK_SHARED_SECRET);
   return target.toString();
 }
 
@@ -4429,7 +4439,26 @@ function backgroundTrackingMode() {
   return "on_demand_only";
 }
 
-app.get("/health", async (_req, res) => {
+function detailedHealthSafeguards() {
+  return {
+    maxActiveTrackingSessionsPerUser:
+      Number.isFinite(MAX_ACTIVE_TRACKING_SESSIONS_PER_USER) && MAX_ACTIVE_TRACKING_SESSIONS_PER_USER < Number.MAX_SAFE_INTEGER
+        ? MAX_ACTIVE_TRACKING_SESSIONS_PER_USER
+        : null,
+    pollerSummaryLogging: TRACKING_POLLER_LOG_SUMMARY,
+    mapFallbackEnabled: FLIGHTAWARE_ENABLE_MAP_FALLBACK,
+    webhookRefreshMinIntervalMs: WEBHOOK_REFRESH_MIN_INTERVAL_MS,
+    providerCallsEnabled: PROVIDER_CALLS_ENABLED,
+    disableProviderCalls: DISABLE_PROVIDER_CALLS,
+    firehoseTrackLookaheadMs: FIREHOSE_TRACK_LOOKAHEAD_MS,
+    firehoseTrackedSetRefreshMs: FIREHOSE_TRACKED_SET_REFRESH_MS,
+    firehoseBackfillMaxHours: FIREHOSE_BACKFILL_MAX_HOURS,
+    firehoseBackfillPredepartureMinutes: FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES,
+    firehoseBackfillMinTrackPoints: FIREHOSE_BACKFILL_MIN_TRACK_POINTS,
+  };
+}
+
+async function buildDetailedHealth() {
   let trackingSummary = null;
   let providerAuth = null;
 
@@ -4459,7 +4488,7 @@ app.get("/health", async (_req, res) => {
     };
   }
 
-  res.json({
+  return {
     ok: true,
     build: healthBuildInfo(),
     provider: FLIGHT_DATA_PROVIDER,
@@ -4474,23 +4503,21 @@ app.get("/health", async (_req, res) => {
     backgroundTrackingMode: backgroundTrackingMode(),
     providerAuth,
     trackingSummary,
-    safeguards: {
-      maxActiveTrackingSessionsPerUser:
-        Number.isFinite(MAX_ACTIVE_TRACKING_SESSIONS_PER_USER) && MAX_ACTIVE_TRACKING_SESSIONS_PER_USER < Number.MAX_SAFE_INTEGER
-          ? MAX_ACTIVE_TRACKING_SESSIONS_PER_USER
-          : null,
-      pollerSummaryLogging: TRACKING_POLLER_LOG_SUMMARY,
-      mapFallbackEnabled: FLIGHTAWARE_ENABLE_MAP_FALLBACK,
-      webhookRefreshMinIntervalMs: WEBHOOK_REFRESH_MIN_INTERVAL_MS,
-      providerCallsEnabled: PROVIDER_CALLS_ENABLED,
-      disableProviderCalls: DISABLE_PROVIDER_CALLS,
-      firehoseTrackLookaheadMs: FIREHOSE_TRACK_LOOKAHEAD_MS,
-      firehoseTrackedSetRefreshMs: FIREHOSE_TRACKED_SET_REFRESH_MS,
-      firehoseBackfillMaxHours: FIREHOSE_BACKFILL_MAX_HOURS,
-      firehoseBackfillPredepartureMinutes: FIREHOSE_BACKFILL_PREDEPARTURE_MINUTES,
-      firehoseBackfillMinTrackPoints: FIREHOSE_BACKFILL_MIN_TRACK_POINTS,
-    },
+    safeguards: detailedHealthSafeguards(),
+  };
+}
+
+app.get("/health", async (_req, res) => {
+  res.json({
+    ok: true,
+    build: healthBuildInfo(),
+    nodeEnv: NODE_ENV,
+    persistence: usesDatabase() ? "supabase-postgres" : "memory",
   });
+});
+
+app.get("/v1/health/details", async (_req, res) => {
+  res.json(await buildDetailedHealth());
 });
 
 app.get("/v1/airports", (req, res) => {

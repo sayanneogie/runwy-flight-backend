@@ -53,6 +53,19 @@ function mountSharedFlightRoutes(app, service) {
     }
   });
 
+  app.delete("/v1/user-flights/:id", async (req, res) => {
+    const userId = String(req.auth?.userId || "").trim();
+    if (!userId) return res.status(401).json({ error: "Sign in is required" });
+
+    try {
+      const deleted = await service.deleteUserFlight(userId, req.params.id);
+      if (!deleted) return res.status(404).json({ error: "Saved flight not found" });
+      return res.json({ userFlight: deleted });
+    } catch (_error) {
+      return res.status(500).json({ error: "Unable to delete saved flight" });
+    }
+  });
+
   app.post("/v1/device-tokens", async (req, res) => {
     const userId = String(req.auth?.userId || "").trim();
     if (!userId) return res.status(401).json({ error: "Sign in is required" });
