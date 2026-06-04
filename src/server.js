@@ -108,6 +108,8 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const DATABASE_SSL = String(process.env.DATABASE_SSL || "false").toLowerCase() === "true";
 const NODE_ENV = String(process.env.NODE_ENV || "development").toLowerCase();
 const IS_PRODUCTION = NODE_ENV === "production";
+const DATABASE_SSL_REJECT_UNAUTHORIZED =
+  String(process.env.DATABASE_SSL_REJECT_UNAUTHORIZED || (IS_PRODUCTION ? "true" : "false")).toLowerCase() !== "false";
 
 const CACHE_TTL_MS = toPositiveNumber(process.env.CACHE_TTL_MS, 5 * 60_000);
 const FLIGHTAWARE_POSITION_CACHE_TTL_MS = toPositiveNumber(
@@ -272,8 +274,7 @@ const memoryPushDevices = new Map();
 
 function postgresSSLConfig() {
   if (!DATABASE_SSL) return undefined;
-  if (IS_PRODUCTION) return true;
-  return { rejectUnauthorized: false };
+  return { rejectUnauthorized: DATABASE_SSL_REJECT_UNAUTHORIZED };
 }
 
 const pool = DATABASE_URL
