@@ -13,7 +13,7 @@ const {
   validateProviderFlight,
 } = require("./state");
 const { createSharedFlightQueue } = require("./queue");
-const { createApnsSender } = require("./notifications");
+const { createApnsSender, notificationPayload } = require("./notifications");
 const { createFlightWeatherService, weatherEventFromInsight, weatherTargetForFlight } = require("./weather");
 const {
   extractFlightAwareAlertEvents,
@@ -172,12 +172,25 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
   async function fanoutNotificationJob(job) {
     const data = await repository.getEventWithFlight(job.data.flight_event_id);
     if (!data?.event || !data?.flight) return { sent: 0 };
-    const targets = await repository.listNotificationTargets(data.flight.id, data.event.event_severity);
+    const targets = await repository.listNotificationTargets(data.flight.id, data.event.event_severity, data.event.event_type);
     let sent = 0;
     for (const target of targets) {
       const delivery = await repository.createNotificationDelivery(target.userFlight.user_id, data.flight.id, data.event.id, "apns");
       if (!delivery.created || !delivery.row) continue;
       try {
+        if (repository.createAppNotification) {
+          const payload = notificationPayload(data.flight, data.event);
+          await repository.createAppNotification({
+            userId: target.userFlight.user_id,
+            flightInstanceId: data.flight.id,
+            flightEventId: data.event.id,
+            notificationType: sharedNotificationType(data.event.event_type),
+            title: payload.aps.alert.title,
+            body: payload.aps.alert.body,
+            payload,
+            deliveryStatus: "queued",
+          });
+        }
         const results = [];
         for (const token of target.tokens) {
           const result = await apns.sendFlightEvent({ token, flight: data.flight, event: data.event });
@@ -189,9 +202,28 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
         if (results.some(({ result }) => result?.ok === false)) {
           throw new Error(results.find(({ result }) => result?.reason || result?.error)?.result?.reason || "APNs delivery failed");
         }
+        if (repository.updateAppNotificationDeliveryStatus) {
+          await repository.updateAppNotificationDeliveryStatus({
+            userId: target.userFlight.user_id,
+            flightInstanceId: data.flight.id,
+            flightEventId: data.event.id,
+            notificationType: sharedNotificationType(data.event.event_type),
+            deliveryStatus: "sent",
+            sentAt: new Date().toISOString(),
+          });
+        }
         await repository.updateNotificationDelivery(delivery.row.id, { status: "sent", sent_at: new Date().toISOString() });
         sent += 1;
       } catch (error) {
+        if (repository.updateAppNotificationDeliveryStatus) {
+          await repository.updateAppNotificationDeliveryStatus({
+            userId: target.userFlight.user_id,
+            flightInstanceId: data.flight.id,
+            flightEventId: data.event.id,
+            notificationType: sharedNotificationType(data.event.event_type),
+            deliveryStatus: "failed",
+          });
+        }
         await repository.updateNotificationDelivery(delivery.row.id, { status: "failed", error: error?.message || String(error) });
       }
     }
@@ -652,6 +684,36 @@ function sleep(ms) {
 function isInvalidApnsTokenResult(result) {
   const reason = String(result?.reason || result?.error || "").trim();
   return ["BadDeviceToken", "Unregistered", "DeviceTokenNotForTopic"].includes(reason);
+}
+
+function sharedNotificationType(eventType) {
+  switch (String(eventType || "").toUpperCase()) {
+    case "DELAYED":
+    case "RESCHEDULED":
+      return "flight_delayed";
+    case "CANCELLED":
+      return "flight_cancelled";
+    case "GATE_CHANGED":
+      return "flight_gate_change";
+    case "TAXIING":
+    case "TAXI_IN":
+      return "flight_taxiing";
+    case "TAKEOFF_ROLL":
+      return "flight_takeoff_roll";
+    case "DEPARTED":
+    case "AIRBORNE":
+      return "flight_departed";
+    case "LANDED":
+    case "ARRIVED":
+    case "ARRIVED_AT_GATE":
+      return "flight_arrived";
+    case "BAGGAGE_BELT_ASSIGNED":
+      return "flight_baggage_claim";
+    case "WEATHER_ADVISORY":
+      return "flight_weather_advisory";
+    default:
+      return "flight_status";
+  }
 }
 
 function dateOnly(value) {

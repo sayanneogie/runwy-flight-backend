@@ -180,6 +180,68 @@ test("taxi, takeoff, and baggage belt shared events are meaningful and notify", 
   assert.equal(baggage.find((event) => event.event_type === "BAGGAGE_BELT_ASSIGNED")?.notification_required, true);
 });
 
+test("shared fanout mirrors takeoff landing and baggage events into app notifications", async () => {
+  const sent = [];
+  const { service, repository } = makeService(normalizedFlight(), {
+    apns: { sendFlightEvent: async ({ token }) => sent.push(token.device_token) },
+  });
+  const row = await repository.upsertFlightFromNormalized(normalizedFlight(), {
+    airline: "SQ",
+    number: "509",
+    date: "2026-05-27",
+    origin: "BLR",
+    destination: "SIN",
+    flightKey: "SQ-509-2026-05-27-BLR-SIN",
+  }, "2026-05-27T10:00:00.000Z");
+
+  await repository.upsertUserFlight("u1", row.id, {
+    alertPreferences: { low: true, medium: true, high: true, critical: true },
+  });
+  await repository.upsertDeviceToken("u1", { deviceToken: "token-u1", environment: "sandbox" });
+
+  const events = await repository.insertEvents(row.id, [
+    {
+      event_type: "AIRBORNE",
+      event_severity: "medium",
+      old_value: { status: "taxiing" },
+      new_value: { status: "airborne" },
+      summary: "Flight is airborne",
+      notification_required: true,
+      confidence: "high",
+    },
+    {
+      event_type: "LANDED",
+      event_severity: "medium",
+      old_value: { status: "airborne" },
+      new_value: { status: "landed" },
+      summary: "Flight has landed",
+      notification_required: true,
+      confidence: "high",
+    },
+    {
+      event_type: "BAGGAGE_BELT_ASSIGNED",
+      event_severity: "low",
+      old_value: { baggageBelt: null },
+      new_value: { baggageBelt: "7" },
+      summary: "Baggage belt assigned: 7",
+      notification_required: true,
+      confidence: "high",
+    },
+  ], "test");
+
+  for (const event of events) {
+    await service.fanoutNotificationJob({ data: { flight_event_id: event.id } });
+  }
+
+  const notifications = [...repository.__memory.appNotifications.values()];
+  assert.deepEqual(
+    notifications.map((notification) => notification.notification_type).sort(),
+    ["flight_arrived", "flight_baggage_claim", "flight_departed"]
+  );
+  assert.ok(notifications.every((notification) => notification.delivery_status === "sent"));
+  assert.deepEqual(sent.sort(), ["token-u1", "token-u1", "token-u1"]);
+});
+
 test("stream update targets can be found by provider id or canonical flight number", async () => {
   const repository = createMemorySharedFlightRepository();
   const row = await repository.upsertFlightFromNormalized(normalizedFlight(), {
@@ -262,17 +324,17 @@ test("webhook-backed flights avoid scheduled polling unless actively viewed or u
 
 test("webhook-backed stale flights do not poll during scheduled search", async () => {
   const { service, repository, providerCalls } = makeService(normalizedFlight({
-    scheduledDepartureAt: "2026-06-03T17:00:00.000Z",
-    scheduledArrivalAt: "2026-06-04T01:00:00.000Z",
-    estimatedDepartureAt: "2026-06-03T17:00:00.000Z",
-    estimatedArrivalAt: "2026-06-04T01:00:00.000Z",
+    scheduledDepartureAt: "2099-06-03T17:00:00.000Z",
+    scheduledArrivalAt: "2099-06-04T01:00:00.000Z",
+    estimatedDepartureAt: "2099-06-03T17:00:00.000Z",
+    estimatedArrivalAt: "2099-06-04T01:00:00.000Z",
   }));
-  const flight = await service.searchFlight({ airline: "SQ", number: "509", date: "2026-06-03", origin: "BLR", destination: "SIN" });
+  const flight = await service.searchFlight({ airline: "SQ", number: "509", date: "2099-06-03", origin: "BLR", destination: "SIN" });
   const row = await repository.findFlightById(flight.flightInstanceId);
   await repository.updateProviderAlert(row.id, {
     providerAlertId: "alert-sq509",
     status: "active",
-    expiresAt: "2026-06-04T23:00:00.000Z",
+    expiresAt: "2099-06-04T23:00:00.000Z",
   });
   const alerted = await repository.findFlightById(row.id);
   alerted.fresh_until = "2026-05-01T00:00:00.000Z";
@@ -280,7 +342,7 @@ test("webhook-backed stale flights do not poll during scheduled search", async (
   await service.cache.redis.del(`flight:${flight.flightKey}`);
 
   const before = providerCalls();
-  const response = await service.searchFlight({ airline: "SQ", number: "509", date: "2026-06-03", origin: "BLR", destination: "SIN" });
+  const response = await service.searchFlight({ airline: "SQ", number: "509", date: "2099-06-03", origin: "BLR", destination: "SIN" });
 
   assert.equal(providerCalls(), before);
   assert.equal(response.freshness, "fresh");

@@ -4725,11 +4725,9 @@ async function createTrackingSessionFromSharedFlight({ sharedFlight, query, user
       set
         metadata_json = coalesce(metadata_json, '{}'::jsonb) || jsonb_build_object(
           'sharedFlightInstanceId', $2::text,
-          'sharedFlightKey', $3::text,
-          'providerRefreshOwner', 'shared_flight_instance'
+          'sharedFlightKey', $3::text
         ),
-        next_poll_after = null,
-        polling_stopped_reason = 'shared_flight_instance',
+        polling_stopped_reason = null,
         updated_at = now()
       where id = $1::uuid
       `,
@@ -4775,6 +4773,11 @@ app.post("/v1/track", async (req, res) => {
             });
             if (tracked) {
               await sharedFlightService.ensureLiveSource(shared.flight.flightInstanceId, "manual_track_bridge");
+              ensureFlightAwareAlertForTrackedSession(req, tracked).catch((error) => {
+                console.warn(
+                  `FlightAware alert ensure failed for bridged tracking session ${tracked.flightId}: ${error?.message || String(error)}`
+                );
+              });
               return res.json({
                 flightId: tracked.flightId,
                 normalized: tracked.normalized,

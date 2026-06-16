@@ -8,6 +8,7 @@ function createMemorySharedFlightRepository() {
   const userFlights = new Map();
   const events = new Map();
   const flightEventLogs = new Map();
+  const appNotifications = new Map();
   const deliveries = new Map();
   const deviceTokens = new Map();
   const apiLogs = [];
@@ -169,7 +170,7 @@ function createMemorySharedFlightRepository() {
       const flight = [...flights.values()].find((row) => row.id === event.flight_instance_id);
       return { event, flight };
     },
-    async listNotificationTargets(flightInstanceId, severity) {
+    async listNotificationTargets(flightInstanceId, severity, _eventType) {
       return [...userFlights.values()]
         .filter((row) => row.flight_instance_id === flightInstanceId && row.notification_enabled !== false && row.alert_preferences?.[severity] !== false)
         .map((userFlight) => ({
@@ -184,6 +185,40 @@ function createMemorySharedFlightRepository() {
       deliveries.set(key, row);
       return { row, created: true };
     },
+    async createAppNotification(input) {
+      const key = `${input.userId}:${input.flightEventId}:${input.notificationType}`;
+      const existing = appNotifications.get(key);
+      if (existing) return { row: existing, created: false };
+      const row = {
+        id: nextId(),
+        user_id: input.userId,
+        flight_instance_id: input.flightInstanceId,
+        flight_event_id: input.flightEventId,
+        notification_type: input.notificationType,
+        delivery_channel: "push",
+        delivery_status: input.deliveryStatus || "queued",
+        title: input.title,
+        body: input.body,
+        payload_json: input.payload || {},
+        scheduled_for: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      };
+      appNotifications.set(key, row);
+      return { row, created: true };
+    },
+    async updateAppNotificationDeliveryStatus(input) {
+      const key = `${input.userId}:${input.flightEventId}:${input.notificationType}`;
+      const row = appNotifications.get(key);
+      if (!row) return null;
+      const updated = {
+        ...row,
+        delivery_status: input.deliveryStatus || row.delivery_status,
+        sent_at: input.sentAt || row.sent_at || null,
+        updated_at: new Date().toISOString(),
+      };
+      appNotifications.set(key, updated);
+      return updated;
+    },
     async updateNotificationDelivery(id, patch) {
       for (const [key, row] of deliveries.entries()) {
         if (row.id === id) deliveries.set(key, { ...row, ...patch });
@@ -192,7 +227,7 @@ function createMemorySharedFlightRepository() {
     async logApiUsage(entry) {
       apiLogs.push({ id: nextId(), created_at: new Date().toISOString(), ...entry });
     },
-    __memory: { flights, aliases, userFlights, events, flightEventLogs, deliveries, deviceTokens, apiLogs },
+    __memory: { flights, aliases, userFlights, events, flightEventLogs, appNotifications, deliveries, deviceTokens, apiLogs },
   };
 }
 
@@ -530,6 +565,84 @@ function createPostgresSharedFlightRepository(pool) {
         [userId, flightInstanceId, eventId, channel]
       ));
       return { row, created: Boolean(row) };
+    },
+    async createAppNotification(input) {
+      const existing = one(await pool.query(
+        `select *
+         from public.notifications
+         where user_id = $1::uuid
+           and notification_type = $2
+           and payload_json ->> 'flight_event_id' = $3
+           and created_at >= now() - interval '24 hours'
+         order by created_at desc
+         limit 1`,
+        [input.userId, input.notificationType, input.flightEventId]
+      ));
+      if (existing) return { row: existing, created: false };
+
+      const trackingSession = one(await pool.query(
+        `select tracking_session_id
+         from public.user_flights
+         where user_id = $1::uuid
+           and flight_instance_id = $2::uuid
+           and deleted_at is null
+         order by updated_at desc nulls last, added_at desc nulls last
+         limit 1`,
+        [input.userId, input.flightInstanceId]
+      ));
+
+      const payload = {
+        ...(input.payload || {}),
+        flight_event_id: input.flightEventId,
+        flight_instance_id: input.flightInstanceId,
+      };
+
+      const row = one(await pool.query(
+        `insert into public.notifications (
+           user_id,
+           tracking_session_id,
+           notification_type,
+           delivery_channel,
+           delivery_status,
+           title,
+           body,
+           payload_json,
+           scheduled_for
+         )
+         values ($1::uuid,$2::uuid,$3,'push',$4,$5,$6,$7::jsonb,now())
+         returning *`,
+        [
+          input.userId,
+          trackingSession?.tracking_session_id || null,
+          input.notificationType,
+          input.deliveryStatus || "queued",
+          input.title,
+          input.body,
+          JSON.stringify(payload),
+        ]
+      ));
+      return { row, created: Boolean(row) };
+    },
+    async updateAppNotificationDeliveryStatus(input) {
+      return one(await pool.query(
+        `update public.notifications
+         set
+           delivery_status = $4,
+           sent_at = case when $4 = 'sent' then coalesce(sent_at, $5::timestamptz, now()) else sent_at end,
+           updated_at = now()
+         where user_id = $1::uuid
+           and notification_type = $2
+           and payload_json ->> 'flight_event_id' = $3
+           and created_at >= now() - interval '24 hours'
+         returning *`,
+        [
+          input.userId,
+          input.notificationType,
+          input.flightEventId,
+          input.deliveryStatus,
+          input.sentAt || null,
+        ]
+      ));
     },
     async updateNotificationDelivery(id, patch) {
       await pool.query(
