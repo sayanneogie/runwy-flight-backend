@@ -562,6 +562,7 @@ function flightAwareWebhookTargetURL(req) {
   if (!baseURL) return null;
 
   const target = new URL("/webhooks/flightaware/alerts", `${baseURL}/`);
+  target.searchParams.set("secret", WEBHOOK_SHARED_SECRET);
   return target.toString();
 }
 
@@ -5283,6 +5284,7 @@ module.exports = {
     deriveAlertFlags,
     extractFlightAwareSearchRows,
     flightAwareAlertCreationDisposition,
+    flightAwareWebhookTargetURL,
     flightAwareOperationalBounds,
     flightAwareHistoryBounds,
     healthBuildInfo,

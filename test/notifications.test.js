@@ -4,6 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 process.env.ALLOW_INSECURE_NO_AUTH = "true";
+process.env.WEBHOOK_SHARED_SECRET = process.env.WEBHOOK_SHARED_SECRET || "test webhook secret";
 
 const { __test__ } = require("../src/server.js");
 
@@ -212,6 +213,21 @@ test("FlightAware alert payload uses canonical ident/origin/destination keys", (
   assert.ok(!("ident_iata" in payload));
   assert.ok(!("origin_iata" in payload));
   assert.ok(!("destination_iata" in payload));
+});
+
+test("FlightAware alert callback URL includes webhook shared secret", () => {
+  const targetUrl = __test__.flightAwareWebhookTargetURL({
+    get(header) {
+      if (header === "X-Forwarded-Host") return "runwy-api.example.com";
+      if (header === "X-Forwarded-Proto") return "https";
+      return "";
+    },
+  });
+
+  const parsed = new URL(targetUrl);
+  assert.equal(parsed.origin, "https://runwy-api.example.com");
+  assert.equal(parsed.pathname, "/webhooks/flightaware/alerts");
+  assert.equal(parsed.searchParams.get("secret"), "test webhook secret");
 });
 
 test("same-day FlightAware alert payload omits date bounds for open window alerts", () => {
