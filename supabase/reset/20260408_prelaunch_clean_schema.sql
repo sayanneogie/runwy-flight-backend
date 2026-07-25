@@ -142,6 +142,15 @@ create table public.user_flights (
   calendar_source_text text,
   provider_name text,
   provider_flight_id text,
+  final_route_capture_status text
+    check (
+      final_route_capture_status is null
+      or final_route_capture_status in ('pending', 'in_progress', 'failed', 'captured', 'no_track')
+    ),
+  final_route_capture_attempted_at timestamptz,
+  final_route_capture_completed_at timestamptz,
+  final_route_capture_next_attempt_at timestamptz,
+  final_route_capture_error text,
   notifications_enabled boolean not null default true,
   alert_settings_json jsonb not null default jsonb_build_object(
     'gateChange', true,
@@ -314,6 +323,17 @@ create index user_flights_user_deleted_idx
 
 create index user_flights_provider_idx
   on public.user_flights (provider_name, provider_flight_id);
+
+create index user_flights_final_route_capture_due_idx
+  on public.user_flights (
+    lifecycle_state,
+    final_route_capture_status,
+    final_route_capture_next_attempt_at,
+    estimated_arrival
+  )
+  where deleted_at is null
+    and tracking_session_id is null
+    and provider_flight_id is not null;
 
 create index tracking_sessions_owner_status_idx
   on public.tracking_sessions (owner_user_id, session_status, updated_at desc);

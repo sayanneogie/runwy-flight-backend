@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const crypto = require("node:crypto");
+const http2 = require("node:http2");
 const express = require("express");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
@@ -31,6 +32,10 @@ const {
 const { createApnsSender: createSharedApnsSender } = require("./shared-flight/notifications");
 const { createSharedFlightService } = require("./shared-flight/service");
 const { mountSharedFlightRoutes } = require("./shared-flight/routes");
+const {
+  deriveFlightLifecyclePhase,
+  displayStatusForPhase,
+} = require("./shared-flight/state");
 
 const PORT = Number(process.env.PORT || 8787);
 const FLIGHT_DATA_PROVIDER = (process.env.FLIGHT_DATA_PROVIDER || "aviationstack").toLowerCase();
@@ -128,6 +133,20 @@ const AUTH_CACHE_TTL_MS = toPositiveNumber(process.env.AUTH_CACHE_TTL_MS, 5 * 60
 const MAX_AUTH_CACHE_ENTRIES = toPositiveNumber(process.env.MAX_AUTH_CACHE_ENTRIES, 5_000);
 const POLLER_INTERVAL_MS = toPositiveNumber(process.env.POLLER_INTERVAL_MS, 2 * 60_000);
 const POLLER_BATCH_SIZE = toPositiveNumber(process.env.POLLER_BATCH_SIZE, 25);
+const FINAL_TRAVEL_ROUTE_CAPTURE_ENABLED =
+  String(process.env.FINAL_TRAVEL_ROUTE_CAPTURE_ENABLED || "true").toLowerCase() !== "false";
+const FINAL_TRAVEL_ROUTE_CAPTURE_BEFORE_ARRIVAL_MS = toPositiveNumber(
+  process.env.FINAL_TRAVEL_ROUTE_CAPTURE_BEFORE_ARRIVAL_MINUTES,
+  90
+) * 60_000;
+const FINAL_TRAVEL_ROUTE_CAPTURE_AFTER_ARRIVAL_MS = toPositiveNumber(
+  process.env.FINAL_TRAVEL_ROUTE_CAPTURE_AFTER_ARRIVAL_HOURS,
+  12
+) * 60 * 60_000;
+const FINAL_TRAVEL_ROUTE_CAPTURE_RETRY_MS = toPositiveNumber(
+  process.env.FINAL_TRAVEL_ROUTE_CAPTURE_RETRY_MINUTES,
+  180
+) * 60_000;
 const STALE_FETCH_REFRESH_THRESHOLD_MS = toPositiveNumber(
   process.env.STALE_FETCH_REFRESH_THRESHOLD_MS,
   10 * 60_000
@@ -862,6 +881,19 @@ function normalizeLivePositionFromFlightAware(record) {
   });
 }
 
+function firstNonBlank(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined) {
+      continue;
+    }
+    const text = String(value).trim();
+    if (text) {
+      return text;
+    }
+  }
+  return null;
+}
+
 const MAX_TRACK_POINTS = 1_800;
 const MIN_TRACK_POINT_SPACING_MS = 15_000;
 const MIN_TRACK_POINT_DISTANCE_METERS = 750;
@@ -1148,40 +1180,83 @@ function normalizeRecordFromFlightAware(record) {
         record?.aircraft?.icao
     ),
     status: normalizeStatus(record?.status || record?.flight_status),
-    departureTerminal:
-      record?.terminal_origin ||
-      record?.departure_terminal ||
-      record?.scheduled_departure_terminal ||
-      null,
-    departureGate:
-      record?.gate_origin ||
-      record?.departure_gate ||
-      record?.scheduled_departure_gate ||
-      null,
-    arrivalTerminal:
-      record?.terminal_destination ||
-      record?.arrival_terminal ||
-      record?.actual_arrival_terminal ||
-      record?.estimated_arrival_terminal ||
-      record?.scheduled_arrival_terminal ||
-      null,
-    arrivalGate:
-      record?.gate_destination ||
-      record?.arrival_gate ||
-      record?.actual_arrival_gate ||
-      record?.estimated_arrival_gate ||
-      record?.scheduled_arrival_gate ||
-      null,
-    terminal:
-      record?.terminal_origin ||
-      record?.departure_terminal ||
-      record?.terminal ||
-      null,
-    gate:
-      record?.gate_origin ||
-      record?.departure_gate ||
-      record?.gate ||
-      null,
+    departureTerminal: firstNonBlank(
+      record?.terminal_origin,
+      record?.terminalOrigin,
+      record?.origin_terminal,
+      record?.departure_terminal,
+      record?.departureTerminal,
+      record?.actual_departure_terminal,
+      record?.actualDepartureTerminal,
+      record?.estimated_departure_terminal,
+      record?.estimatedDepartureTerminal,
+      record?.scheduled_departure_terminal,
+      record?.scheduledDepartureTerminal,
+      record?.terminalOut,
+      record?.terminal
+    ),
+    departureGate: firstNonBlank(
+      record?.gate_origin,
+      record?.gateOrigin,
+      record?.origin_gate,
+      record?.departure_gate,
+      record?.departureGate,
+      record?.actual_departure_gate,
+      record?.actualDepartureGate,
+      record?.estimated_departure_gate,
+      record?.estimatedDepartureGate,
+      record?.scheduled_departure_gate,
+      record?.scheduledDepartureGate,
+      record?.terminal_gate_origin,
+      record?.gateOut,
+      record?.gate
+    ),
+    arrivalTerminal: firstNonBlank(
+      record?.terminal_destination,
+      record?.terminalDestination,
+      record?.destination_terminal,
+      record?.arrival_terminal,
+      record?.arrivalTerminal,
+      record?.actual_arrival_terminal,
+      record?.actualArrivalTerminal,
+      record?.estimated_arrival_terminal,
+      record?.estimatedArrivalTerminal,
+      record?.scheduled_arrival_terminal,
+      record?.scheduledArrivalTerminal,
+      record?.terminalIn
+    ),
+    arrivalGate: firstNonBlank(
+      record?.gate_destination,
+      record?.gateDestination,
+      record?.destination_gate,
+      record?.arrival_gate,
+      record?.arrivalGate,
+      record?.actual_arrival_gate,
+      record?.actualArrivalGate,
+      record?.estimated_arrival_gate,
+      record?.estimatedArrivalGate,
+      record?.scheduled_arrival_gate,
+      record?.scheduledArrivalGate,
+      record?.terminal_gate_destination,
+      record?.gateIn
+    ),
+    terminal: firstNonBlank(
+      record?.terminal_origin,
+      record?.terminalOrigin,
+      record?.departure_terminal,
+      record?.departureTerminal,
+      record?.terminalOut,
+      record?.terminal
+    ),
+    gate: firstNonBlank(
+      record?.gate_origin,
+      record?.gateOrigin,
+      record?.departure_gate,
+      record?.departureGate,
+      record?.terminal_gate_origin,
+      record?.gateOut,
+      record?.gate
+    ),
     baggageClaim:
       record?.baggage_claim ||
       record?.baggage_belt ||
@@ -2323,6 +2398,67 @@ function coalesceFlightAwareTrackTrail(trackTrail, livePosition = null) {
   };
 }
 
+let airportCoordinatesByCode = null;
+
+function airportCoordinateForCode(code) {
+  const normalizedCode = normalizeAirportCode(code);
+  if (!normalizedCode) return null;
+
+  if (!airportCoordinatesByCode) {
+    try {
+      const catalog = getAirportCatalog();
+      airportCoordinatesByCode = new Map(
+        catalog.airports
+          .map((airport) => [
+            normalizeAirportCode(airport?.code),
+            normalizeCoordinatePoint(airport?.coordinate),
+          ])
+          .filter(([airportCode, coordinate]) => airportCode && coordinate)
+      );
+    } catch (_error) {
+      airportCoordinatesByCode = new Map();
+    }
+  }
+
+  return airportCoordinatesByCode.get(normalizedCode) || null;
+}
+
+function normalizeCoordinatePoint(point) {
+  const latitude = Number(point?.latitude);
+  const longitude = Number(point?.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return null;
+  }
+  return { latitude, longitude };
+}
+
+function appendCoordinateIfUseful(polyline, coordinate) {
+  const normalized = normalizeCoordinatePoint(coordinate);
+  if (!normalized) return;
+
+  const last = polyline[polyline.length - 1];
+  if (last && distanceBetweenCoordinatesMeters(last, normalized) < 250) {
+    return;
+  }
+  polyline.push(normalized);
+}
+
+function routePolylineFromTrackTrail({ originIata, destinationIata, trackTrail }) {
+  const polyline = [];
+  appendCoordinateIfUseful(polyline, airportCoordinateForCode(originIata));
+
+  const trackPoints = compactTrackPoints([
+    ...(Array.isArray(trackTrail?.trackPoints) ? trackTrail.trackPoints : []),
+    trackTrail?.livePosition || null,
+  ]);
+  for (const point of trackPoints) {
+    appendCoordinateIfUseful(polyline, point);
+  }
+
+  appendCoordinateIfUseful(polyline, airportCoordinateForCode(destinationIata));
+  return polyline.length >= 3 ? polyline : [];
+}
+
 async function fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId) {
   const trackTrail = await fetchFlightAwareTrackTrail(providerFlightId);
   if ((trackTrail?.trackPoints || []).length > 0 || trackTrail?.livePosition) {
@@ -2823,7 +2959,7 @@ const sharedFlightService = createSharedFlightService({
   repository: sharedFlightRepository,
   streamingEnabled: SHARED_FLIGHT_STREAMING_ENABLED,
   apns: createSharedApnsSender({
-    send: async ({ token, payload }) => sendApnsNotification(token, payload),
+    send: async ({ token, payload, environment }) => sendApnsNotification(token, payload, environment),
   }),
   provider: createSharedProviderAdapter({
     providerName: FLIGHT_DATA_PROVIDER,
@@ -3280,7 +3416,10 @@ function apnsAuthToken() {
   return jwt;
 }
 
-function apnsHost() {
+function apnsHost(environment = null) {
+  const normalizedEnvironment = String(environment || "").trim().toLowerCase();
+  if (normalizedEnvironment === "sandbox") return "api.sandbox.push.apple.com";
+  if (normalizedEnvironment === "production") return "api.push.apple.com";
   return APNS_USE_SANDBOX ? "api.sandbox.push.apple.com" : "api.push.apple.com";
 }
 
@@ -3605,49 +3744,94 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
   }));
 }
 
-async function sendApnsNotification(apnsToken, payload) {
+async function sendApnsNotification(apnsToken, payload, environment = null) {
   if (!isApnsConfigured()) {
     console.warn("Skipping APNs delivery because APNs is not fully configured", apnsConfigStatus());
     return { skipped: true };
   }
 
-  const response = await fetch(`https://${apnsHost()}/3/device/${apnsToken}`, {
-    method: "POST",
-    headers: {
-      authorization: `bearer ${apnsAuthToken()}`,
-      "apns-topic": APNS_BUNDLE_ID,
-      "apns-push-type": "alert",
-      "apns-priority": "10",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  const response = await sendApnsHttp2Request(apnsToken, payload, environment);
 
-  if (response.status === 200) {
-    return { ok: true };
-  }
+  if (response.status === 200) return { ok: true, apnsId: response.apnsId || null };
 
-  let reason = "Unknown";
-  try {
-    const body = await response.json();
-    reason = body?.reason || reason;
-  } catch (_error) {
-    reason = `HTTP_${response.status}`;
-  }
+  const reason = response.reason || `HTTP_${response.status}`;
 
   if (["BadDeviceToken", "Unregistered", "DeviceTokenNotForTopic"].includes(reason)) {
     await disablePushToken(apnsToken);
   }
 
   console.warn("APNs delivery failed", {
-    apnsHost: apnsHost(),
+    apnsHost: apnsHost(environment),
     bundleId: APNS_BUNDLE_ID,
-    sandbox: APNS_USE_SANDBOX,
+    sandbox: apnsHost(environment).includes("sandbox"),
     status: response.status,
     reason,
   });
 
   return { ok: false, status: response.status, reason };
+}
+
+function sendApnsHttp2Request(apnsToken, payload, environment = null) {
+  return new Promise((resolve, reject) => {
+    const client = http2.connect(`https://${apnsHost(environment)}`);
+    let settled = false;
+
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      client.close();
+      fn(value);
+    };
+
+    client.on("error", (error) => {
+      finish(reject, error);
+    });
+    client.setTimeout(10_000, () => {
+      finish(reject, new Error("APNs request timed out"));
+    });
+
+    const request = client.request({
+      ":method": "POST",
+      ":path": `/3/device/${apnsToken}`,
+      authorization: `bearer ${apnsAuthToken()}`,
+      "apns-topic": APNS_BUNDLE_ID,
+      "apns-push-type": "alert",
+      "apns-priority": "10",
+      "content-type": "application/json",
+    });
+
+    let status = 0;
+    let apnsId = null;
+    let body = "";
+
+    request.setEncoding("utf8");
+    request.on("response", (headers) => {
+      status = Number(headers[":status"] || 0);
+      apnsId = headers["apns-id"] || null;
+    });
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      let reason = null;
+      if (body) {
+        try {
+          reason = JSON.parse(body)?.reason || null;
+        } catch (_error) {
+          reason = body.slice(0, 160);
+        }
+      }
+      finish(resolve, { status, apnsId, reason });
+    });
+    request.on("error", (error) => {
+      finish(reject, error);
+    });
+    request.setTimeout(10_000, () => {
+      finish(reject, new Error("APNs request timed out"));
+    });
+
+    request.end(JSON.stringify(payload));
+  });
 }
 
 async function dispatchFlightStatusNotifications(flightId, normalized) {
@@ -4380,6 +4564,164 @@ async function processFirehoseMessage(message, trackedRowsById) {
   }
 }
 
+async function claimDueFinalTravelRouteRows(limit = POLLER_BATCH_SIZE) {
+  if (!usesDatabase() || !FINAL_TRAVEL_ROUTE_CAPTURE_ENABLED || FLIGHT_DATA_PROVIDER !== "flightaware") {
+    return [];
+  }
+
+  const result = await pool.query(
+    `
+    with due as (
+      select id
+      from public.user_flights
+      where deleted_at is null
+        and tracking_session_id is null
+        and coalesce(source_type, '') <> 'tracked'
+        and coalesce(lifecycle_state, '') in ('active', 'landed', 'archived')
+        and lower(coalesce(provider_name, $5)) = 'flightaware'
+        and nullif(trim(coalesce(provider_flight_id, '')), '') is not null
+        and coalesce(estimated_arrival, scheduled_arrival, actual_arrival) is not null
+        and coalesce(estimated_arrival, scheduled_arrival, actual_arrival)
+          between now() - ($2::double precision * interval '1 millisecond')
+              and now() + ($3::double precision * interval '1 millisecond')
+        and (
+          route_polyline is null
+          or jsonb_typeof(route_polyline) <> 'array'
+          or jsonb_array_length(route_polyline) < 3
+        )
+        and coalesce(final_route_capture_status, 'pending') in ('pending', 'failed', 'in_progress')
+        and (
+          final_route_capture_next_attempt_at is null
+          or final_route_capture_next_attempt_at <= now()
+        )
+      order by coalesce(estimated_arrival, scheduled_arrival, actual_arrival) asc
+      limit $1
+      for update skip locked
+    )
+    update public.user_flights uf
+    set
+      final_route_capture_status = 'in_progress',
+      final_route_capture_attempted_at = now(),
+      final_route_capture_next_attempt_at = now() + ($4::double precision * interval '1 millisecond'),
+      final_route_capture_error = null,
+      updated_at = now()
+    from due
+    where uf.id = due.id
+    returning uf.*
+    `,
+    [
+      Math.max(1, Number(limit) || POLLER_BATCH_SIZE),
+      FINAL_TRAVEL_ROUTE_CAPTURE_AFTER_ARRIVAL_MS,
+      FINAL_TRAVEL_ROUTE_CAPTURE_BEFORE_ARRIVAL_MS,
+      FINAL_TRAVEL_ROUTE_CAPTURE_RETRY_MS,
+      FLIGHT_DATA_PROVIDER,
+    ]
+  );
+
+  return result.rows;
+}
+
+async function completeFinalTravelRouteRows(rows, routePolyline, status = "captured") {
+  if (!rows.length) return 0;
+  const result = await pool.query(
+    `
+    update public.user_flights
+    set
+      route_polyline = case
+        when $2::jsonb is null then route_polyline
+        else $2::jsonb
+      end,
+      final_route_capture_status = $3,
+      final_route_capture_completed_at = now(),
+      final_route_capture_next_attempt_at = null,
+      final_route_capture_error = null,
+      updated_at = now()
+    where id = any($1::uuid[])
+    returning id
+    `,
+    [rows.map((row) => row.id), routePolyline ? JSON.stringify(routePolyline) : null, status]
+  );
+  return result.rowCount || 0;
+}
+
+async function failFinalTravelRouteRows(rows, error) {
+  if (!rows.length) return 0;
+  const result = await pool.query(
+    `
+    update public.user_flights
+    set
+      final_route_capture_status = 'failed',
+      final_route_capture_error = left($2, 500),
+      final_route_capture_next_attempt_at = now() + ($3::double precision * interval '1 millisecond'),
+      updated_at = now()
+    where id = any($1::uuid[])
+    returning id
+    `,
+    [rows.map((row) => row.id), error?.message || String(error), FINAL_TRAVEL_ROUTE_CAPTURE_RETRY_MS]
+  );
+  return result.rowCount || 0;
+}
+
+function groupFinalRouteRowsByProviderFlightId(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const providerFlightId = String(row.provider_flight_id || "").trim();
+    if (!providerFlightId) continue;
+    if (!groups.has(providerFlightId)) {
+      groups.set(providerFlightId, []);
+    }
+    groups.get(providerFlightId).push(row);
+  }
+  return groups;
+}
+
+function shouldRetryMissingFinalRoute(groupRows) {
+  const latestArrivalMs = groupRows
+    .map((row) => new Date(row.actual_arrival || row.estimated_arrival || row.scheduled_arrival || "").getTime())
+    .filter(Number.isFinite)
+    .sort((left, right) => right - left)[0];
+  if (!Number.isFinite(latestArrivalMs)) return true;
+  return Date.now() - latestArrivalMs < FINAL_TRAVEL_ROUTE_CAPTURE_AFTER_ARRIVAL_MS;
+}
+
+async function captureFinalTravelRoutes(limit = POLLER_BATCH_SIZE) {
+  const rows = await claimDueFinalTravelRouteRows(limit);
+  if (!rows.length) {
+    return { claimed: 0, captured: 0, noTrack: 0, failed: 0, providerCalls: 0 };
+  }
+
+  const groups = groupFinalRouteRowsByProviderFlightId(rows);
+  let captured = 0;
+  let noTrack = 0;
+  let failed = 0;
+  let providerCalls = 0;
+
+  for (const [providerFlightId, groupRows] of groups.entries()) {
+    try {
+      providerCalls += 1;
+      const trackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId);
+      const representative = groupRows[0] || {};
+      const routePolyline = routePolylineFromTrackTrail({
+        originIata: representative.origin_iata,
+        destinationIata: representative.destination_iata,
+        trackTrail,
+      });
+
+      if (routePolyline.length >= 3) {
+        captured += await completeFinalTravelRouteRows(groupRows, routePolyline, "captured");
+      } else if (shouldRetryMissingFinalRoute(groupRows)) {
+        failed += await failFinalTravelRouteRows(groupRows, new Error("No usable provider track yet"));
+      } else {
+        noTrack += await completeFinalTravelRouteRows(groupRows, null, "no_track");
+      }
+    } catch (error) {
+      failed += await failFinalTravelRouteRows(groupRows, error);
+    }
+  }
+
+  return { claimed: rows.length, captured, noTrack, failed, providerCalls };
+}
+
 const trackingPollerRuntime = createTrackingPollerRuntime({
   isPollerEnabled: ENABLE_TRACKING_POLLER,
   usesDatabase,
@@ -4387,6 +4729,7 @@ const trackingPollerRuntime = createTrackingPollerRuntime({
   listDueTrackingRows,
   refreshTrackedFlightRecord,
   markTrackingRowErrored,
+  captureFinalTravelRoutes,
   pollerIntervalMs: POLLER_INTERVAL_MS,
   pollerBatchSize: POLLER_BATCH_SIZE,
   logPollerSummary: TRACKING_POLLER_LOG_SUMMARY,
@@ -4631,7 +4974,15 @@ function sharedTrackInputFromQuery(query) {
 }
 
 function trackedPayloadFromSharedFlight(flight) {
-  const status = String(flight.status || "scheduled").toLowerCase();
+  const lifecycle = flight.computedPhase
+    ? {
+        phase: flight.computedPhase,
+        confidence: flight.phaseConfidence || "backend_computed",
+        reason: flight.phaseReason || "shared_flight_response",
+      }
+    : deriveFlightLifecyclePhase(flight);
+  const providerStatus = String(flight.providerStatus || flight.status || "scheduled").toLowerCase();
+  const status = displayStatusForPhase(lifecycle.phase, providerStatus);
   const scheduledDeparture = flight.scheduledDepartureAt || flight.estimatedDepartureAt || null;
   const estimatedDeparture = flight.estimatedDepartureAt || flight.scheduledDepartureAt || null;
   const actualDeparture = flight.actualDepartureAt || null;
@@ -4679,6 +5030,10 @@ function trackedPayloadFromSharedFlight(flight) {
       actual: actualArrival,
     },
     status,
+    providerStatus,
+    computedPhase: lifecycle.phase,
+    phaseConfidence: lifecycle.confidence,
+    phaseReason: lifecycle.reason,
     statusDetail: flight.statusDetail || null,
     terminal: flight.terminal || null,
     gate: flight.gate || null,
@@ -4788,6 +5143,7 @@ app.post("/v1/track", async (req, res) => {
         } catch (error) {
           console.warn("Shared flight track bridge failed; falling back to provider track", {
             error: error?.message || String(error),
+            details: error?.details || null,
             flightNumber: query.flightNumber,
             date: query.date,
           });

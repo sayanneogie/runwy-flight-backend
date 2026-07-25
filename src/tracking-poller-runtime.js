@@ -5,6 +5,7 @@ function createTrackingPollerRuntime({
   listDueTrackingRows,
   refreshTrackedFlightRecord,
   markTrackingRowErrored,
+  captureFinalTravelRoutes,
   pollerIntervalMs,
   pollerBatchSize,
   logPollerSummary,
@@ -21,6 +22,7 @@ function createTrackingPollerRuntime({
       const trackedRows = await listDueTrackingRows(pollerBatchSize);
       let refreshedCount = 0;
       let errorCount = 0;
+      let finalRouteResult = null;
 
       for (const tracked of trackedRows) {
         try {
@@ -32,9 +34,18 @@ function createTrackingPollerRuntime({
         }
       }
 
-      if (logPollerSummary && (trackedRows.length > 0 || errorCount > 0)) {
+      if (captureFinalTravelRoutes) {
+        try {
+          finalRouteResult = await captureFinalTravelRoutes(pollerBatchSize);
+        } catch (error) {
+          errorCount += 1;
+          console.warn("Final travel route capture failed", error?.message || String(error));
+        }
+      }
+
+      if (logPollerSummary && (trackedRows.length > 0 || errorCount > 0 || finalRouteResult?.claimed > 0)) {
         console.log(
-          `Tracking poller cycle provider=${providerName} due=${trackedRows.length} refreshed=${refreshedCount} errors=${errorCount} batchSize=${pollerBatchSize}`
+          `Tracking poller cycle provider=${providerName} due=${trackedRows.length} refreshed=${refreshedCount} finalRouteClaimed=${finalRouteResult?.claimed || 0} finalRouteCaptured=${finalRouteResult?.captured || 0} finalRouteProviderCalls=${finalRouteResult?.providerCalls || 0} errors=${errorCount} batchSize=${pollerBatchSize}`
         );
       }
     } finally {
