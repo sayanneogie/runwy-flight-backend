@@ -306,3 +306,86 @@ test("inbound aircraft notifications include arrival airport and departure count
   assert.match(payload.aps.alert.body, /has landed at SEA\./);
   assert.match(payload.aps.alert.body, /Departure is in 1h 16m\./);
 });
+
+test("arrival notifications include destination, weather, taxi, gate, timing, and visit count", () => {
+  const payload = __test__.notificationPayloadFor(
+    {
+      flightNumber: "6E123",
+      airlineCode: "6E",
+      departureAirportIata: "DEL",
+      arrivalAirportIata: "BLR",
+      arrivalTimezone: "Asia/Kolkata",
+      landingTimes: {
+        actual: "2026-07-31T11:10:00.000Z",
+      },
+      arrivalTimes: {
+        scheduled: "2026-07-31T11:35:00.000Z",
+        estimated: "2026-07-31T11:18:00.000Z",
+        actual: null,
+      },
+      arrivalTerminal: "1",
+      arrivalGate: "A1",
+      weatherInsight: {
+        available: true,
+        conditionCode: "PartlyCloudy",
+        temperatureC: 28,
+      },
+      status: "landed",
+      alerts: {
+        arrivedNow: true,
+      },
+    },
+    "flight-id",
+    { visitOrdinal: 66 }
+  );
+
+  assert.equal(payload.aps.alert.title, "Welcome to Bengaluru! 🌤️ 28°");
+  assert.match(payload.aps.alert.body, /Taxiing for 8m\./);
+  assert.match(payload.aps.alert.body, /BLR • Terminal 1 • Gate A1/);
+  assert.match(payload.aps.alert.body, /4:48 PM local time \(17m early\)/);
+  assert.match(payload.aps.alert.body, /66th time here\./);
+  assert.equal(payload.flight_instance_id, "flight-id");
+  assert.equal(payload.deep_link, "runwy://flights/flight-id");
+});
+
+test("landing and baggage assignment create separate notification events", () => {
+  const events = __test__.notificationEventsFor(
+    {
+      flightNumber: "6E123",
+      airlineCode: "6E",
+      departureAirportIata: "DEL",
+      arrivalAirportIata: "BLR",
+      status: "landed",
+      baggageClaim: "3",
+      alerts: {
+        arrivedNow: true,
+        baggageBeltAssignedNow: true,
+        gateChangedNow: true,
+      },
+    },
+    "flight-id"
+  );
+
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ["flight_arrived", "flight_baggage_claim"]
+  );
+  assert.equal(events[1].title, "Baggage Claim Assigned");
+  assert.equal(events[1].body, "Belt 3");
+  assert.equal(
+    __test__.notificationDedupeKey("flight-id", events[0]),
+    "arrival-welcome:flight-id"
+  );
+  assert.equal(
+    __test__.notificationDedupeKey("flight-id", events[1]),
+    "baggage:flight-id:3"
+  );
+});
+
+test("arrival visit counts use readable ordinals", () => {
+  assert.equal(__test__.ordinalNumber(1), "1st");
+  assert.equal(__test__.ordinalNumber(2), "2nd");
+  assert.equal(__test__.ordinalNumber(3), "3rd");
+  assert.equal(__test__.ordinalNumber(11), "11th");
+  assert.equal(__test__.ordinalNumber(66), "66th");
+});

@@ -232,6 +232,7 @@ function rowToFlightResponse(row, { source = "postgres", freshness = "fresh", is
     departureTerminal: row.normalized_data?.departureTerminal || row.terminal,
     arrivalGate: row.normalized_data?.arrivalGate || null,
     arrivalTerminal: row.normalized_data?.arrivalTerminal || null,
+    arrivalTimezone: row.normalized_data?.arrivalTimezone || null,
     baggageBelt: row.baggage_belt,
     position: {
       lat: row.position_lat,

@@ -290,6 +290,7 @@ create table public.notifications (
   title text not null,
   body text not null,
   payload_json jsonb not null default '{}'::jsonb,
+  dedupe_key text,
   scheduled_for timestamptz,
   sent_at timestamptz,
   read_at timestamptz,
@@ -364,6 +365,10 @@ create index notifications_user_created_idx
 
 create index notifications_tracking_idx
   on public.notifications (tracking_session_id, created_at desc);
+
+create unique index notifications_user_dedupe_key_uidx
+  on public.notifications (user_id, dedupe_key)
+  where dedupe_key is not null;
 
 create index entitlements_user_active_idx
   on public.entitlements (user_id, is_active, entitlement_key);

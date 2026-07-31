@@ -209,7 +209,7 @@ test("departed flights still schedule a final refresh after estimated arrival", 
   assertApproxDuration(nextPollAfterMs, expectedRefreshMs);
 });
 
-test("landed flights complete tracking and stop polling", async () => {
+test("recently landed flights keep polling for post-arrival updates", async () => {
   const now = Date.now();
   const departure = new Date(now - 3 * 60 * 60_000).toISOString();
   const arrival = new Date(now - 15 * 60_000).toISOString();
@@ -227,8 +227,34 @@ test("landed flights complete tracking and stop polling", async () => {
     }
   );
 
+  const nextPollAfterMs = new Date(params[9]).getTime();
+  assertApproxDuration(nextPollAfterMs - now, 10 * 60_000);
+  assert.equal(params[10], "active");
+  assert.equal(params[11], null);
+});
+
+test("landed flights complete after the post-arrival tracking window", async () => {
+  const now = Date.now();
+  const departure = new Date(now - 5 * 60 * 60_000).toISOString();
+  const arrival = new Date(now - 2 * 60 * 60_000).toISOString();
+  const params = await persistSnapshot(
+    makeNormalized({
+      status: "landed",
+      departureTimes: { actual: departure },
+      landingTimes: { actual: arrival },
+      arrivalTimes: { actual: arrival },
+    }),
+    {
+      flightNumber: "AI203",
+      date: arrival.slice(0, 10),
+      departureIata: "DEL",
+      arrivalIata: "BOM",
+    }
+  );
+
   assert.equal(params[9], null);
   assert.equal(params[10], "completed");
+  assert.equal(params[11], "post_arrival_window_complete");
 });
 
 test("expired due rows are paused before returning to the poller", async () => {

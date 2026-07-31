@@ -1164,6 +1164,13 @@ function normalizeRecordFromFlightAware(record) {
     flightNumber,
     departureAirportIata: originIata,
     arrivalAirportIata: destinationIata,
+    arrivalTimezone:
+      firstNonBlank(
+        record?.destination?.timezone,
+        record?.destination_timezone,
+        record?.arrival_timezone,
+        record?.timezone_destination
+      ) || null,
     departureTimes,
     takeoffTimes,
     landingTimes,
@@ -1499,6 +1506,10 @@ function normalizedFromFirehoseMessage(previousNormalized, message) {
     arrivalAirportIata:
       firehoseNormalized.arrivalAirportIata ||
       previousNormalized?.arrivalAirportIata ||
+      null,
+    arrivalTimezone:
+      firehoseNormalized.arrivalTimezone ||
+      previousNormalized?.arrivalTimezone ||
       null,
     departureTimes: mergedDepartureTimes,
     takeoffTimes: mergedTakeoffTimes,
@@ -3434,7 +3445,158 @@ function displayFlightCode(normalized) {
   return number || "Flight";
 }
 
-function notificationPayloadFor(normalized, flightId) {
+function airportForNotification(iata) {
+  const code = normalizeAirportCode(iata);
+  if (!code) return null;
+
+  try {
+    return getAirportCatalog().airports.find((airport) => airport.code === code) || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function weatherEmojiForNotification(conditionCode) {
+  const condition = String(conditionCode || "").toLowerCase();
+  if (condition.includes("thunder")) return "⛈️";
+  if (condition.includes("snow") || condition.includes("sleet")) return "🌨️";
+  if (condition.includes("rain") || condition.includes("drizzle")) return "🌧️";
+  if (condition.includes("fog") || condition.includes("haze") || condition.includes("mist")) return "🌫️";
+  if (condition.includes("partly") || condition.includes("mostly")) return "🌤️";
+  if (condition.includes("cloud") || condition.includes("overcast")) return "☁️";
+  if (condition.includes("clear") || condition.includes("sun")) return "☀️";
+  return "🌤️";
+}
+
+function arrivalWeatherTitleSuffix(normalized) {
+  const weather = normalized?.weatherInsight;
+  const temperatureC = Number(weather?.temperatureC);
+  if (!weather?.available || !Number.isFinite(temperatureC)) {
+    return "";
+  }
+
+  return ` ${weatherEmojiForNotification(weather.conditionCode)} ${Math.round(temperatureC)}°`;
+}
+
+function positiveDurationMinutes(start, end, maximumMinutes = 120) {
+  const startMs = start ? new Date(start).getTime() : NaN;
+  const endMs = end ? new Date(end).getTime() : NaN;
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return null;
+  }
+
+  const minutes = Math.round((endMs - startMs) / 60_000);
+  return minutes > 0 && minutes <= maximumMinutes ? minutes : null;
+}
+
+function arrivalLocalTimeForNotification(normalized) {
+  const arrival =
+    normalized?.arrivalTimes?.actual ||
+    normalized?.arrivalTimes?.estimated ||
+    normalized?.arrivalTimes?.scheduled;
+  const timeZone = String(normalized?.arrivalTimezone || "").trim();
+  if (!arrival || !timeZone) return null;
+
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(arrival));
+  } catch (_error) {
+    return null;
+  }
+}
+
+function arrivalScheduleVarianceText(normalized) {
+  const scheduledMs = new Date(normalized?.arrivalTimes?.scheduled || "").getTime();
+  const currentMs = new Date(
+    normalized?.arrivalTimes?.actual ||
+      normalized?.arrivalTimes?.estimated ||
+      ""
+  ).getTime();
+  if (!Number.isFinite(scheduledMs) || !Number.isFinite(currentMs)) {
+    return null;
+  }
+
+  const minutes = Math.round((currentMs - scheduledMs) / 60_000);
+  if (Math.abs(minutes) < 2) return "on time";
+  return `${Math.abs(minutes)}m ${minutes < 0 ? "early" : "late"}`;
+}
+
+function ordinalNumber(value) {
+  const number = Math.max(1, Math.round(Number(value) || 0));
+  const mod100 = number % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${number}th`;
+  if (number % 10 === 1) return `${number}st`;
+  if (number % 10 === 2) return `${number}nd`;
+  if (number % 10 === 3) return `${number}rd`;
+  return `${number}th`;
+}
+
+function arrivalWelcomePayload(normalized, flightId, context = {}) {
+  const airportCode = normalizeAirportCode(normalized?.arrivalAirportIata) || "your destination";
+  const airport = context.airport || airportForNotification(airportCode);
+  const city = airport?.city || normalized?.arrivalCity || airportCode;
+  const title = `Welcome to ${city}!${arrivalWeatherTitleSuffix(normalized)}`;
+  const terminal = String(normalized?.arrivalTerminal || "").trim();
+  const gate = String(normalized?.arrivalGate || "").trim();
+  const locationParts = [
+    airportCode,
+    terminal ? `Terminal ${terminal}` : null,
+    gate ? `Gate ${gate}` : null,
+  ].filter(Boolean);
+  const localTime = arrivalLocalTimeForNotification(normalized);
+  const variance = arrivalScheduleVarianceText(normalized);
+  const taxiMinutes = positiveDurationMinutes(
+    normalized?.landingTimes?.actual,
+    normalized?.arrivalTimes?.actual || normalized?.arrivalTimes?.estimated
+  );
+
+  const sentences = [];
+  if (taxiMinutes) {
+    sentences.push(`Taxiing for ${taxiMinutes}m.`);
+  }
+
+  let arrivalSentence = locationParts.length > 0
+    ? `Arriving at ${locationParts.join(" • ")}`
+    : "Arriving at the gate";
+  if (localTime) {
+    arrivalSentence += ` at ${localTime} local time`;
+  }
+  if (variance) {
+    arrivalSentence += ` (${variance})`;
+  }
+  sentences.push(`${arrivalSentence}.`);
+
+  if (Number.isFinite(Number(context.visitOrdinal)) && Number(context.visitOrdinal) > 0) {
+    sentences.push(`This is your ${ordinalNumber(context.visitOrdinal)} time here.`);
+  }
+
+  return {
+    aps: {
+      alert: {
+        title,
+        body: sentences.join(" "),
+      },
+      sound: "default",
+      "thread-id": `runwy.flight.${flightId}`,
+      "interruption-level": "active",
+    },
+    flight_instance_id: flightId,
+    deep_link: `runwy://flights/${flightId}`,
+    runwy: {
+      type: "flight_arrived",
+      flightId,
+      status: normalized.status || null,
+      route: `${normalized?.departureAirportIata || "---"} → ${normalized?.arrivalAirportIata || "---"}`,
+      destinationIata: normalizeAirportCode(normalized?.arrivalAirportIata),
+      visitOrdinal: Number(context.visitOrdinal) || null,
+    },
+  };
+}
+
+function notificationPayloadFor(normalized, flightId, context = {}) {
   const alerts = normalized?.alerts;
   if (!alerts) return null;
 
@@ -3460,21 +3622,7 @@ function notificationPayloadFor(normalized, flightId) {
   }
 
   if (alerts.arrivedNow) {
-    return {
-      aps: {
-        alert: {
-          title: "Flight Landed",
-          body: `${code} (${route}) has landed.`,
-        },
-        sound: "default",
-      },
-      runwy: {
-        type: "flight_arrived",
-        flightId,
-        status: normalized.status || null,
-        route,
-      },
-    };
+    return arrivalWelcomePayload(normalized, flightId, context);
   }
 
   if (alerts.departedNow) {
@@ -3581,11 +3729,15 @@ function notificationPayloadFor(normalized, flightId) {
       return {
         aps: {
           alert: {
-            title: "Baggage Belt",
-            body: `${code} bags are expected at belt ${belt}.`,
+            title: "Baggage Claim Assigned",
+            body: `Belt ${belt}`,
           },
           sound: "default",
+          "thread-id": `runwy.flight.${flightId}`,
+          "interruption-level": "active",
         },
+        flight_instance_id: flightId,
+        deep_link: `runwy://flights/${flightId}`,
         runwy: {
           type: "flight_baggage_claim",
           flightId,
@@ -3627,8 +3779,8 @@ function notificationPayloadFor(normalized, flightId) {
   return null;
 }
 
-function notificationEventFor(normalized, flightId) {
-  const payload = notificationPayloadFor(normalized, flightId);
+function notificationEventFor(normalized, flightId, context = {}) {
+  const payload = notificationPayloadFor(normalized, flightId, context);
   const title = payload?.aps?.alert?.title;
   const body = payload?.aps?.alert?.body;
   const type = payload?.runwy?.type;
@@ -3643,6 +3795,35 @@ function notificationEventFor(normalized, flightId) {
     body,
     payload,
   };
+}
+
+function notificationEventsFor(normalized, flightId, context = {}) {
+  const alerts = normalized?.alerts || {};
+  const activeFlags = [
+    "cancelledNow",
+    "arrivedNow",
+    "departedNow",
+    "takeoffNow",
+    "taxiingNow",
+    "delayedNow",
+    "gateChangedNow",
+    "baggageBeltAssignedNow",
+    "inboundArrivedNow",
+  ].filter((flag) => alerts[flag] === true);
+
+  return activeFlags
+    .filter((flag) => !(alerts.arrivedNow && ["taxiingNow", "gateChangedNow"].includes(flag)))
+    .map((flag) =>
+      notificationEventFor(
+        {
+          ...normalized,
+          alerts: { [flag]: true },
+        },
+        flightId,
+        context
+      )
+    )
+    .filter(Boolean);
 }
 
 function ownerNotificationPreferenceConditionForEventType(eventType) {
@@ -3834,109 +4015,236 @@ function sendApnsHttp2Request(apnsToken, payload, environment = null) {
   });
 }
 
-async function dispatchFlightStatusNotifications(flightId, normalized) {
-  const event = notificationEventFor(normalized, flightId);
-  if (!event) return;
-
-  const recipients = await listNotificationRecipientsForFlight(flightId, event.type);
-  if (!recipients.length) {
-    console.warn("Skipping flight notification because no recipients were resolved", {
-      flightId,
-      eventType: event.type,
-    });
-    return;
+function notificationDedupeKey(flightId, event) {
+  if (event.type === "flight_arrived") {
+    return `arrival-welcome:${flightId}`;
+  }
+  if (event.type === "flight_baggage_claim") {
+    const belt = String(event.payload?.runwy?.baggageBelt || "").trim().toLowerCase();
+    return `baggage:${flightId}:${belt || "assigned"}`;
   }
 
-  if (usesDatabase() && recipients.length) {
-    const uniqueRecipients = Array.from(
-      new Map(
-        recipients.map((recipient) => [
-          `${recipient.userId}|${recipient.friendRelationshipId || ""}`,
-          {
-            user_id: recipient.userId,
-            friend_relationship_id: recipient.friendRelationshipId || "",
-          },
-        ])
-      ).values()
-    );
+  const eventVersion =
+    event.payload?.runwy?.gate ||
+    event.payload?.runwy?.delayMinutes ||
+    event.payload?.runwy?.status ||
+    event.body;
+  return `${event.type}:${flightId}:${String(eventVersion || "event").trim().toLowerCase()}`;
+}
 
-    await pool.query(
-      `
-      insert into public.notifications (
-        user_id,
-        tracking_session_id,
-        friend_relationship_id,
-        notification_type,
-        delivery_channel,
-        delivery_status,
-        title,
-        body,
-        payload_json,
-        scheduled_for
-      )
-      select
-        recipients.user_id::uuid,
-        $1::uuid,
-        nullif(recipients.friend_relationship_id, '')::uuid,
-        $2,
-        'push',
-        $3,
-        $4,
-        $5,
-        $6::jsonb,
-        now()
-      from jsonb_to_recordset($7::jsonb) as recipients(
-        user_id text,
-        friend_relationship_id text
-      )
-      `,
-      [
-        flightId,
-        event.type,
-        isApnsConfigured() ? "queued" : "pending",
-        event.title,
-        event.body,
-        JSON.stringify(event.payload),
-        JSON.stringify(uniqueRecipients),
-      ]
-    );
-  }
+async function arrivalVisitOrdinalForUser(userId, flightId, destinationIata) {
+  if (!usesDatabase() || !userId || !destinationIata) return null;
 
-  const tokens = Array.from(
-    new Set(
-      recipients
-        .map((recipient) => recipient.apnsToken)
-        .filter(Boolean)
-    )
+  const result = await pool.query(
+    `
+    select count(distinct uf.id)::int as visits
+    from public.user_flights uf
+    where uf.user_id = $1::uuid
+      and upper(coalesce(uf.destination_iata, '')) = upper($2)
+      and uf.deleted_at is null
+      and uf.tracking_session_id is distinct from $3::uuid
+      and (
+        uf.lifecycle_state in ('landed', 'archived')
+        or uf.actual_arrival is not null
+      )
+    `,
+    [userId, destinationIata, flightId]
   );
-  if (!tokens.length) {
-    console.warn("Skipping APNs delivery because no enabled device tokens were found", {
-      flightId,
-      eventType: event.type,
-      recipientCount: recipients.length,
-    });
-    return;
+
+  return Number(result.rows[0]?.visits || 0) + 1;
+}
+
+function groupedNotificationRecipients(recipients) {
+  const groups = new Map();
+  for (const recipient of recipients) {
+    const key = `${recipient.userId}|${recipient.friendRelationshipId || ""}`;
+    const current = groups.get(key) || {
+      userId: recipient.userId,
+      friendRelationshipId: recipient.friendRelationshipId || null,
+      tokens: [],
+    };
+    if (recipient.apnsToken) {
+      current.tokens.push(recipient.apnsToken);
+    }
+    groups.set(key, current);
   }
-  if (!isApnsConfigured()) return;
 
-  const results = await Promise.all(tokens.map((token) => sendApnsNotification(token, event.payload)));
+  return Array.from(groups.values()).map((group) => ({
+    ...group,
+    tokens: Array.from(new Set(group.tokens)),
+  }));
+}
 
-  if (usesDatabase()) {
-    const deliveryStatus = results.some((result) => result?.ok) ? "sent" : "failed";
-    await pool.query(
-      `
-      update public.notifications
-      set
-        delivery_status = $2,
-        sent_at = case when $2 = 'sent' then coalesce(sent_at, now()) else sent_at end,
-        updated_at = now()
-      where tracking_session_id = $1::uuid
-        and notification_type = $3
-        and delivery_status = 'queued'
-        and created_at >= now() - interval '15 minutes'
-      `,
-      [flightId, deliveryStatus, event.type]
+async function createNotificationRecord({
+  recipient,
+  flightId,
+  event,
+  dedupeKey,
+  deliveryStatus,
+}) {
+  if (!usesDatabase()) return { id: null, created: true };
+
+  const result = await pool.query(
+    `
+    insert into public.notifications (
+      user_id,
+      tracking_session_id,
+      friend_relationship_id,
+      notification_type,
+      delivery_channel,
+      delivery_status,
+      title,
+      body,
+      payload_json,
+      dedupe_key,
+      scheduled_for
+    )
+    values (
+      $1::uuid,
+      $2::uuid,
+      $3::uuid,
+      $4,
+      'push',
+      $5,
+      $6,
+      $7,
+      $8::jsonb,
+      $9,
+      now()
+    )
+    on conflict (user_id, dedupe_key)
+      where dedupe_key is not null
+      do nothing
+    returning id::text
+    `,
+    [
+      recipient.userId,
+      flightId,
+      recipient.friendRelationshipId,
+      event.type,
+      deliveryStatus,
+      event.title,
+      event.body,
+      JSON.stringify(event.payload),
+      dedupeKey,
+    ]
+  );
+
+  return {
+    id: result.rows[0]?.id || null,
+    created: result.rowCount > 0,
+  };
+}
+
+async function updateNotificationRecordDelivery(id, deliveryStatus) {
+  if (!usesDatabase() || !id) return;
+  await pool.query(
+    `
+    update public.notifications
+    set
+      delivery_status = $2,
+      sent_at = case when $2 = 'sent' then coalesce(sent_at, now()) else sent_at end,
+      updated_at = now()
+    where id = $1::uuid
+    `,
+    [id, deliveryStatus]
+  );
+}
+
+async function enrichNormalizedForNotification(flightId, normalized) {
+  if (normalized?.weatherInsight?.available || !sharedFlightService) {
+    return normalized;
+  }
+
+  try {
+    const tracked = await fetchTrackingRowByID(flightId);
+    const sharedFlightInstanceId = tracked?.metadata?.sharedFlightInstanceId;
+    if (!sharedFlightInstanceId) return normalized;
+
+    const sharedFlight = await sharedFlightService.flightWithWeatherInsight(
+      sharedFlightInstanceId,
+      { userId: tracked.ownerUserId, cacheStatus: "arrival_notification" }
     );
+    if (!sharedFlight?.weatherInsight) return normalized;
+
+    return {
+      ...normalized,
+      weatherInsight: sharedFlight.weatherInsight,
+    };
+  } catch (error) {
+    console.warn("Arrival notification weather enrichment failed", {
+      flightId,
+      error: error?.message || String(error),
+    });
+    return normalized;
+  }
+}
+
+async function dispatchFlightStatusNotifications(flightId, normalized) {
+  const notificationNormalized = await enrichNormalizedForNotification(flightId, normalized);
+  const eventTypes = notificationEventsFor(notificationNormalized, flightId).map((event) => event.type);
+  if (!eventTypes.length) return;
+
+  const recipientsByType = new Map();
+  for (const eventType of eventTypes) {
+    recipientsByType.set(
+      eventType,
+      groupedNotificationRecipients(
+        await listNotificationRecipientsForFlight(flightId, eventType)
+      )
+    );
+  }
+
+  for (const eventType of eventTypes) {
+    const recipients = recipientsByType.get(eventType) || [];
+    if (!recipients.length) {
+      console.warn("Skipping flight notification because no recipients were resolved", {
+        flightId,
+        eventType,
+      });
+      continue;
+    }
+
+    for (const recipient of recipients) {
+      const isOwner = !recipient.friendRelationshipId;
+      const visitOrdinal =
+        eventType === "flight_arrived" && isOwner
+          ? await arrivalVisitOrdinalForUser(
+              recipient.userId,
+              flightId,
+              normalizeAirportCode(notificationNormalized?.arrivalAirportIata)
+            )
+          : null;
+      const event = notificationEventsFor(notificationNormalized, flightId, { visitOrdinal })
+        .find((candidate) => candidate.type === eventType);
+      if (!event) continue;
+
+      const hasDeliverableToken = recipient.tokens.length > 0 && isApnsConfigured();
+      const record = await createNotificationRecord({
+        recipient,
+        flightId,
+        event,
+        dedupeKey: notificationDedupeKey(flightId, event),
+        deliveryStatus: hasDeliverableToken ? "queued" : "pending",
+      });
+      if (!record.created) continue;
+
+      if (!recipient.tokens.length) {
+        console.warn("Skipping APNs delivery because no enabled device tokens were found", {
+          flightId,
+          eventType,
+          userId: recipient.userId,
+        });
+        continue;
+      }
+      if (!isApnsConfigured()) continue;
+
+      const results = await Promise.all(
+        recipient.tokens.map((token) => sendApnsNotification(token, event.payload))
+      );
+      const deliveryStatus = results.some((result) => result?.ok) ? "sent" : "failed";
+      await updateNotificationRecordDelivery(record.id, deliveryStatus);
+    }
   }
 }
 
@@ -4377,8 +4685,15 @@ function isFirehoseEligibleTrackedRecord(trackedRecord, nowMs = Date.now()) {
   }
 
   const status = String(trackedRecord.normalized?.status || "").toLowerCase();
-  if (isTerminalFlightStatus(status)) {
+  if (["cancelled", "diverted"].includes(status)) {
     return false;
+  }
+
+  if (
+    ["landed", "arrived", "arrived_at_gate", "taxi_in"].includes(status) &&
+    trackedRecord.sessionStatus === "active"
+  ) {
+    return true;
   }
 
   if (["boarding", "delayed", "departed", "enroute"].includes(status)) {
@@ -4467,6 +4782,7 @@ function sharedNormalizedFromFirehoseNormalized(normalized, message) {
     flightNumber: numericFlightNumber || flightNumber,
     origin: normalized.departureAirportIata || null,
     destination: normalized.arrivalAirportIata || null,
+    arrivalTimezone: normalized.arrivalTimezone || null,
     status: normalized.status || "unknown",
     statusDetail: normalized.statusDetail || null,
     scheduledDepartureAt: normalized.departureTimes?.scheduled || null,
@@ -4518,6 +4834,7 @@ async function applyFirehoseMessageToSharedFlights(message) {
       flightNumber: target.flight_number,
       origin: target.origin_airport,
       destination: target.destination_airport,
+      arrivalTimezone: target.normalized_data?.arrivalTimezone || null,
       status: target.status,
       scheduledDepartureAt: target.scheduled_departure_at,
       scheduledArrivalAt: target.scheduled_arrival_at,
@@ -4969,7 +5286,9 @@ function sharedTrackInputFromQuery(query) {
     date: query.date,
     origin: query.departureIata || undefined,
     destination: query.arrivalIata || undefined,
-    notificationEnabled: true,
+    // The bridged tracking_session owns notification fanout. Keeping the
+    // shared projection silent prevents duplicate APNs deliveries.
+    notificationEnabled: false,
   };
 }
 
@@ -5009,6 +5328,7 @@ function trackedPayloadFromSharedFlight(flight) {
       : String(flight.flightNumber || ""),
     departureAirportIata: flight.origin || null,
     arrivalAirportIata: flight.destination || null,
+    arrivalTimezone: flight.arrivalTimezone || null,
     departureTimes: {
       scheduled: scheduledDeparture,
       estimated: estimatedDeparture,
@@ -5647,7 +5967,10 @@ module.exports = {
     isFutureFlightAwareQueryDate,
     normalizeRecordFromFlightAware,
     normalizedTimezoneOffsetMinutes,
+    notificationDedupeKey,
+    notificationEventsFor,
     notificationPayloadFor,
+    ordinalNumber,
     ownerNotificationPreferenceConditionForEventType,
     reconcileOperationalStatus,
     scoreCandidate,

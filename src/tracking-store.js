@@ -5,6 +5,8 @@ const FAR_FUTURE_POLL_INTERVAL_MS = 24 * 60 * 60_000;
 const ENROUTE_POLL_INTERVAL_MS = 15 * 60_000;
 const POST_DEPARTURE_FINAL_REFRESH_BUFFER_MS = 15 * 60_000;
 const POST_DEPARTURE_FALLBACK_POLL_INTERVAL_MS = 3 * 60 * 60_000;
+const POST_ARRIVAL_POLL_INTERVAL_MS = 10 * 60_000;
+const POST_ARRIVAL_TRACKING_GRACE_MS = 90 * 60_000;
 const ERRORED_RETRY_INTERVAL_MINUTES = 60;
 const EXPIRED_TRACKING_WINDOW_GRACE_MS = 12 * 60 * 60_000;
 
@@ -476,7 +478,6 @@ function createTrackingStore({
     switch (status) {
       case "cancelled":
         return "cancelled";
-      case "landed":
       case "diverted":
         return "completed";
       default:
@@ -490,6 +491,8 @@ function createTrackingStore({
       case "cancelled":
         return "deleted";
       case "landed":
+      case "arrived":
+      case "arrived_at_gate":
       case "diverted":
         return "landed";
       case "boarding":
@@ -546,11 +549,54 @@ function createTrackingStore({
       };
     }
 
+    const status = String(normalized?.status || "").toLowerCase();
+    if (["landed", "arrived", "arrived_at_gate"].includes(status)) {
+      const postArrivalReferenceMs = postArrivalReferenceTimeMs(normalized);
+      const postArrivalDeadlineMs = Number.isFinite(postArrivalReferenceMs)
+        ? postArrivalReferenceMs + POST_ARRIVAL_TRACKING_GRACE_MS
+        : now.getTime() + POST_ARRIVAL_TRACKING_GRACE_MS;
+
+      if (now.getTime() < postArrivalDeadlineMs) {
+        return {
+          sessionStatus: "active",
+          nextPollAfter: new Date(
+            Math.min(now.getTime() + POST_ARRIVAL_POLL_INTERVAL_MS, postArrivalDeadlineMs)
+          ).toISOString(),
+          pollingStoppedReason: null,
+        };
+      }
+
+      return {
+        sessionStatus: "completed",
+        nextPollAfter: null,
+        pollingStoppedReason: "post_arrival_window_complete",
+      };
+    }
+
     return {
       sessionStatus: sessionStatusForNormalized(normalized),
       nextPollAfter: nextPollAfterForNormalized(normalized, query, now),
       pollingStoppedReason: null,
     };
+  }
+
+  function postArrivalReferenceTimeMs(normalized) {
+    const candidates = [
+      normalized?.landingTimes?.actual,
+      normalized?.arrivalTimes?.actual,
+      normalized?.landingTimes?.estimated,
+      normalized?.arrivalTimes?.estimated,
+      normalized?.arrivalTimes?.scheduled,
+    ];
+
+    for (const candidate of candidates) {
+      const instant = candidate ? new Date(candidate).getTime() : NaN;
+      if (Number.isFinite(instant)) {
+        return instant;
+      }
+    }
+
+    return NaN;
   }
 
   function departureTimeMsForNormalized(normalized) {
@@ -583,7 +629,7 @@ function createTrackingStore({
 
   function nextPollAfterForNormalized(normalized, query, now = new Date()) {
     const status = String(normalized?.status || "").toLowerCase();
-    if (["landed", "cancelled", "diverted"].includes(status)) {
+    if (["landed", "arrived", "arrived_at_gate", "cancelled", "diverted"].includes(status)) {
       return null;
     }
 

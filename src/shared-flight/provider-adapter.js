@@ -45,6 +45,7 @@ function normalizeProviderRecord(record, normalizeRecord, providerName, params) 
     flightNumber,
     origin: normalized.departureAirportIata || normalized.origin || params.origin || null,
     destination: normalized.arrivalAirportIata || normalized.destination || params.destination || null,
+    arrivalTimezone: normalized.arrivalTimezone || null,
     status: normalized.status || "unknown",
     statusDetail: normalized.statusDetail || null,
     scheduledDepartureAt: normalized.departureTimes?.scheduled || normalized.scheduledDepartureAt || null,
