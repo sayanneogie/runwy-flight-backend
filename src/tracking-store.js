@@ -5,8 +5,9 @@ const FAR_FUTURE_POLL_INTERVAL_MS = 24 * 60 * 60_000;
 const ENROUTE_POLL_INTERVAL_MS = 15 * 60_000;
 const POST_DEPARTURE_FINAL_REFRESH_BUFFER_MS = 15 * 60_000;
 const POST_DEPARTURE_FALLBACK_POLL_INTERVAL_MS = 3 * 60 * 60_000;
-const POST_ARRIVAL_POLL_INTERVAL_MS = 10 * 60_000;
-const POST_ARRIVAL_TRACKING_GRACE_MS = 90 * 60_000;
+const POST_ARRIVAL_REFRESH_OFFSETS_MS = [5, 15, 30].map((minutes) => minutes * 60_000);
+const POST_ARRIVAL_TRACKING_GRACE_MS =
+  POST_ARRIVAL_REFRESH_OFFSETS_MS[POST_ARRIVAL_REFRESH_OFFSETS_MS.length - 1];
 const ERRORED_RETRY_INTERVAL_MINUTES = 60;
 const EXPIRED_TRACKING_WINDOW_GRACE_MS = 12 * 60 * 60_000;
 
@@ -557,10 +558,15 @@ function createTrackingStore({
         : now.getTime() + POST_ARRIVAL_TRACKING_GRACE_MS;
 
       if (now.getTime() < postArrivalDeadlineMs) {
+        const nextCheckpointMs = Number.isFinite(postArrivalReferenceMs)
+          ? POST_ARRIVAL_REFRESH_OFFSETS_MS
+            .map((offsetMs) => postArrivalReferenceMs + offsetMs)
+            .find((checkpointMs) => checkpointMs > now.getTime())
+          : now.getTime() + POST_ARRIVAL_REFRESH_OFFSETS_MS[0];
         return {
           sessionStatus: "active",
           nextPollAfter: new Date(
-            Math.min(now.getTime() + POST_ARRIVAL_POLL_INTERVAL_MS, postArrivalDeadlineMs)
+            Math.min(nextCheckpointMs || postArrivalDeadlineMs, postArrivalDeadlineMs)
           ).toISOString(),
           pollingStoppedReason: null,
         };

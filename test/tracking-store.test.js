@@ -209,7 +209,7 @@ test("departed flights still schedule a final refresh after estimated arrival", 
   assertApproxDuration(nextPollAfterMs, expectedRefreshMs);
 });
 
-test("recently landed flights keep polling for post-arrival updates", async () => {
+test("recently landed flights use bounded post-arrival refresh checkpoints", async () => {
   const now = Date.now();
   const departure = new Date(now - 3 * 60 * 60_000).toISOString();
   const arrival = new Date(now - 15 * 60_000).toISOString();
@@ -228,7 +228,7 @@ test("recently landed flights keep polling for post-arrival updates", async () =
   );
 
   const nextPollAfterMs = new Date(params[9]).getTime();
-  assertApproxDuration(nextPollAfterMs - now, 10 * 60_000);
+  assertApproxDuration(nextPollAfterMs - now, 15 * 60_000);
   assert.equal(params[10], "active");
   assert.equal(params[11], null);
 });

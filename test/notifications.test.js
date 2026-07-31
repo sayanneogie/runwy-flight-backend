@@ -134,7 +134,7 @@ test("owner inbound-aircraft notifications honor takeoff and landing alert prefe
   );
 });
 
-test("same-day upcoming FlightAware alerts use open windows while past departures are skipped", () => {
+test("same-day FlightAware alerts use open windows before and after departure", () => {
   const today = "2026-04-26";
 
   assert.deepEqual(
@@ -166,10 +166,10 @@ test("same-day upcoming FlightAware alerts use open windows while past departure
       `${today}T08:00:00.000Z`
     ),
     {
-      eligible: false,
-      reason: "departure_not_in_future",
-      detail: `Skipping FlightAware alert auto-create because departure time ${today}T06:30:00.000Z is not in the future.`,
-      windowStrategy: "bounded",
+      eligible: true,
+      reason: null,
+      detail: null,
+      windowStrategy: "open",
     }
   );
 
@@ -187,6 +187,27 @@ test("same-day upcoming FlightAware alerts use open windows while past departure
       reason: null,
       detail: null,
       windowStrategy: "bounded",
+    }
+  );
+});
+
+test("already-airborne overnight flights use open FlightAware alerts", () => {
+  assert.deepEqual(
+    __test__.flightAwareAlertCreationDisposition(
+      {
+        startDate: "2026-04-25",
+        endDate: "2026-04-27",
+        departureTime: "2026-04-25T22:30:00.000Z",
+        timezoneOffsetMinutes: 0,
+        status: "enroute",
+      },
+      "2026-04-26T08:00:00.000Z"
+    ),
+    {
+      eligible: true,
+      reason: null,
+      detail: null,
+      windowStrategy: "open",
     }
   );
 });
@@ -213,6 +234,54 @@ test("FlightAware alert payload uses canonical ident/origin/destination keys", (
   assert.ok(!("ident_iata" in payload));
   assert.ok(!("origin_iata" in payload));
   assert.ok(!("destination_iata" in payload));
+  assert.equal(payload.events.in, true);
+});
+
+test("FlightAware alert payload prefers the exact provider flight id", () => {
+  const payload = __test__.buildFlightAwareAlertPayload({
+    targetUrl: "https://runwy.example.com/v1/webhooks/flightaware?secret=test",
+    context: {
+      providerFlightId: "BAW276-1785473700-airline-0000",
+      flightNumber: "BA276",
+      departureIata: "HYD",
+      arrivalIata: "LHR",
+      startDate: "2026-07-31",
+      endDate: "2026-08-02",
+      windowStrategy: "open",
+    },
+  });
+
+  assert.equal(payload.ident, "BAW276-1785473700-airline-0000");
+  assert.equal(payload.events.on, true);
+  assert.equal(payload.events.in, true);
+});
+
+test("FlightAware alert ids are extracted from scalar, array, and object responses", () => {
+  assert.equal(__test__.flightAwareAlertIDFromPayload(12345), "12345");
+  assert.equal(__test__.flightAwareAlertIDFromPayload("67890"), "67890");
+  assert.equal(
+    __test__.flightAwareAlertIDFromPayload({ alerts: [{ alert_id: 24680 }] }),
+    "24680"
+  );
+  assert.equal(
+    __test__.flightAwareAlertIDFromPayload([{ id: "alert-1" }]),
+    "alert-1"
+  );
+});
+
+test("FlightAware lifecycle webhooks bypass freshness throttling", () => {
+  const tracked = {
+    normalized: { status: "scheduled" },
+    lastUpdated: new Date().toISOString(),
+  };
+
+  assert.equal(__test__.webhookStatusFromEvent({ event_code: "off" }), "departed");
+  assert.equal(__test__.webhookStatusFromEvent({ event_code: "on" }), "landed");
+  assert.equal(__test__.webhookStatusFromEvent({ event_code: "in" }), "arrived_at_gate");
+  assert.equal(
+    __test__.shouldRefreshTrackedRecordFromWebhook(tracked, { event_code: "off" }),
+    true
+  );
 });
 
 test("FlightAware alert callback URL includes webhook shared secret", () => {
@@ -226,7 +295,7 @@ test("FlightAware alert callback URL includes webhook shared secret", () => {
 
   const parsed = new URL(targetUrl);
   assert.equal(parsed.origin, "https://runwy-api.example.com");
-  assert.equal(parsed.pathname, "/webhooks/flightaware/alerts");
+  assert.equal(parsed.pathname, "/v1/webhooks/flightaware");
   assert.equal(parsed.searchParams.get("secret"), "test webhook secret");
 });
 

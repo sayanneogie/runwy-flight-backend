@@ -217,7 +217,7 @@ const FLIGHTAWARE_AUTO_ALERT_EVENTS = Object.freeze({
   out: false,
   off: true,
   on: true,
-  in: false,
+  in: true,
   hold_start: false,
   hold_end: false,
 });
@@ -580,7 +580,9 @@ function flightAwareWebhookTargetURL(req) {
   const baseURL = inferredHTTPSBaseURLFromRequest(req) || WEBHOOK_PUBLIC_BASE_URL;
   if (!baseURL) return null;
 
-  const target = new URL("/webhooks/flightaware/alerts", `${baseURL}/`);
+  // Use the unified handler so one provider callback updates both the shared
+  // flight projection and the owner-specific tracking/notification pipeline.
+  const target = new URL("/v1/webhooks/flightaware", `${baseURL}/`);
   target.searchParams.set("secret", WEBHOOK_SHARED_SECRET);
   return target.toString();
 }
@@ -3070,7 +3072,7 @@ function flightAwareAlertContextForTrackedRecord(trackedRecord) {
   }
 
   const status = String(trackedRecord.normalized?.status || "").toLowerCase();
-  if (["landed", "cancelled", "diverted"].includes(status)) {
+  if (["landed", "arrived", "arrived_at_gate", "cancelled", "diverted"].includes(status)) {
     return null;
   }
 
@@ -3108,6 +3110,8 @@ function flightAwareAlertContextForTrackedRecord(trackedRecord) {
 
   return {
     flightNumber,
+    providerFlightId: trackedRecord.providerFlightId || null,
+    status,
     departureIata,
     arrivalIata,
     startDate,
@@ -3138,6 +3142,25 @@ function flightAwareAlertCreationDisposition(context, nowISO = new Date().toISOS
     };
   }
 
+  const departureTimeMs = new Date(context?.departureTime || "").getTime();
+  const status = String(context?.status || "").toLowerCase();
+  const flightHasStarted =
+    ["departed", "airborne", "enroute", "approaching", "taxi_in"].includes(status) ||
+    (Number.isFinite(departureTimeMs) && departureTimeMs <= referenceTimeMs);
+
+  // AeroAPI rejects a bounded alert whose start date is before the current
+  // day. An exact, open alert remains useful for a flight that is already
+  // underway (including overnight flights whose departure date has rolled
+  // into the previous local day).
+  if (flightHasStarted) {
+    return {
+      eligible: true,
+      reason: null,
+      detail: null,
+      windowStrategy: "open",
+    };
+  }
+
   if (startDate < currentDate) {
     return {
       eligible: false,
@@ -3148,16 +3171,6 @@ function flightAwareAlertCreationDisposition(context, nowISO = new Date().toISOS
   }
 
   if (startDate === currentDate) {
-    const departureTimeMs = new Date(context?.departureTime || "").getTime();
-    if (Number.isFinite(departureTimeMs) && departureTimeMs <= referenceTimeMs) {
-      return {
-        eligible: false,
-        reason: "departure_not_in_future",
-        detail: `Skipping FlightAware alert auto-create because departure time ${context.departureTime} is not in the future.`,
-        windowStrategy: "bounded",
-      };
-    }
-
     return {
       eligible: true,
       reason: null,
@@ -3175,6 +3188,19 @@ function flightAwareAlertCreationDisposition(context, nowISO = new Date().toISOS
 }
 
 function flightAwareAlertIDFromPayload(payload) {
+  if (typeof payload === "string" || typeof payload === "number") {
+    const scalar = String(payload).trim();
+    return scalar || null;
+  }
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const alertId = flightAwareAlertIDFromPayload(item);
+      if (alertId) return alertId;
+    }
+    return null;
+  }
+
   const candidates = [
     payload?.alert_id,
     payload?.alertId,
@@ -3199,7 +3225,9 @@ function flightAwareAlertIDFromPayload(payload) {
 
 function buildFlightAwareAlertPayload({ targetUrl, context }) {
   const payload = {
-    ident: context.flightNumber,
+    // A fa_flight_id identifies one concrete flight instance and prevents an
+    // open alert from following the same recurring flight number tomorrow.
+    ident: context.providerFlightId || context.flightNumber,
     impending_departure: [...FLIGHTAWARE_AUTO_ALERT_IMPENDING_DEPARTURE_MINUTES],
     impending_arrival: [...FLIGHTAWARE_AUTO_ALERT_IMPENDING_ARRIVAL_MINUTES],
     events: FLIGHTAWARE_AUTO_ALERT_EVENTS,
@@ -3219,6 +3247,76 @@ function buildFlightAwareAlertPayload({ targetUrl, context }) {
   }
 
   return payload;
+}
+
+function flightAwareAlertRows(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.alerts)) return payload.alerts;
+  if (payload && typeof payload === "object") return [payload];
+  return [];
+}
+
+function normalizeAlertAirport(value) {
+  return normalizeAirportCode(
+    typeof value === "object"
+      ? value?.code_iata || value?.iata || value?.code || value?.airport_code
+      : value
+  );
+}
+
+function matchingFlightAwareAlertID(payload, context, targetUrl) {
+  const expectedIdents = new Set(
+    [
+      context?.providerFlightId,
+      String(context?.providerFlightId || "").split("-")[0],
+      context?.flightNumber,
+    ]
+      .map((value) => String(value || "").trim().toUpperCase())
+      .filter(Boolean)
+  );
+
+  for (const alert of flightAwareAlertRows(payload)) {
+    const ident = String(
+      alert?.ident || alert?.ident_iata || alert?.ident_icao || ""
+    ).trim().toUpperCase();
+    if (expectedIdents.size > 0 && !expectedIdents.has(ident)) continue;
+
+    const origin = normalizeAlertAirport(
+      alert?.origin_iata || alert?.origin || alert?.origin_icao
+    );
+    const destination = normalizeAlertAirport(
+      alert?.destination_iata || alert?.destination || alert?.destination_icao
+    );
+    if (context?.departureIata && origin && origin !== context.departureIata) continue;
+    if (context?.arrivalIata && destination && destination !== context.arrivalIata) continue;
+    if (alert?.target_url && String(alert.target_url) !== String(targetUrl)) continue;
+
+    const alertId = flightAwareAlertIDFromPayload(alert);
+    if (alertId) return alertId;
+  }
+
+  return null;
+}
+
+async function verifyFlightAwareAlert({ targetUrl, context }) {
+  const response = await fetch(`${FLIGHTAWARE_BASE_URL}/alerts`, {
+    headers: {
+      "x-apikey": FLIGHTAWARE_API_KEY,
+      Accept: "application/json",
+    },
+  });
+  const responseText = await response.text();
+  if (!response.ok) {
+    throw new Error(`FlightAware alert verification failed (${response.status}): ${responseText.slice(0, 200)}`);
+  }
+
+  let responsePayload = null;
+  try {
+    responsePayload = responseText ? JSON.parse(responseText) : null;
+  } catch (_error) {
+    responsePayload = null;
+  }
+  return matchingFlightAwareAlertID(responsePayload, context, targetUrl);
 }
 
 async function createFlightAwareAlert({ targetUrl, context }) {
@@ -3246,9 +3344,15 @@ async function createFlightAwareAlert({ targetUrl, context }) {
     responsePayload = null;
   }
 
-  return {
-    alertId: flightAwareAlertIDFromPayload(responsePayload),
-  };
+  const responseAlertId = flightAwareAlertIDFromPayload(responsePayload);
+  const alertId =
+    responseAlertId ||
+    await verifyFlightAwareAlert({ targetUrl, context });
+  if (!alertId) {
+    throw new Error("FlightAware accepted the alert but Runwy could not verify its alert id");
+  }
+
+  return { alertId };
 }
 
 async function ensureFlightAwareAlertForTrackedSession(req, trackedRecord) {
@@ -3275,7 +3379,7 @@ async function ensureFlightAwareAlertForTrackedSession(req, trackedRecord) {
   const existing = trackedRecord.metadata?.flightawareAlert;
   if (
     existing?.fingerprint === fingerprint &&
-    (existing?.alertId || existing?.createdAt || existing?.skipReason)
+    existing?.alertId
   ) {
     return;
   }
@@ -4523,6 +4627,30 @@ function travelDateWindowFromWebhookEvent(event) {
 }
 
 function webhookStatusFromEvent(event) {
+  const rawEventType = String(
+    event?.event_code ||
+      event?.event ||
+      event?.alert_type ||
+      event?.alertType ||
+      event?.type ||
+      ""
+  ).trim().toLowerCase();
+
+  if (["in", "inblock", "onblock", "arrived_at_gate"].includes(rawEventType)) {
+    return "arrived_at_gate";
+  }
+  if (["on", "landing", "landed", "arrival", "arrived"].includes(rawEventType)) {
+    return "landed";
+  }
+  if (["off", "takeoff", "departure", "departed", "airborne"].includes(rawEventType)) {
+    return "departed";
+  }
+  if (["out", "offblock", "taxi", "taxiing"].includes(rawEventType)) {
+    return "taxiing";
+  }
+  if (rawEventType.includes("cancel")) return "cancelled";
+  if (rawEventType.includes("divert")) return "diverted";
+
   return normalizeStatus(
     event?.status ||
       event?.flight_status ||
@@ -4571,6 +4699,13 @@ function shouldRefreshTrackedRecordFromWebhook(trackedRecord, event, nowMs = Dat
 
   const trackedStatus = String(trackedRecord.normalized?.status || "").toLowerCase();
   const incomingStatus = webhookStatusFromEvent(event);
+  if (
+    incomingStatus &&
+    incomingStatus !== "scheduled" &&
+    incomingStatus !== trackedStatus
+  ) {
+    return true;
+  }
   if ((trackedStatus === "departed" || trackedStatus === "enroute") && !isTerminalFlightStatus(incomingStatus)) {
     return false;
   }
@@ -5797,7 +5932,7 @@ app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req,
   }
 });
 
-async function handleFlightAwareAlertsWebhook(req, res) {
+async function handleUnifiedFlightAwareWebhook(req, res) {
   if (!WEBHOOK_SHARED_SECRET) {
     return res.status(503).json({ error: "Webhook secret is not configured" });
   }
@@ -5806,35 +5941,8 @@ async function handleFlightAwareAlertsWebhook(req, res) {
   if (!timingSafeEqualText(incomingSecret, WEBHOOK_SHARED_SECRET)) {
     return res.status(401).json({ error: "Unauthorized webhook" });
   }
-
   if (!req.body || typeof req.body !== "object") {
     return res.status(400).json({ error: "Malformed FlightAware alert payload" });
-  }
-
-  if (!sharedFlightService?.processFlightAwareAlertWebhook) {
-    return res.status(503).json({ error: "Shared flight event pipeline is unavailable" });
-  }
-
-  try {
-    const result = await sharedFlightService.processFlightAwareAlertWebhook(req.body);
-    return res.json(result);
-  } catch (error) {
-    console.error("FlightAware alert webhook processing failed", error?.message || String(error));
-    return res.status(500).json({ error: "Unable to process FlightAware alert" });
-  }
-}
-
-app.post("/webhooks/flightaware/alerts", handleFlightAwareAlertsWebhook);
-app.post("/v1/webhooks/flightaware/alerts", handleFlightAwareAlertsWebhook);
-
-app.post("/v1/webhooks/flightaware", async (req, res) => {
-  if (!WEBHOOK_SHARED_SECRET) {
-    return res.status(503).json({ error: "Webhook secret is not configured" });
-  }
-
-  const incomingSecret = webhookSecretFromRequest(req);
-  if (!timingSafeEqualText(incomingSecret, WEBHOOK_SHARED_SECRET)) {
-    return res.status(401).json({ error: "Unauthorized webhook" });
   }
 
   let sharedAlertResult = null;
@@ -5919,7 +6027,13 @@ app.post("/v1/webhooks/flightaware", async (req, res) => {
     refreshedFlights,
     throttledFlights,
   });
-});
+}
+
+// Keep the previous callback URLs live so alerts created before the unified
+// endpoint migration still reach the owner-specific notification pipeline.
+app.post("/webhooks/flightaware/alerts", handleUnifiedFlightAwareWebhook);
+app.post("/v1/webhooks/flightaware/alerts", handleUnifiedFlightAwareWebhook);
+app.post("/v1/webhooks/flightaware", handleUnifiedFlightAwareWebhook);
 
 async function startApiServer() {
   if (usesDatabase()) {
@@ -5960,6 +6074,7 @@ module.exports = {
     deriveAlertFlags,
     extractFlightAwareSearchRows,
     flightAwareAlertCreationDisposition,
+    flightAwareAlertIDFromPayload,
     flightAwareWebhookTargetURL,
     flightAwareOperationalBounds,
     flightAwareHistoryBounds,
@@ -5971,6 +6086,8 @@ module.exports = {
     notificationEventsFor,
     notificationPayloadFor,
     ordinalNumber,
+    shouldRefreshTrackedRecordFromWebhook,
+    webhookStatusFromEvent,
     ownerNotificationPreferenceConditionForEventType,
     reconcileOperationalStatus,
     scoreCandidate,
