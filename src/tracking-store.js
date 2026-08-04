@@ -452,6 +452,8 @@ function createTrackingStore({
       status: trackedStatusFromSessionStatus(row.session_status),
       terminal: null,
       gate: null,
+      baggageBelt: row.baggage_claim || null,
+      baggageClaim: row.baggage_claim || null,
       delayMinutes: null,
       inboundFlight: null,
       recentHistory: [],
@@ -467,6 +469,16 @@ function createTrackingStore({
     if (canonical && typeof canonical === "object") {
       return {
         ...canonical,
+        baggageBelt:
+          canonical.baggageBelt ||
+          canonical.baggageClaim ||
+          row.baggage_claim ||
+          null,
+        baggageClaim:
+          canonical.baggageClaim ||
+          canonical.baggageBelt ||
+          row.baggage_claim ||
+          null,
         provider: canonical.provider || row.snapshot_provider || row.provider || providerName,
         lastUpdated:
           canonical.lastUpdated ||

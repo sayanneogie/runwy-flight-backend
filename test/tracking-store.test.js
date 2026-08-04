@@ -199,6 +199,41 @@ test("terminal snapshots copy the longer actual route into matching archived fli
   assert.equal(archiveUpdate.params[8], 5);
 });
 
+test("tracked detail snapshots expose baggage claims as baggage belts", async () => {
+  const { store } = makeStore({
+    queryHandler(sql) {
+      if (!sql.includes("from public.tracking_sessions ts")) return { rows: [] };
+      return {
+        rows: [
+          {
+            id: "11111111-1111-1111-1111-111111111111",
+            owner_user_id: "22222222-2222-2222-2222-222222222222",
+            session_status: "active",
+            provider: "flightaware",
+            flight_number: "EK379",
+            origin_iata: "HKT",
+            destination_iata: "DXB",
+            travel_date: "2026-08-04",
+            baggage_claim: "7",
+            canonical_snapshot_json: {
+              flightNumber: "EK379",
+              baggageClaim: "7",
+              status: "enroute",
+            },
+          },
+        ],
+      };
+    },
+  });
+
+  const tracked = await store.fetchTrackingRowByID(
+    "11111111-1111-1111-1111-111111111111"
+  );
+
+  assert.equal(tracked.normalized.baggageBelt, "7");
+  assert.equal(tracked.normalized.baggageClaim, "7");
+});
+
 test("far future flights sleep until the pre-departure polling window", async () => {
   const now = Date.now();
   const departure = new Date(now + 15 * 24 * 60 * 60_000).toISOString();
