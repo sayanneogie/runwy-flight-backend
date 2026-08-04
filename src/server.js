@@ -3644,6 +3644,29 @@ function displayFlightCode(normalized) {
   return number || "Flight";
 }
 
+function readableFlightCode(normalized) {
+  const airline = normalizeFlightCode(normalized?.airlineCode);
+  const combined = displayFlightCode(normalized);
+  if (!airline || combined === "Flight") return combined;
+
+  const suffix = combined.startsWith(airline)
+    ? combined.slice(airline.length)
+    : normalizeFlightCode(normalized?.flightNumber);
+  return suffix ? `${airline} ${suffix}` : airline;
+}
+
+function firstNameForNotification(value) {
+  return String(value || "").trim().split(/\s+/)[0] || null;
+}
+
+function routeCitiesForNotification(normalized) {
+  const departureCode = normalizeAirportCode(normalized?.departureAirportIata);
+  const arrivalCode = normalizeAirportCode(normalized?.arrivalAirportIata);
+  const departure = normalized?.departureCity || airportForNotification(departureCode)?.city || departureCode;
+  const arrival = normalized?.arrivalCity || airportForNotification(arrivalCode)?.city || arrivalCode;
+  return departure && arrival ? `${departure} to ${arrival}` : null;
+}
+
 function airportForNotification(iata) {
   const code = normalizeAirportCode(iata);
   if (!code) return null;
@@ -3925,11 +3948,21 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
   if (alerts.baggageBeltAssignedNow) {
     const belt = `${normalized?.baggageClaim || normalized?.baggageBelt || ""}`.trim();
     if (belt) {
+      const flightCode = readableFlightCode(normalized);
+      const routeDescription = routeCitiesForNotification(normalized);
+      const travelerName = firstNameForNotification(context.travelerName);
+      const luggageOwner = context.isOwner === false && travelerName
+        ? `${travelerName}'s luggage`
+        : "Your luggage";
+      const flightDescription = [
+        flightCode !== "Flight" ? `flight ${flightCode}` : null,
+        routeDescription,
+      ].filter(Boolean).join(", ");
       return {
         aps: {
           alert: {
             title: "Baggage Claim Assigned",
-            body: `Belt ${belt}`,
+            body: `${luggageOwner}${flightDescription ? ` for ${flightDescription}` : ""} will be on belt ${belt}.`,
           },
           sound: "default",
           "thread-id": `runwy.flight.${flightId}`,
@@ -4070,14 +4103,20 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
   const result = await pool.query(
     `
     with base as (
-      select ts.id as tracking_session_id, ts.owner_user_id
+      select
+        ts.id as tracking_session_id,
+        ts.owner_user_id,
+        p.display_name as owner_display_name
       from public.tracking_sessions ts
+      left join public.profiles p
+        on p.user_id = ts.owner_user_id
       where ts.id = $1::uuid
     ),
     owner_recipient as (
       select
         base.owner_user_id as user_id,
-        null::uuid as friend_relationship_id
+        null::uuid as friend_relationship_id,
+        base.owner_display_name
       from base
       left join public.user_flights uf
         on uf.user_id = base.owner_user_id
@@ -4089,7 +4128,8 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
     circle_recipients as (
       select
         fp.viewer_user_id as user_id,
-        fp.relationship_id as friend_relationship_id
+        fp.relationship_id as friend_relationship_id,
+        base.owner_display_name
       from base
       join public.friend_permissions fp
         on fp.owner_user_id = base.owner_user_id
@@ -4108,6 +4148,7 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
     select
       recipients.user_id::text as user_id,
       recipients.friend_relationship_id::text as friend_relationship_id,
+      recipients.owner_display_name,
       pd.apns_token
     from recipients
     left join public.push_devices pd
@@ -4120,6 +4161,7 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
   return result.rows.map((row) => ({
     userId: row.user_id,
     friendRelationshipId: row.friend_relationship_id || null,
+    ownerDisplayName: row.owner_display_name || null,
     apnsToken: row.apns_token || null,
   }));
 }
@@ -4337,6 +4379,7 @@ function groupedNotificationRecipients(recipients) {
     const current = groups.get(key) || {
       userId: recipient.userId,
       friendRelationshipId: recipient.friendRelationshipId || null,
+      ownerDisplayName: recipient.ownerDisplayName || null,
       tokens: [],
     };
     if (recipient.apnsToken) {
@@ -4491,7 +4534,11 @@ async function dispatchFlightStatusNotifications(flightId, normalized) {
               normalizeAirportCode(notificationNormalized?.arrivalAirportIata)
             )
           : null;
-      const event = notificationEventsFor(notificationNormalized, flightId, { visitOrdinal })
+      const event = notificationEventsFor(notificationNormalized, flightId, {
+        visitOrdinal,
+        isOwner,
+        travelerName: recipient.ownerDisplayName,
+      })
         .find((candidate) => candidate.type === eventType);
       if (!event) continue;
 

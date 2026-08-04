@@ -439,6 +439,8 @@ test("landing and baggage assignment create separate notification events", () =>
       airlineCode: "6E",
       departureAirportIata: "DEL",
       arrivalAirportIata: "BLR",
+      departureCity: "Delhi",
+      arrivalCity: "Bengaluru",
       status: "landed",
       baggageClaim: "3",
       alerts: {
@@ -455,7 +457,7 @@ test("landing and baggage assignment create separate notification events", () =>
     ["flight_arrived", "flight_baggage_claim"]
   );
   assert.equal(events[1].title, "Baggage Claim Assigned");
-  assert.equal(events[1].body, "Belt 3");
+  assert.equal(events[1].body, "Your luggage for flight 6E 123, Delhi to Bengaluru will be on belt 3.");
   assert.equal(
     __test__.notificationDedupeKey("flight-id", events[0]),
     "arrival-welcome:flight-id"
@@ -464,6 +466,26 @@ test("landing and baggage assignment create separate notification events", () =>
     __test__.notificationDedupeKey("flight-id", events[1]),
     "baggage:flight-id:3"
   );
+});
+
+test("circle baggage notifications identify the traveler and flight", () => {
+  const events = __test__.notificationEventsFor(
+    {
+      flightNumber: "AI101",
+      airlineCode: "AI",
+      departureAirportIata: "FCO",
+      arrivalAirportIata: "JFK",
+      departureCity: "Rome",
+      arrivalCity: "New York",
+      baggageClaim: "6",
+      alerts: { baggageBeltAssignedNow: true },
+    },
+    "flight-id",
+    { isOwner: false, travelerName: "Maya Patel" }
+  );
+
+  assert.equal(events[0].title, "Baggage Claim Assigned");
+  assert.equal(events[0].body, "Maya's luggage for flight AI 101, Rome to New York will be on belt 6.");
 });
 
 test("arrival visit counts use readable ordinals", () => {
