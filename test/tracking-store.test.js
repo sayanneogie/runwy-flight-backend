@@ -39,6 +39,7 @@ function makeStore(options = {}) {
       return String(normalized?.flightNumber || "");
     },
     enforceMapSizeLimit() {},
+    buildArchivedRoutePolyline: options.buildArchivedRoutePolyline,
   });
 
   return { store, queries };
@@ -128,8 +129,38 @@ test("terminal snapshots expose actual breadcrumbs for archive persistence", () 
   );
 });
 
+test("terminal archive routes can close incomplete breadcrumbs at airport endpoints", () => {
+  const points = [
+    { latitude: 41.8, longitude: 12.2 },
+    { latitude: 50.0, longitude: -30.0 },
+    { latitude: 42.48, longitude: -71.08 },
+  ];
+  const completed = [
+    { latitude: 41.8003, longitude: 12.2389 },
+    ...points,
+    { latitude: 40.6413, longitude: -73.7781 },
+  ];
+
+  assert.deepEqual(
+    archivedRoutePointsForNormalized(
+      makeNormalized({ status: "arrived_at_gate", trackPoints: points }),
+      () => completed
+    ),
+    completed
+  );
+});
+
 test("terminal snapshots copy the longer actual route into matching archived flights", async () => {
-  const { store, queries } = makeStore();
+  const completedPoints = [
+    { latitude: 41.8003, longitude: 12.2389 },
+    { latitude: 41.8, longitude: 12.2 },
+    { latitude: 50.0, longitude: -30.0 },
+    { latitude: 40.6, longitude: -73.8 },
+    { latitude: 40.6413, longitude: -73.7781 },
+  ];
+  const { store, queries } = makeStore({
+    buildArchivedRoutePolyline: () => completedPoints,
+  });
   const departure = "2026-08-04T04:10:00.000Z";
   const points = [
     { latitude: 41.8, longitude: 12.2 },
@@ -163,9 +194,9 @@ test("terminal snapshots copy the longer actual route into matching archived fli
     sql.includes("route_polyline = $2::jsonb")
   );
   assert.ok(archiveUpdate, "expected a terminal route archive update");
-  assert.deepEqual(JSON.parse(archiveUpdate.params[1]), points);
+  assert.deepEqual(JSON.parse(archiveUpdate.params[1]), completedPoints);
   assert.equal(archiveUpdate.params[2], "AI101");
-  assert.equal(archiveUpdate.params[8], 3);
+  assert.equal(archiveUpdate.params[8], 5);
 });
 
 test("far future flights sleep until the pre-departure polling window", async () => {

@@ -3017,6 +3017,15 @@ const trackingStore = createTrackingStore({
   parseAirlineCode,
   displayFlightCode,
   enforceMapSizeLimit,
+  buildArchivedRoutePolyline: (normalized) =>
+    routePolylineFromTrackTrail({
+      originIata: normalized?.departureAirportIata,
+      destinationIata: normalized?.arrivalAirportIata,
+      trackTrail: {
+        trackPoints: normalized?.trackPoints || [],
+        livePosition: null,
+      },
+    }),
 });
 
 const {

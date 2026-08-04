@@ -11,7 +11,7 @@ const POST_ARRIVAL_TRACKING_GRACE_MS =
 const ERRORED_RETRY_INTERVAL_MINUTES = 60;
 const EXPIRED_TRACKING_WINDOW_GRACE_MS = 12 * 60 * 60_000;
 
-function archivedRoutePointsForNormalized(normalized) {
+function archivedRoutePointsForNormalized(normalized, buildArchivedRoutePolyline = null) {
   const status = String(normalized?.status || "").trim().toLowerCase();
   if (!["landed", "arrived", "arrived_at_gate"].includes(status)) {
     return null;
@@ -23,7 +23,16 @@ function archivedRoutePointsForNormalized(normalized) {
       )
     : [];
 
-  return points.length >= 3 ? points : null;
+  if (points.length < 3) return null;
+
+  if (typeof buildArchivedRoutePolyline === "function") {
+    const completedPoints = buildArchivedRoutePolyline(normalized);
+    if (Array.isArray(completedPoints) && completedPoints.length >= 3) {
+      return completedPoints;
+    }
+  }
+
+  return points;
 }
 
 function createTrackingStore({
@@ -40,6 +49,7 @@ function createTrackingStore({
   parseAirlineCode,
   displayFlightCode,
   enforceMapSizeLimit,
+  buildArchivedRoutePolyline,
 }) {
   function usesDatabase() {
     return Boolean(pool);
@@ -1062,7 +1072,10 @@ function createTrackingStore({
       ]
     );
 
-    const archivedRoutePoints = archivedRoutePointsForNormalized(normalized);
+    const archivedRoutePoints = archivedRoutePointsForNormalized(
+      normalized,
+      buildArchivedRoutePolyline
+    );
     if (archivedRoutePoints && scheduledDeparture) {
       await pool.query(
         `
