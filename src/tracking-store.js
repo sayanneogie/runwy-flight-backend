@@ -11,6 +11,21 @@ const POST_ARRIVAL_TRACKING_GRACE_MS =
 const ERRORED_RETRY_INTERVAL_MINUTES = 60;
 const EXPIRED_TRACKING_WINDOW_GRACE_MS = 12 * 60 * 60_000;
 
+function archivedRoutePointsForNormalized(normalized) {
+  const status = String(normalized?.status || "").trim().toLowerCase();
+  if (!["landed", "arrived", "arrived_at_gate"].includes(status)) {
+    return null;
+  }
+
+  const points = Array.isArray(normalized?.trackPoints)
+    ? normalized.trackPoints.filter((point) =>
+        Number.isFinite(Number(point?.latitude)) && Number.isFinite(Number(point?.longitude))
+      )
+    : [];
+
+  return points.length >= 3 ? points : null;
+}
+
 function createTrackingStore({
   pool,
   memoryTrackedFlights,
@@ -1046,6 +1061,46 @@ function createTrackingStore({
         normalized.lastUpdated || new Date().toISOString(),
       ]
     );
+
+    const archivedRoutePoints = archivedRoutePointsForNormalized(normalized);
+    if (archivedRoutePoints && scheduledDeparture) {
+      await pool.query(
+        `
+        update public.user_flights
+        set
+          route_polyline = $2::jsonb,
+          provider_name = coalesce(provider_name, $7),
+          provider_flight_id = coalesce(provider_flight_id, $8),
+          updated_at = now()
+        where user_id = $1::uuid
+          and deleted_at is null
+          and lifecycle_state in ('landed', 'archived')
+          and upper(regexp_replace(coalesce(display_flight_number, ''), '[^A-Z0-9]', '', 'g')) =
+              upper(regexp_replace($3, '[^A-Z0-9]', '', 'g'))
+          and upper(coalesce(origin_iata, '')) = upper($4)
+          and upper(coalesce(destination_iata, '')) = upper($5)
+          and abs(extract(epoch from (scheduled_departure - $6::timestamptz))) <= 64800
+          and coalesce(
+            case
+              when jsonb_typeof(route_polyline) = 'array' then jsonb_array_length(route_polyline)
+              else 0
+            end,
+            0
+          ) < $9
+        `,
+        [
+          userId,
+          JSON.stringify(archivedRoutePoints),
+          displayCode,
+          normalizeAirportCode(normalized.departureAirportIata || query.departureIata),
+          normalizeAirportCode(normalized.arrivalAirportIata || query.arrivalIata),
+          scheduledDeparture,
+          provider,
+          providerFlightId,
+          archivedRoutePoints.length,
+        ]
+      );
+    }
   }
 
   async function createOrReuseTrackingSession({
@@ -1343,5 +1398,6 @@ function createTrackingStore({
 }
 
 module.exports = {
+  archivedRoutePointsForNormalized,
   createTrackingStore,
 };

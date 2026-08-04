@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { createTrackingStore } = require("../src/tracking-store");
+const { archivedRoutePointsForNormalized, createTrackingStore } = require("../src/tracking-store");
 
 function makeStore(options = {}) {
   const queries = [];
@@ -106,6 +106,67 @@ async function persistSnapshot(normalized, query) {
   });
   return trackingSessionUpdateParams(queries);
 }
+
+test("terminal snapshots expose actual breadcrumbs for archive persistence", () => {
+  const points = [
+    { latitude: 41.8, longitude: 12.2 },
+    { latitude: 50.0, longitude: -30.0 },
+    { latitude: 40.6, longitude: -73.8 },
+  ];
+
+  assert.deepEqual(
+    archivedRoutePointsForNormalized(makeNormalized({ status: "arrived_at_gate", trackPoints: points })),
+    points
+  );
+  assert.equal(
+    archivedRoutePointsForNormalized(makeNormalized({ status: "enroute", trackPoints: points })),
+    null
+  );
+  assert.equal(
+    archivedRoutePointsForNormalized(makeNormalized({ status: "landed", trackPoints: points.slice(0, 2) })),
+    null
+  );
+});
+
+test("terminal snapshots copy the longer actual route into matching archived flights", async () => {
+  const { store, queries } = makeStore();
+  const departure = "2026-08-04T04:10:00.000Z";
+  const points = [
+    { latitude: 41.8, longitude: 12.2 },
+    { latitude: 50.0, longitude: -30.0 },
+    { latitude: 40.6, longitude: -73.8 },
+  ];
+
+  await store.persistTrackingSnapshot({
+    flightId: "11111111-1111-1111-1111-111111111111",
+    userId: "22222222-2222-2222-2222-222222222222",
+    query: {
+      flightNumber: "AI101",
+      date: "2026-08-04",
+      departureIata: "FCO",
+      arrivalIata: "JFK",
+    },
+    normalized: makeNormalized({
+      flightNumber: "AI101",
+      departureAirportIata: "FCO",
+      arrivalAirportIata: "JFK",
+      departureTimes: { scheduled: departure },
+      status: "arrived_at_gate",
+      trackPoints: points,
+    }),
+    provider: "flightaware",
+    providerFlightId: "AIC101-example",
+    rawProviderPayload: {},
+  });
+
+  const archiveUpdate = queries.find(({ sql }) =>
+    sql.includes("route_polyline = $2::jsonb")
+  );
+  assert.ok(archiveUpdate, "expected a terminal route archive update");
+  assert.deepEqual(JSON.parse(archiveUpdate.params[1]), points);
+  assert.equal(archiveUpdate.params[2], "AI101");
+  assert.equal(archiveUpdate.params[8], 3);
+});
 
 test("far future flights sleep until the pre-departure polling window", async () => {
   const now = Date.now();
