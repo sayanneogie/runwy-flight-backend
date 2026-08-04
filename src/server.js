@@ -2344,7 +2344,7 @@ function mergeFlightAwareTrackTrailIntoNormalized(normalized, { trackPoints, liv
   });
 }
 
-async function fetchFlightAwareTrackTrail(providerFlightId) {
+async function fetchFlightAwareTrackTrail(providerFlightId, options = {}) {
   if (!PROVIDER_CALLS_ENABLED) {
     return { trackPoints: [], livePosition: null };
   }
@@ -2356,8 +2356,9 @@ async function fetchFlightAwareTrackTrail(providerFlightId) {
 
   const cacheKey = makeProviderTrackKey("flightaware", normalizedFlightId);
   const now = Date.now();
+  const forceRefresh = options.forceRefresh === true;
   const cached = providerCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
+  if (!forceRefresh && cached && cached.expiresAt > now) {
     return cached.data;
   }
 
@@ -2484,17 +2485,17 @@ function routePolylineFromTrackTrail({ originIata, destinationIata, trackTrail }
   return polyline.length >= 3 ? polyline : [];
 }
 
-async function fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId) {
-  const trackTrail = await fetchFlightAwareTrackTrail(providerFlightId);
+async function fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId, options = {}) {
+  const trackTrail = await fetchFlightAwareTrackTrail(providerFlightId, options);
   if ((trackTrail?.trackPoints || []).length > 0 || trackTrail?.livePosition) {
     return coalesceFlightAwareTrackTrail(trackTrail);
   }
 
-  const livePosition = await fetchFlightAwareLivePosition(providerFlightId);
+  const livePosition = await fetchFlightAwareLivePosition(providerFlightId, options);
   return coalesceFlightAwareTrackTrail(trackTrail, livePosition);
 }
 
-async function fetchFlightAwareLivePosition(providerFlightId) {
+async function fetchFlightAwareLivePosition(providerFlightId, options = {}) {
   if (!PROVIDER_CALLS_ENABLED) {
     return null;
   }
@@ -2504,8 +2505,9 @@ async function fetchFlightAwareLivePosition(providerFlightId) {
 
   const cacheKey = makeProviderPositionKey("flightaware", normalizedFlightId);
   const now = Date.now();
+  const forceRefresh = options.forceRefresh === true;
   const cached = providerCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
+  if (!forceRefresh && cached && cached.expiresAt > now) {
     return cached.data;
   }
 
@@ -3038,7 +3040,7 @@ const {
   usesDatabase,
 } = trackingStore;
 
-async function enrichNormalizedWithLivePosition(normalized, providerName, rawRecord) {
+async function enrichNormalizedWithLivePosition(normalized, providerName, rawRecord, options = {}) {
   if (providerName !== "flightaware" || !isTrackableLiveStatus(normalized?.status)) {
     return normalized;
   }
@@ -3049,7 +3051,7 @@ async function enrichNormalizedWithLivePosition(normalized, providerName, rawRec
   }
 
   try {
-    const livePosition = await fetchFlightAwareLivePosition(providerFlightId);
+    const livePosition = await fetchFlightAwareLivePosition(providerFlightId, options);
     if (!livePosition) {
       return normalized;
     }
@@ -4593,7 +4595,9 @@ async function refreshTrackedFlightRecord(trackedRecord, options = {}) {
       (!normalized.livePosition && (!Array.isArray(normalized.trackPoints) || normalized.trackPoints.length === 0))
     )
   ) {
-    normalized = await enrichNormalizedWithLivePosition(normalized, provider.name, selected);
+    normalized = await enrichNormalizedWithLivePosition(normalized, provider.name, selected, {
+      forceRefresh: includeLivePosition,
+    });
   }
   normalized.lastUpdated = normalized.livePosition?.recordedAt || normalized.lastUpdated || new Date().toISOString();
 
@@ -5958,6 +5962,7 @@ mountSharedFlightRoutes(app, sharedFlightService);
 app.get("/v1/flights/:flightId", async (req, res) => {
   const flightId = req.params.flightId;
   const userId = String(req.auth?.userId || "").trim() || null;
+  const forceDetailRefresh = String(req.query?.refresh || "").toLowerCase() === "detail";
 
   if (!userId) {
     return res.status(401).json({ error: "Sign in is required" });
@@ -5971,6 +5976,15 @@ app.get("/v1/flights/:flightId", async (req, res) => {
       if (!shared?.flight) {
         return res.status(404).json({ error: "Unknown flightId" });
       }
+      if (forceDetailRefresh) {
+        await sharedFlightService.refreshFlightJob({
+          data: {
+            flight_key: shared.flight.flightKey,
+            flight_instance_id: flightId,
+            reason: "detail_open",
+          },
+        });
+      }
       const weatherAwareFlight = await sharedFlightService.flightWithWeatherInsight(flightId, { userId, cacheStatus: "detail_view" }) || shared.flight;
       return res.json({
         flightId,
@@ -5983,6 +5997,15 @@ app.get("/v1/flights/:flightId", async (req, res) => {
       const sharedRows = sharedFlightService ? await sharedFlightService.listUserFlights(userId) : [];
       const shared = sharedRows.find((item) => item.flight?.flightInstanceId === tracked.metadata.sharedFlightInstanceId);
       if (shared?.flight) {
+        if (forceDetailRefresh) {
+          await sharedFlightService.refreshFlightJob({
+            data: {
+              flight_key: shared.flight.flightKey,
+              flight_instance_id: tracked.metadata.sharedFlightInstanceId,
+              reason: "detail_open",
+            },
+          });
+        }
         const weatherAwareFlight = await sharedFlightService.flightWithWeatherInsight(tracked.metadata.sharedFlightInstanceId, { userId, cacheStatus: "detail_view" }) || shared.flight;
         return res.json({
           flightId,
@@ -5992,8 +6015,10 @@ app.get("/v1/flights/:flightId", async (req, res) => {
       }
     }
 
-    const shouldRefresh = isTrackedRecordRefreshDue(tracked);
-    const current = shouldRefresh ? await refreshTrackedFlightRecord(tracked) : tracked;
+    const shouldRefresh = forceDetailRefresh || isTrackedRecordRefreshDue(tracked);
+    const current = shouldRefresh
+      ? await refreshTrackedFlightRecord(tracked, { includeLivePosition: forceDetailRefresh })
+      : tracked;
 
     return res.json({
       flightId,
@@ -6152,7 +6177,10 @@ app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req,
   }
 
   try {
-    const trackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId);
+    const forceDetailRefresh = String(req.query?.refresh || "").toLowerCase() === "detail";
+    const trackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId, {
+      forceRefresh: forceDetailRefresh,
+    });
     return res.json({
       providerFlightId,
       trackPoints: Array.isArray(trackTrail.trackPoints) ? trackTrail.trackPoints : [],
