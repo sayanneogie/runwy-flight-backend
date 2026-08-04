@@ -73,6 +73,21 @@ test("normalizes FlightAware alert payloads into Runwy flight events", () => {
   assert.equal(normalized.destination, "DEL");
 });
 
+test("normalizes terse FlightAware ON and IN arrival event codes", () => {
+  for (const event of ["on", "in"]) {
+    const normalized = normalizeFlightAwareAlert({
+      event,
+      ident: "AI2814",
+      fa_flight_id: "AI2814-2026-05-09",
+      origin: "BLR",
+      destination: "DEL",
+      actual_in: "2026-05-09T19:30:00Z",
+    });
+
+    assert.equal(normalized.event_type, "flight_arrived");
+  }
+});
+
 test("impending departure remains preflight and does not masquerade as takeoff", () => {
   const normalized = normalizeFlightAwareAlert({
     event: "impending_departure",

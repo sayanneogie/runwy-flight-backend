@@ -144,6 +144,16 @@ function targetMatchesAlert(row, alert) {
 }
 
 function normalizeEventType(rawType, event) {
+  const exactType = String(rawType || "").trim().toLowerCase();
+
+  // AeroAPI alert callbacks use the terse OUT/OFF/ON/IN lifecycle codes in
+  // addition to descriptive names. Substring matching cannot recognize ON or
+  // IN reliably, so handle those codes before inspecting summaries.
+  if (["on", "landing", "landed", "arrival", "arrived"].includes(exactType)) return "flight_arrived";
+  if (["in", "inblock", "onblock", "arrived_at_gate"].includes(exactType)) return "flight_arrived";
+  if (["off", "takeoff", "departure", "departed", "airborne"].includes(exactType)) return "flight_departed";
+  if (["out", "offblock", "taxi", "taxiing"].includes(exactType)) return "flight_taxiing";
+
   const joined = `${rawType} ${event?.summary || ""} ${event?.description || ""}`.toLowerCase();
   if (joined.includes("cancel")) return "flight_cancelled";
   if (joined.includes("divert")) return "flight_diverted";
