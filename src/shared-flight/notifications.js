@@ -20,7 +20,9 @@ function notificationTitle(flight, event) {
   if (event.event_type === "TRIP_STARTING") return "Trip Starting Soon";
   if (event.event_type === "TAXI_IN") return "Taxiing In";
   if (event.event_type === "ARRIVED_AT_GATE") return "Arrived at Gate";
-  if (event.event_type === "BAGGAGE_BELT_ASSIGNED") return "Baggage Belt";
+  if (event.event_type === "BAGGAGE_BELT_ASSIGNED") {
+    return event.old_value?.baggageBelt ? "Baggage Belt Changed" : "Baggage Belt Assigned";
+  }
   if (event.event_type === "WEATHER_ADVISORY") return "Weather Update";
   if (event.event_type === "LANDED" || event.event_type === "ARRIVED") return "Flight Landed";
   if (event.event_type === "AIRBORNE" || event.event_type === "DEPARTED") return "Flight Took Off";
@@ -42,7 +44,13 @@ function notificationBody(flight, event) {
   }
   if (event.event_type === "TAXI_IN") return `${code} is taxiing to the gate.`;
   if (event.event_type === "ARRIVED_AT_GATE") return `${code} has arrived at the gate.`;
-  if (event.event_type === "BAGGAGE_BELT_ASSIGNED") return `${code} bags are expected at belt ${event.new_value?.baggageBelt}.`;
+  if (event.event_type === "BAGGAGE_BELT_ASSIGNED") {
+    const previousBelt = event.old_value?.baggageBelt;
+    const nextBelt = event.new_value?.baggageBelt;
+    return previousBelt
+      ? `${code} baggage claim changed from belt ${previousBelt} to belt ${nextBelt}.`
+      : `${code} bags are expected at belt ${nextBelt}.`;
+  }
   if (event.event_type === "WEATHER_ADVISORY") return event.summary || `${code} weather update is available.`;
   if (event.event_type === "LANDED" || event.event_type === "ARRIVED") return `${code} has landed in ${flight.destination_airport || "the destination"}.`;
   return event.summary || `${code} status changed.`;

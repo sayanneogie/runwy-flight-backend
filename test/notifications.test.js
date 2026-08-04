@@ -477,6 +477,7 @@ test("circle baggage notifications identify the traveler and flight", () => {
       arrivalAirportIata: "JFK",
       departureCity: "Rome",
       arrivalCity: "New York",
+      status: "landed",
       baggageClaim: "6",
       alerts: { baggageBeltAssignedNow: true },
     },
@@ -486,6 +487,52 @@ test("circle baggage notifications identify the traveler and flight", () => {
 
   assert.equal(events[0].title, "Baggage Claim Assigned");
   assert.equal(events[0].body, "Maya's luggage for flight AI 101, Rome to New York will be on belt 6.");
+});
+
+test("unstable baggage assignments are silent until the final arrival hour", () => {
+  const now = Date.now();
+  const normalized = {
+    flightNumber: "EK379",
+    airlineCode: "EK",
+    departureCity: "Phuket",
+    arrivalCity: "Dubai",
+    status: "enroute",
+    baggageClaim: "7",
+    arrivalTimes: {
+      estimated: new Date(now + 2 * 60 * 60_000).toISOString(),
+    },
+    alerts: { baggageBeltAssignedNow: true },
+  };
+
+  assert.deepEqual(__test__.notificationEventsFor(normalized, "flight-id"), []);
+
+  normalized.arrivalTimes.estimated = new Date(now + 45 * 60_000).toISOString();
+  const [event] = __test__.notificationEventsFor(normalized, "flight-id");
+  assert.equal(event.type, "flight_baggage_claim");
+  assert.equal(event.body, "Your luggage for flight EK 379, Phuket to Dubai will be on belt 7.");
+});
+
+test("reliable baggage reassignments name both the previous and new belt", () => {
+  const [event] = __test__.notificationEventsFor(
+    {
+      flightNumber: "EK379",
+      airlineCode: "EK",
+      departureCity: "Phuket",
+      arrivalCity: "Dubai",
+      status: "landed",
+      baggageClaim: "12",
+      alerts: { baggageBeltAssignedNow: true },
+    },
+    "flight-id",
+    { previousNotifiedBaggageBelt: "7" }
+  );
+
+  assert.equal(event.title, "Baggage Claim Changed");
+  assert.equal(
+    event.body,
+    "Your luggage for flight EK 379, Phuket to Dubai changed from belt 7 to belt 12."
+  );
+  assert.equal(event.payload.runwy.previousBaggageBelt, "7");
 });
 
 test("arrival visit counts use readable ordinals", () => {

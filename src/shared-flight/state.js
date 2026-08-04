@@ -416,6 +416,7 @@ function compareFlightState(oldState, newState, nowMs = Date.now()) {
   const confidence = newState?.data_confidence || newState?.dataConfidence || "medium";
   const departureAt = new Date(newState?.scheduled_departure_at || newState?.scheduledDepartureAt || 0).getTime();
   const within24h = Number.isFinite(departureAt) && departureAt - nowMs <= 24 * 60 * 60_000;
+  const reliableBaggageWindow = isReliableBaggageNotificationWindow(newState, nowMs);
   const push = (event_type, event_severity, old_value, new_value, summary, notification_required = false) => {
     events.push({ event_type, event_severity, old_value, new_value, summary, notification_required, confidence });
   };
@@ -464,11 +465,54 @@ function compareFlightState(oldState, newState, nowMs = Date.now()) {
   if ((oldState.terminal || null) !== (newState.terminal || null) && newState.terminal) {
     push("TERMINAL_CHANGED", "medium", { terminal: oldState.terminal || null }, { terminal: newState.terminal }, `Terminal changed from ${oldState.terminal || "unknown"} to ${newState.terminal}`, within24h);
   }
-  if (!oldState.baggage_belt && newState.baggage_belt) {
-    push("BAGGAGE_BELT_ASSIGNED", "low", { baggageBelt: null }, { baggageBelt: newState.baggage_belt }, `Baggage belt assigned: ${newState.baggage_belt}`, true);
+  const oldBaggageBelt = String(oldState.baggage_belt || "").trim();
+  const newBaggageBelt = String(newState.baggage_belt || "").trim();
+  const enteredTerminalArrivalState =
+    ["taxi_in", "landed", "arrived", "arrived_at_gate"].includes(newStatus) &&
+    !["taxi_in", "landed", "arrived", "arrived_at_gate"].includes(oldStatus);
+
+  if (newBaggageBelt && oldBaggageBelt !== newBaggageBelt) {
+    const changed = Boolean(oldBaggageBelt);
+    push(
+      "BAGGAGE_BELT_ASSIGNED",
+      "low",
+      { baggageBelt: oldBaggageBelt || null },
+      { baggageBelt: newBaggageBelt },
+      changed
+        ? `Baggage belt changed from ${oldBaggageBelt} to ${newBaggageBelt}`
+        : `Baggage belt assigned: ${newBaggageBelt}`,
+      reliableBaggageWindow
+    );
+  } else if (newBaggageBelt && enteredTerminalArrivalState) {
+    push(
+      "BAGGAGE_BELT_ASSIGNED",
+      "low",
+      { baggageBelt: null },
+      { baggageBelt: newBaggageBelt },
+      `Baggage belt assigned: ${newBaggageBelt}`,
+      true
+    );
   }
 
   return events;
+}
+
+function isReliableBaggageNotificationWindow(flight, nowMs = Date.now()) {
+  const status = String(flight?.status || "").trim().toLowerCase();
+  if (["taxi_in", "landed", "arrived", "arrived_at_gate"].includes(status)) {
+    return true;
+  }
+
+  const arrivalAt =
+    flight?.actual_arrival_at ||
+    flight?.actualArrivalAt ||
+    flight?.estimated_arrival_at ||
+    flight?.estimatedArrivalAt ||
+    flight?.scheduled_arrival_at ||
+    flight?.scheduledArrivalAt ||
+    null;
+  const arrivalMs = arrivalAt ? new Date(arrivalAt).getTime() : NaN;
+  return Number.isFinite(arrivalMs) && arrivalMs - nowMs <= 60 * 60_000;
 }
 
 module.exports = {

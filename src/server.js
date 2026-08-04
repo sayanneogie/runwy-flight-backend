@@ -3957,6 +3957,8 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
   if (alerts.baggageBeltAssignedNow) {
     const belt = `${normalized?.baggageClaim || normalized?.baggageBelt || ""}`.trim();
     if (belt) {
+      const previousNotifiedBelt = `${context.previousNotifiedBaggageBelt || ""}`.trim();
+      const isReassignment = Boolean(previousNotifiedBelt) && previousNotifiedBelt !== belt;
       const flightCode = readableFlightCode(normalized);
       const routeDescription = routeCitiesForNotification(normalized);
       const travelerName = firstNameForNotification(context.travelerName);
@@ -3970,8 +3972,10 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
       return {
         aps: {
           alert: {
-            title: "Baggage Claim Assigned",
-            body: `${luggageOwner}${flightDescription ? ` for ${flightDescription}` : ""} will be on belt ${belt}.`,
+            title: isReassignment ? "Baggage Claim Changed" : "Baggage Claim Assigned",
+            body: isReassignment
+              ? `${luggageOwner}${flightDescription ? ` for ${flightDescription}` : ""} changed from belt ${previousNotifiedBelt} to belt ${belt}.`
+              : `${luggageOwner}${flightDescription ? ` for ${flightDescription}` : ""} will be on belt ${belt}.`,
           },
           sound: "default",
           "thread-id": `runwy.flight.${flightId}`,
@@ -3984,6 +3988,7 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
           flightId,
           status: normalized.status || null,
           baggageBelt: belt,
+          previousBaggageBelt: isReassignment ? previousNotifiedBelt : null,
           route,
         },
       };
@@ -4048,9 +4053,12 @@ function notificationEventsFor(normalized, flightId, context = {}) {
     "taxiingNow",
     "delayedNow",
     "gateChangedNow",
-    "baggageBeltAssignedNow",
     "inboundArrivedNow",
   ].filter((flag) => alerts[flag] === true);
+
+  if (shouldOfferReliableBaggageNotification(normalized)) {
+    activeFlags.push("baggageBeltAssignedNow");
+  }
 
   return activeFlags
     .filter((flag) => !(alerts.arrivedNow && ["taxiingNow", "gateChangedNow"].includes(flag)))
@@ -4065,6 +4073,36 @@ function notificationEventsFor(normalized, flightId, context = {}) {
       )
     )
     .filter(Boolean);
+}
+
+const BAGGAGE_NOTIFICATION_WINDOW_MS = 60 * 60_000;
+
+function baggageBeltForNotification(normalized) {
+  return `${normalized?.baggageClaim || normalized?.baggageBelt || ""}`.trim();
+}
+
+function shouldOfferReliableBaggageNotification(normalized, nowMs = Date.now()) {
+  if (!baggageBeltForNotification(normalized)) return false;
+
+  const status = String(normalized?.status || "").trim().toLowerCase();
+  if (["taxi_in", "landed", "arrived", "arrived_at_gate"].includes(status)) {
+    return true;
+  }
+
+  const arrivalCandidates = [
+    normalized?.arrivalTimes?.actual,
+    normalized?.landingTimes?.actual,
+    normalized?.arrivalTimes?.estimated,
+    normalized?.landingTimes?.estimated,
+    normalized?.arrivalTimes?.scheduled,
+    normalized?.landingTimes?.scheduled,
+  ];
+
+  const arrivalMs = arrivalCandidates
+    .map((value) => value ? new Date(value).getTime() : NaN)
+    .find(Number.isFinite);
+
+  return Number.isFinite(arrivalMs) && arrivalMs - nowMs <= BAGGAGE_NOTIFICATION_WINDOW_MS;
 }
 
 function ownerNotificationPreferenceConditionForEventType(eventType) {
@@ -4479,6 +4517,26 @@ async function updateNotificationRecordDelivery(id, deliveryStatus) {
   );
 }
 
+async function lastNotifiedBaggageBeltForRecipient(userId, flightId) {
+  if (!usesDatabase() || !userId || !flightId) return null;
+
+  const result = await pool.query(
+    `
+    select payload_json #>> '{runwy,baggageBelt}' as baggage_belt
+    from public.notifications
+    where user_id = $1::uuid
+      and tracking_session_id = $2::uuid
+      and notification_type = 'flight_baggage_claim'
+      and delivery_status in ('queued', 'sent')
+    order by created_at desc
+    limit 1
+    `,
+    [userId, flightId]
+  );
+
+  return String(result.rows[0]?.baggage_belt || "").trim() || null;
+}
+
 async function enrichNormalizedForNotification(flightId, normalized) {
   if (normalized?.weatherInsight?.available || !sharedFlightService) {
     return normalized;
@@ -4543,10 +4601,15 @@ async function dispatchFlightStatusNotifications(flightId, normalized) {
               normalizeAirportCode(notificationNormalized?.arrivalAirportIata)
             )
           : null;
+      const previousNotifiedBaggageBelt =
+        eventType === "flight_baggage_claim"
+          ? await lastNotifiedBaggageBeltForRecipient(recipient.userId, flightId)
+          : null;
       const event = notificationEventsFor(notificationNormalized, flightId, {
         visitOrdinal,
         isOwner,
         travelerName: recipient.ownerDisplayName,
+        previousNotifiedBaggageBelt,
       })
         .find((candidate) => candidate.type === eventType);
       if (!event) continue;
@@ -4690,7 +4753,8 @@ async function refreshTrackedFlightRecord(trackedRecord, options = {}) {
     normalized.alerts?.delayedNow ||
     normalized.alerts?.gateChangedNow ||
     normalized.alerts?.baggageBeltAssignedNow ||
-    normalized.alerts?.inboundArrivedNow
+    normalized.alerts?.inboundArrivedNow ||
+    shouldOfferReliableBaggageNotification(normalized)
   ) {
     await dispatchFlightStatusNotifications(trackedRecord.flightId, normalized);
   }
@@ -5126,7 +5190,8 @@ async function applyFirehoseMessageToTrackedRecord(trackedRecord, message) {
     normalized.alerts?.takeoffNow ||
     normalized.alerts?.delayedNow ||
     normalized.alerts?.gateChangedNow ||
-    normalized.alerts?.baggageBeltAssignedNow
+    normalized.alerts?.baggageBeltAssignedNow ||
+    shouldOfferReliableBaggageNotification(normalized)
   ) {
     await dispatchFlightStatusNotifications(trackedRecord.flightId, normalized);
   }

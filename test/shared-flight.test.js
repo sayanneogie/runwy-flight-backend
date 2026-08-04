@@ -234,6 +234,25 @@ test("taxi, takeoff, and baggage belt shared events are meaningful and notify", 
     Date.parse("2026-05-28T02:10:00.000Z")
   );
   assert.equal(baggage.find((event) => event.event_type === "BAGGAGE_BELT_ASSIGNED")?.notification_required, true);
+
+  const earlyBaggage = compareFlightState(
+    {
+      status: "enroute",
+      baggage_belt: null,
+      estimated_arrival_at: "2026-05-28T04:30:00.000Z",
+    },
+    {
+      status: "enroute",
+      baggage_belt: "11",
+      estimated_arrival_at: "2026-05-28T04:30:00.000Z",
+      data_confidence: "high",
+    },
+    Date.parse("2026-05-28T02:00:00.000Z")
+  );
+  assert.equal(
+    earlyBaggage.find((event) => event.event_type === "BAGGAGE_BELT_ASSIGNED")?.notification_required,
+    false
+  );
 });
 
 test("shared fanout mirrors takeoff landing and baggage events into app notifications", async () => {
