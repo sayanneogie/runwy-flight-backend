@@ -285,6 +285,15 @@ const limiter = rateLimit({
   },
 });
 
+const testNotificationLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 2,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `test-push:${String(req.auth?.userId || req.ip || "unknown").slice(0, 128)}`,
+  message: { error: "Please wait before scheduling another test notification." },
+});
+
 app.use("/v1", authenticateRequest);
 app.use("/v1", limiter);
 
@@ -4140,6 +4149,83 @@ async function sendApnsNotification(apnsToken, payload, environment = null) {
   return { ok: false, status: response.status, reason };
 }
 
+function testPushNotificationPayload() {
+  return {
+    aps: {
+      alert: {
+        title: "Runwy Test Notification",
+        body: "Closed-app notifications are working.",
+      },
+      sound: "default",
+    },
+    runwy: {
+      type: "push_test",
+    },
+  };
+}
+
+async function deliverTestPushJob(job) {
+  const userId = String(job?.data?.userId || "").trim();
+  const deviceId = String(job?.data?.deviceId || "").trim();
+  if (!userId || !deviceId || !usesDatabase()) {
+    return { sent: 0, failed: 0, skipped: true };
+  }
+
+  const result = await pool.query(
+    `
+    select
+      pd.apns_token,
+      coalesce(
+        dt.environment,
+        case when $3::boolean then 'sandbox' else 'production' end
+      ) as environment
+    from public.push_devices pd
+    left join public.device_tokens dt
+      on dt.user_id = pd.user_id
+     and dt.device_token = pd.apns_token
+     and dt.is_active = true
+    where pd.user_id = $1::uuid
+      and pd.device_id = $2
+      and pd.push_enabled = true
+    `,
+    [userId, deviceId, APNS_USE_SANDBOX]
+  );
+
+  const deliveries = await Promise.all(
+    result.rows.map(async (row) => {
+      const delivery = await sendApnsNotification(
+        row.apns_token,
+        testPushNotificationPayload(),
+        row.environment
+      );
+
+      if (
+        delivery?.ok !== true &&
+        ["BadDeviceToken", "Unregistered", "DeviceTokenNotForTopic"].includes(delivery?.reason)
+      ) {
+        await sharedFlightRepository.disableDeviceToken(row.apns_token);
+      }
+
+      return {
+        ok: delivery?.ok === true,
+        status: delivery?.status || null,
+        reason: delivery?.reason || null,
+        environment: row.environment,
+      };
+    })
+  );
+
+  const summary = {
+    sent: deliveries.filter((delivery) => delivery.ok).length,
+    failed: deliveries.filter((delivery) => !delivery.ok).length,
+    results: deliveries,
+  };
+  console.log("Runwy test push delivery completed", { userId, deviceId, ...summary });
+  return summary;
+}
+
+sharedFlightService.queue.process("testPushJob", deliverTestPushJob);
+
 function sendApnsHttp2Request(apnsToken, payload, environment = null) {
   return new Promise((resolve, reject) => {
     const client = http2.connect(`https://${apnsHost(environment)}`);
@@ -5460,6 +5546,71 @@ app.post("/v1/devices/push-token", async (req, res) => {
   }
 });
 
+app.post("/v1/devices/test-notification", testNotificationLimiter, async (req, res) => {
+  const userId = String(req.auth?.userId || "").trim() || null;
+  const deviceId = normalizedHeaderDeviceID(req);
+
+  if (!userId) {
+    return res.status(401).json({ error: "Sign in is required" });
+  }
+  if (!deviceId) {
+    return res.status(400).json({ error: "X-Device-Id header is required" });
+  }
+  if (!usesDatabase()) {
+    return res.status(503).json({ error: "Push notification persistence is not configured" });
+  }
+  if (!isApnsConfigured()) {
+    return res.status(503).json({
+      error: "APNs is not configured",
+      apns: apnsConfigStatus(),
+    });
+  }
+
+  try {
+    const tokenResult = await pool.query(
+      `
+      select 1
+      from public.push_devices
+      where user_id = $1::uuid
+        and device_id = $2
+        and push_enabled = true
+      limit 1
+      `,
+      [userId, deviceId]
+    );
+
+    if (!tokenResult.rowCount) {
+      return res.status(404).json({
+        error: "No active push token is registered for this device. Reopen Runwy and try again.",
+      });
+    }
+
+    const deliveryInSeconds = 15;
+    const job = await sharedFlightService.queue.add(
+      "testPushJob",
+      { userId, deviceId },
+      {
+        delayMs: deliveryInSeconds * 1_000,
+        dedupe: true,
+        dedupeKey: `test-push:${userId}:${deviceId}`,
+      }
+    );
+
+    return res.status(202).json({
+      queued: true,
+      deduped: job?.deduped === true,
+      deliveryInSeconds,
+    });
+  } catch (error) {
+    console.error("Unable to schedule Runwy test notification", {
+      userId,
+      deviceId,
+      error: error?.message || String(error),
+    });
+    return res.status(500).json({ error: "Unable to schedule test notification" });
+  }
+});
+
 app.post("/v1/devices/push-token/remove", async (req, res) => {
   const deviceId = normalizedHeaderDeviceID(req);
   const userId = String(req.auth?.userId || "").trim() || null;
@@ -6190,6 +6341,7 @@ module.exports = {
     notificationPayloadFor,
     ordinalNumber,
     shouldRefreshTrackedRecordFromWebhook,
+    testPushNotificationPayload,
     webhookStatusFromEvent,
     ownerNotificationPreferenceConditionForEventType,
     reconcileOperationalStatus,

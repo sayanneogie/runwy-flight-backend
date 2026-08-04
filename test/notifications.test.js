@@ -8,6 +8,21 @@ process.env.WEBHOOK_SHARED_SECRET = process.env.WEBHOOK_SHARED_SECRET || "test w
 
 const { __test__ } = require("../src/server.js");
 
+test("test push payload is a visible fixed APNs alert", () => {
+  assert.deepEqual(__test__.testPushNotificationPayload(), {
+    aps: {
+      alert: {
+        title: "Runwy Test Notification",
+        body: "Closed-app notifications are working.",
+      },
+      sound: "default",
+    },
+    runwy: {
+      type: "push_test",
+    },
+  });
+});
+
 test("initial landed snapshots emit arrived notifications when the landing is recent", () => {
   const now = new Date().toISOString();
 
