@@ -223,6 +223,8 @@ const FLIGHTAWARE_AUTO_ALERT_EVENTS = Object.freeze({
 });
 const FLIGHTAWARE_AUTO_ALERT_IMPENDING_DEPARTURE_MINUTES = Object.freeze([120, 60, 15]);
 const FLIGHTAWARE_AUTO_ALERT_IMPENDING_ARRIVAL_MINUTES = Object.freeze([30]);
+let flightAwareAlertEndpointReadyURL = null;
+let flightAwareAlertEndpointPromise = null;
 
 if (PROVIDER_CALLS_ENABLED && FLIGHT_DATA_PROVIDER === "aviationstack" && !AVIATIONSTACK_KEY) {
   console.error("Missing AVIATIONSTACK_KEY environment variable.");
@@ -561,6 +563,7 @@ function webhookSecretFromRequest(req) {
 }
 
 function inferredHTTPSBaseURLFromRequest(req) {
+  if (!req || typeof req.get !== "function") return "";
   const forwardedHost = String(req.get("X-Forwarded-Host") || req.get("Host") || "")
     .split(",")[0]
     .trim();
@@ -2983,6 +2986,9 @@ const sharedFlightService = createSharedFlightService({
     enrichNormalized: (normalized, record) =>
       enrichNormalizedWithLivePosition(normalized, providerAdapter().name, record),
     selectRecord: (records, query, normalizer) => bestMatch(records, query, normalizer),
+    ensureFlightAlert: FLIGHT_DATA_PROVIDER === "flightaware"
+      ? (flight, options) => ensureFlightAwareAlertForSharedFlight(flight, options)
+      : null,
   }),
 });
 
@@ -3118,6 +3124,52 @@ function flightAwareAlertContextForTrackedRecord(trackedRecord) {
     endDate,
     departureTime,
     timezoneOffsetMinutes,
+  };
+}
+
+function flightAwareAlertContextForSharedFlight(flight) {
+  if (!flight || String(flight.provider || "").toLowerCase() !== "flightaware") return null;
+  const status = String(flight.status || "").toLowerCase();
+  if (["landed", "arrived", "arrived_at_gate", "cancelled", "diverted"].includes(status)) return null;
+  const startDate = String(
+    flight.departure_date ||
+    flight.scheduled_departure_at ||
+    flight.estimated_departure_at ||
+    ""
+  ).slice(0, 10) || null;
+  const endDate = addDaysToISODate(startDate, 2);
+  const flightNumber = normalizeFlightCode(`${flight.airline_code || ""}${flight.flight_number || ""}`);
+  if (!flightNumber || !startDate || !endDate) return null;
+  return {
+    flightNumber,
+    providerFlightId: flight.provider_flight_id || null,
+    status,
+    departureIata: normalizeAirportCode(flight.origin_airport) || null,
+    arrivalIata: normalizeAirportCode(flight.destination_airport) || null,
+    startDate,
+    endDate,
+    departureTime: flight.actual_departure_at || flight.estimated_departure_at || flight.scheduled_departure_at || null,
+    timezoneOffsetMinutes: null,
+  };
+}
+
+async function ensureFlightAwareAlertForSharedFlight(flight) {
+  const targetUrl = flightAwareWebhookTargetURL(null);
+  if (!targetUrl) {
+    throw new Error("FlightAware webhook URL is unavailable; configure WEBHOOK_SHARED_SECRET and WEBHOOK_PUBLIC_BASE_URL");
+  }
+  const context = flightAwareAlertContextForSharedFlight(flight);
+  if (!context) return null;
+  const disposition = flightAwareAlertCreationDisposition(context);
+  if (!disposition.eligible) return null;
+  const creationContext = { ...context, windowStrategy: disposition.windowStrategy };
+  const created = await createFlightAwareAlert({ targetUrl, context: creationContext });
+  return {
+    providerAlertId: created.alertId,
+    status: "active",
+    createdAt: new Date().toISOString(),
+    expiresAt: `${context.endDate}T23:59:59.999Z`,
+    refreshPriority: "minimal",
   };
 }
 
@@ -3320,6 +3372,7 @@ async function verifyFlightAwareAlert({ targetUrl, context }) {
 }
 
 async function createFlightAwareAlert({ targetUrl, context }) {
+  await ensureFlightAwareAlertEndpoint(targetUrl);
   const payload = buildFlightAwareAlertPayload({ targetUrl, context });
 
   const response = await fetch(`${FLIGHTAWARE_BASE_URL}/alerts`, {
@@ -3353,6 +3406,37 @@ async function createFlightAwareAlert({ targetUrl, context }) {
   }
 
   return { alertId };
+}
+
+async function ensureFlightAwareAlertEndpoint(targetUrl) {
+  if (flightAwareAlertEndpointReadyURL === targetUrl) return;
+  if (flightAwareAlertEndpointPromise) {
+    await flightAwareAlertEndpointPromise;
+    if (flightAwareAlertEndpointReadyURL === targetUrl) return;
+  }
+
+  flightAwareAlertEndpointPromise = (async () => {
+    const response = await fetch(`${FLIGHTAWARE_BASE_URL}/alerts/endpoint`, {
+      method: "PUT",
+      headers: {
+        "x-apikey": FLIGHTAWARE_API_KEY,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ url: targetUrl }),
+    });
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw new Error(`FlightAware alert endpoint registration failed (${response.status}): ${responseText.slice(0, 200)}`);
+    }
+    flightAwareAlertEndpointReadyURL = targetUrl;
+  })();
+
+  try {
+    await flightAwareAlertEndpointPromise;
+  } finally {
+    flightAwareAlertEndpointPromise = null;
+  }
 }
 
 async function ensureFlightAwareAlertForTrackedSession(req, trackedRecord) {
@@ -6042,11 +6126,30 @@ async function startApiServer() {
 
   startTrackingPoller({ keepProcessAlive: false });
 
-  return app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(
       `Flight proxy running on port ${PORT} provider=${FLIGHT_DATA_PROVIDER} persistence=${usesDatabase() ? "supabase-postgres" : "memory"} poller=${isPollerRunning() ? "on" : "off"} backgroundTracking=${backgroundTrackingMode()} apnsConfigured=${isApnsConfigured() ? "yes" : "no"} apnsHost=${apnsHost()} apnsTopic=${APNS_BUNDLE_ID || "missing"}`
     );
   });
+
+  let lifecycleRecoveryRunning = false;
+  const runLifecycleRecovery = async (reason) => {
+    if (lifecycleRecoveryRunning) return;
+    lifecycleRecoveryRunning = true;
+    try {
+      const recovered = await sharedFlightService.recoverLifecycleCatchups(reason);
+      console.log(`Lifecycle recovery checked=${recovered.checked} scheduled=${recovered.scheduled}`);
+    } catch (error) {
+      console.warn(`Lifecycle recovery failed: ${error?.message || String(error)}`);
+    } finally {
+      lifecycleRecoveryRunning = false;
+    }
+  };
+  setImmediate(() => runLifecycleRecovery("api_startup"));
+  const lifecycleRecoveryTimer = setInterval(() => runLifecycleRecovery("periodic_recovery"), 5 * 60_000);
+  if (typeof lifecycleRecoveryTimer.unref === "function") lifecycleRecoveryTimer.unref();
+
+  return server;
 }
 
 if (require.main === module) {

@@ -58,6 +58,27 @@ test("normalizeRecordFromFlightAware derives delay from actual departure", () =>
   assert.equal(normalized.delayMinutes, 8);
 });
 
+test("normalizeRecordFromFlightAware reads FlightAware gate and terminal aliases", () => {
+  const normalized = __test__.normalizeRecordFromFlightAware({
+    ident_iata: "6E508",
+    scheduled_out: "2026-06-13T05:55:00Z",
+    scheduled_in: "2026-06-13T08:25:00Z",
+    origin_iata: "BLR",
+    destination_iata: "RDP",
+    gateOut: "17",
+    terminalOut: "T1",
+    gateIn: "--",
+    terminalIn: "MAIN",
+  });
+
+  assert.equal(normalized.departureGate, "17");
+  assert.equal(normalized.departureTerminal, "T1");
+  assert.equal(normalized.gate, "17");
+  assert.equal(normalized.terminal, "T1");
+  assert.equal(normalized.arrivalGate, "--");
+  assert.equal(normalized.arrivalTerminal, "MAIN");
+});
+
 test("reconcileOperationalStatus does not depart future scheduled flights with estimated takeoff", () => {
   const normalized = __test__.normalizeRecordFromFlightAware({
     ident: "AIC2418",

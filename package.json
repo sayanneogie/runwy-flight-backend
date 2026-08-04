@@ -1,8 +1,8 @@
 {
-  "name": "aviationstack-proxy",
+  "name": "flight-data-service",
   "version": "1.0.0",
   "private": true,
-  "description": "Backend proxy for Aviationstack with normalization, rate limiting, and caching.",
+  "description": "Runwy flight data service with provider normalization, tracking, alerts, and caching.",
   "main": "src/server.js",
   "type": "commonjs",
   "scripts": {
@@ -14,6 +14,8 @@
     "start:poller": "node src/flight-poller.js",
     "start:firehose": "node src/flight-firehose.js",
     "start:all": "ENABLE_TRACKING_POLLER=true node src/server.js",
+    "prepare:liveries": "node scripts/prepare-liveries.js",
+    "upload:liveries": "node scripts/upload-liveries.js",
     "dev": "npm run dev:api",
     "dev:api": "ENABLE_TRACKING_POLLER=false node --watch src/server.js",
     "dev:poller": "node --watch src/flight-poller.js",

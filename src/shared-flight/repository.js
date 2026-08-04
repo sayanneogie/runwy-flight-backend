@@ -2,6 +2,13 @@
 
 const { mapNormalizedToDb } = require("./state");
 
+const DEFAULT_ALERT_PREFERENCES = Object.freeze({
+  low: true,
+  medium: true,
+  high: true,
+  critical: true,
+});
+
 function createMemorySharedFlightRepository() {
   const flights = new Map();
   const aliases = new Map();
@@ -32,6 +39,18 @@ function createMemorySharedFlightRepository() {
           row.airline_code + row.flight_number === String(flightNumber).toUpperCase() &&
           (!departureDate || String(row.departure_date || "").slice(0, 10) === departureDate)
         );
+      });
+    },
+    async listLifecycleRecoveryCandidates() {
+      const now = Date.now();
+      const earliest = now - 24 * 60 * 60_000;
+      const latest = now + 72 * 60 * 60_000;
+      return [...flights.values()].filter((row) => {
+        if (row.is_final) return false;
+        const departure = Date.parse(row.estimated_departure_at || row.scheduled_departure_at || "");
+        const arrival = Date.parse(row.estimated_arrival_at || row.scheduled_arrival_at || "");
+        return (Number.isFinite(departure) && departure >= earliest && departure <= latest) ||
+          (Number.isFinite(arrival) && arrival >= earliest && arrival <= latest);
       });
     },
     async upsertFlightFromNormalized(normalized, params, freshUntil) {
@@ -109,14 +128,46 @@ function createMemorySharedFlightRepository() {
     },
     async upsertUserFlight(userId, flightInstanceId, input = {}) {
       const key = `${userId}:${flightInstanceId}`;
+      const flight = [...flights.values()].find((row) => row.id === flightInstanceId) || {};
+      const displayFlightNumber = [
+        flight.airline_code,
+        flight.flight_number,
+      ].filter(Boolean).join(" ").trim() || input.flightNumber || input.number || "Flight";
+      const scheduledDeparture =
+        flight.scheduled_departure_at ||
+        flight.estimated_departure_at ||
+        flight.actual_departure_at ||
+        input.scheduledDeparture ||
+        input.date ||
+        new Date().toISOString();
       const saved = {
         id: userFlights.get(key)?.id || nextId(),
         user_id: userId,
         flight_instance_id: flightInstanceId,
         notification_enabled: input.notificationEnabled ?? true,
-        alert_preferences: input.alertPreferences || { low: false, medium: true, high: true, critical: true },
+        alert_preferences: input.alertPreferences || DEFAULT_ALERT_PREFERENCES,
         user_label: input.userLabel || null,
         visibility: input.visibility || "private",
+        source_type: input.sourceType || "manual_search",
+        lifecycle_state: input.lifecycleState || "upcoming",
+        display_flight_number: displayFlightNumber,
+        marketing_airline_code: flight.airline_code || input.airline || null,
+        operating_airline_code: flight.airline_code || input.airline || null,
+        origin_iata: flight.origin_airport || input.origin || "UNKNOWN",
+        destination_iata: flight.destination_airport || input.destination || "UNKNOWN",
+        scheduled_departure: scheduledDeparture,
+        scheduled_arrival: flight.scheduled_arrival_at || null,
+        estimated_departure: flight.estimated_departure_at || null,
+        estimated_arrival: flight.estimated_arrival_at || null,
+        actual_departure: flight.actual_departure_at || null,
+        actual_arrival: flight.actual_arrival_at || null,
+        departure_terminal: flight.terminal || null,
+        departure_gate: flight.gate || null,
+        status: flight.status || null,
+        provider_name: flight.provider || null,
+        provider_flight_id: flight.provider_flight_id || null,
+        notifications_enabled: input.notificationEnabled ?? true,
+        alert_settings_json: input.alertPreferences || DEFAULT_ALERT_PREFERENCES,
         added_at: userFlights.get(key)?.added_at || new Date().toISOString(),
       };
       userFlights.set(key, saved);
@@ -133,6 +184,35 @@ function createMemorySharedFlightRepository() {
       if (!entry) return null;
       const [key, row] = entry;
       const saved = { ...row, ...patch };
+      userFlights.set(key, saved);
+      return saved;
+    },
+    async listUserFlightsByIds(userId, ids) {
+      const wanted = new Set((ids || []).map((id) => String(id)));
+      return [...userFlights.values()]
+        .filter((row) =>
+          row.user_id === userId &&
+          wanted.has(String(row.id)) &&
+          !row.deleted_at &&
+          row.lifecycle_state !== "deleted"
+        );
+    },
+    async linkUserFlightToInstance(userId, id, flightInstanceId, patch = {}) {
+      const entry = [...userFlights.entries()].find(([, row]) => row.user_id === userId && row.id === id);
+      if (!entry) return null;
+      const [key, row] = entry;
+      const flight = [...flights.values()].find((item) => item.id === flightInstanceId) || {};
+      const saved = {
+        ...row,
+        flight_instance_id: flightInstanceId,
+        notification_enabled: patch.notificationEnabled ?? row.notification_enabled ?? row.notifications_enabled ?? true,
+        notifications_enabled: patch.notificationEnabled ?? row.notifications_enabled ?? row.notification_enabled ?? true,
+        alert_preferences: patch.alertPreferences || row.alert_preferences || DEFAULT_ALERT_PREFERENCES,
+        status: flight.status || row.status || null,
+        provider_name: flight.provider || row.provider_name || null,
+        provider_flight_id: flight.provider_flight_id || row.provider_flight_id || null,
+        updated_at: new Date().toISOString(),
+      };
       userFlights.set(key, saved);
       return saved;
     },
@@ -267,6 +347,25 @@ function createPostgresSharedFlightRepository(pool) {
          order by last_stream_event_at desc nulls last, updated_at desc
          limit 20`,
         [providerFlightId || null, normalizedFlightNumber, departureDate || null]
+      );
+      return result.rows;
+    },
+    async listLifecycleRecoveryCandidates() {
+      const result = await pool.query(
+        `select distinct fi.*
+         from public.flight_instances fi
+         join public.user_flights uf on uf.flight_instance_id = fi.id
+         where fi.is_final = false
+           and uf.deleted_at is null
+           and coalesce(uf.lifecycle_state, '') <> 'deleted'
+           and (
+             coalesce(fi.estimated_departure_at, fi.scheduled_departure_at)
+               between now() - interval '24 hours' and now() + interval '72 hours'
+             or coalesce(fi.estimated_arrival_at, fi.scheduled_arrival_at)
+               between now() - interval '24 hours' and now() + interval '72 hours'
+           )
+         order by fi.updated_at asc
+         limit 1000`
       );
       return result.rows;
     },
@@ -468,16 +567,113 @@ function createPostgresSharedFlightRepository(pool) {
     },
     async upsertUserFlight(userId, flightInstanceId, input = {}) {
       return one(await pool.query(
-        `insert into public.user_flights (user_id, flight_instance_id, notification_enabled, alert_preferences, user_label, visibility, added_at)
-         values ($1, $2, $3, $4, $5, $6, now())
+        `insert into public.user_flights (
+           user_id,
+           flight_instance_id,
+           notification_enabled,
+           alert_preferences,
+           user_label,
+           visibility,
+           added_at,
+           source_type,
+           lifecycle_state,
+           display_flight_number,
+           marketing_airline_code,
+           operating_airline_code,
+           origin_iata,
+           destination_iata,
+           scheduled_departure,
+           scheduled_arrival,
+           estimated_departure,
+           estimated_arrival,
+           actual_departure,
+           actual_arrival,
+           departure_terminal,
+           departure_gate,
+           status,
+           provider_name,
+           provider_flight_id,
+           notifications_enabled,
+           alert_settings_json
+         )
+         select
+           $1,
+           fi.id,
+           $3,
+           $4,
+           $5,
+           $6,
+           now(),
+           coalesce($7, 'manual_search'),
+           coalesce(
+             $8,
+             case
+               when lower(coalesce(fi.status, '')) in ('airborne', 'enroute', 'departed', 'taxiing', 'taxi_out', 'takeoff_roll') then 'active'
+               when lower(coalesce(fi.status, '')) in ('landed', 'arrived', 'arrived_at_gate') then 'landed'
+               else 'upcoming'
+             end
+           ),
+           coalesce(nullif(trim(concat_ws(' ', fi.airline_code, fi.flight_number)), ''), $11, 'Flight'),
+           fi.airline_code,
+           fi.airline_code,
+           coalesce(fi.origin_airport, $9, 'UNKNOWN'),
+           coalesce(fi.destination_airport, $10, 'UNKNOWN'),
+           coalesce(fi.scheduled_departure_at, fi.estimated_departure_at, fi.actual_departure_at, $12::timestamptz, now()),
+           fi.scheduled_arrival_at,
+           fi.estimated_departure_at,
+           fi.estimated_arrival_at,
+           fi.actual_departure_at,
+           fi.actual_arrival_at,
+           fi.terminal,
+           fi.gate,
+           fi.status,
+           fi.provider,
+           fi.provider_flight_id,
+           $3,
+           $4
+         from public.flight_instances fi
+         where fi.id = $2
          on conflict (user_id, flight_instance_id) where flight_instance_id is not null do update set
            notification_enabled = excluded.notification_enabled,
            alert_preferences = excluded.alert_preferences,
            user_label = excluded.user_label,
            visibility = excluded.visibility,
+           source_type = excluded.source_type,
+           lifecycle_state = excluded.lifecycle_state,
+           display_flight_number = excluded.display_flight_number,
+           marketing_airline_code = excluded.marketing_airline_code,
+           operating_airline_code = excluded.operating_airline_code,
+           origin_iata = excluded.origin_iata,
+           destination_iata = excluded.destination_iata,
+           scheduled_departure = excluded.scheduled_departure,
+           scheduled_arrival = excluded.scheduled_arrival,
+           estimated_departure = excluded.estimated_departure,
+           estimated_arrival = excluded.estimated_arrival,
+           actual_departure = excluded.actual_departure,
+           actual_arrival = excluded.actual_arrival,
+           departure_terminal = excluded.departure_terminal,
+           departure_gate = excluded.departure_gate,
+           status = excluded.status,
+           provider_name = excluded.provider_name,
+           provider_flight_id = excluded.provider_flight_id,
+           notifications_enabled = excluded.notifications_enabled,
+           alert_settings_json = excluded.alert_settings_json,
            updated_at = now()
          returning *`,
-        [userId, flightInstanceId, input.notificationEnabled ?? true, input.alertPreferences || { low: false, medium: true, high: true, critical: true }, input.userLabel || null, input.visibility || "private"]
+        [
+          userId,
+          flightInstanceId,
+          input.notificationEnabled ?? true,
+          input.alertPreferences || DEFAULT_ALERT_PREFERENCES,
+          input.userLabel || null,
+          input.visibility || "private",
+          input.sourceType || null,
+          input.lifecycleState || null,
+          input.origin || null,
+          input.destination || null,
+          [input.airline, input.number || input.flightNumber].filter(Boolean).join(" ").trim() || null,
+          input.scheduledDeparture || input.date || null,
+        ]
       ));
     },
     async listUserFlights(userId) {
@@ -504,6 +700,44 @@ function createPostgresSharedFlightRepository(pool) {
          where user_id = $1 and id = $2
          returning *`,
         [userId, id, patch.notification_enabled, patch.alert_preferences, patch.user_label, patch.visibility]
+      ));
+    },
+    async listUserFlightsByIds(userId, ids) {
+      const result = await pool.query(
+        `select *
+         from public.user_flights
+         where user_id = $1
+           and id = any($2::uuid[])
+           and deleted_at is null
+           and coalesce(lifecycle_state, '') <> 'deleted'`,
+        [userId, ids || []]
+      );
+      return result.rows;
+    },
+    async linkUserFlightToInstance(userId, id, flightInstanceId, patch = {}) {
+      return one(await pool.query(
+        `update public.user_flights uf set
+          flight_instance_id = $3,
+          notification_enabled = coalesce($4, uf.notification_enabled, uf.notifications_enabled, true),
+          notifications_enabled = coalesce($4, uf.notifications_enabled, uf.notification_enabled, true),
+          alert_preferences = coalesce($5, uf.alert_preferences, $6::jsonb),
+          status = coalesce(fi.status, uf.status),
+          provider_name = coalesce(fi.provider, uf.provider_name),
+          provider_flight_id = coalesce(fi.provider_flight_id, uf.provider_flight_id),
+          updated_at = now()
+         from public.flight_instances fi
+         where uf.user_id = $1
+           and uf.id = $2
+           and fi.id = $3
+         returning uf.*`,
+        [
+          userId,
+          id,
+          flightInstanceId,
+          patch.notificationEnabled ?? null,
+          patch.alertPreferences || null,
+          JSON.stringify(DEFAULT_ALERT_PREFERENCES),
+        ]
       ));
     },
     async deleteUserFlight(userId, id) {
@@ -544,17 +778,61 @@ function createPostgresSharedFlightRepository(pool) {
       ));
       return row;
     },
-    async listNotificationTargets(flightInstanceId, severity) {
+    async listNotificationTargets(flightInstanceId, severity, eventType) {
+      const circleCondition = circleNotificationPreferenceConditionForEventType(eventType);
       const result = await pool.query(
-        `select uf as user_flight, coalesce(jsonb_agg(dt) filter (where dt.id is not null), '[]'::jsonb) as tokens
-         from public.user_flights uf
-         left join public.device_tokens dt on dt.user_id = uf.user_id and dt.is_active = true
-         where uf.flight_instance_id = $1 and uf.notification_enabled = true
-           and coalesce((uf.alert_preferences ->> $2)::boolean, false) = true
-         group by uf.id`,
+        `with owner_targets as (
+           select
+             uf as user_flight,
+             uf.user_id as recipient_user_id
+           from public.user_flights uf
+           where uf.flight_instance_id = $1
+             and uf.notification_enabled = true
+             and uf.deleted_at is null
+             and coalesce(uf.lifecycle_state, '') <> 'deleted'
+             and coalesce((uf.alert_preferences ->> $2)::boolean, false) = true
+         ),
+         circle_targets as (
+           select
+             uf as user_flight,
+             fp.viewer_user_id as recipient_user_id
+           from public.user_flights uf
+           join public.friend_permissions fp
+             on fp.owner_user_id = uf.user_id
+           join public.friend_relationships fr
+             on fr.id = fp.relationship_id
+           where uf.flight_instance_id = $1
+             and uf.deleted_at is null
+             and coalesce(uf.lifecycle_state, '') <> 'deleted'
+             and fr.relationship_status = 'active'
+             and fp.can_view_live = true
+             and fp.can_receive_alerts = true
+             and (
+               fp.share_scope = 'all_flights'
+               or (fp.share_scope = 'future_flights' and coalesce(uf.lifecycle_state, '') in ('upcoming', 'active'))
+             )
+             and ${circleCondition}
+         ),
+         targets as (
+           select * from owner_targets
+           union
+           select * from circle_targets
+         )
+         select
+           user_flight,
+           recipient_user_id,
+           coalesce(jsonb_agg(dt) filter (where dt.id is not null), '[]'::jsonb) as tokens
+         from targets
+         left join public.device_tokens dt
+           on dt.user_id = targets.recipient_user_id
+          and dt.is_active = true
+         group by user_flight, recipient_user_id`,
         [flightInstanceId, severity]
       );
-      return result.rows.map((row) => ({ userFlight: row.user_flight, tokens: row.tokens || [] }));
+      return result.rows.map((row) => ({
+        userFlight: { ...row.user_flight, user_id: row.recipient_user_id || row.user_flight?.user_id },
+        tokens: row.tokens || [],
+      }));
     },
     async createNotificationDelivery(userId, flightInstanceId, eventId, channel = "apns") {
       const row = one(await pool.query(
@@ -658,6 +936,30 @@ function createPostgresSharedFlightRepository(pool) {
       );
     },
   };
+}
+
+function circleNotificationPreferenceConditionForEventType(eventType) {
+  switch (String(eventType || "").toUpperCase()) {
+    case "DELAYED":
+    case "RESCHEDULED":
+      return "fp.notify_delay = true";
+    case "GATE_CHANGED":
+      return "fp.notify_gate_change = true";
+    case "DEPARTED":
+    case "AIRBORNE":
+    case "TAXIING":
+    case "TAKEOFF_ROLL":
+    case "TRIP_STARTING":
+    case "INBOUND_ARRIVED":
+      return "fp.notify_departure = true";
+    case "LANDED":
+    case "ARRIVED":
+    case "ARRIVED_AT_GATE":
+    case "TAXI_IN":
+      return "fp.notify_arrival = true";
+    default:
+      return "true";
+  }
 }
 
 module.exports = { createMemorySharedFlightRepository, createPostgresSharedFlightRepository };

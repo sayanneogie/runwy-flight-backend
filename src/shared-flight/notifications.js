@@ -17,6 +17,7 @@ function notificationTitle(flight, event) {
   if (event.event_type === "GATE_CHANGED") return "Gate Changed";
   if (event.event_type === "TAXIING") return "Taxiing";
   if (event.event_type === "TAKEOFF_ROLL") return "Taking Off";
+  if (event.event_type === "TRIP_STARTING") return "Trip Starting Soon";
   if (event.event_type === "TAXI_IN") return "Taxiing In";
   if (event.event_type === "ARRIVED_AT_GATE") return "Arrived at Gate";
   if (event.event_type === "BAGGAGE_BELT_ASSIGNED") return "Baggage Belt";
@@ -33,6 +34,12 @@ function notificationBody(flight, event) {
   if (event.event_type === "GATE_CHANGED") return `${code} gate changed from ${event.old_value?.gate || "unknown"} to ${event.new_value?.gate}.`;
   if (event.event_type === "TAXIING") return `${code} is taxiing.`;
   if (event.event_type === "TAKEOFF_ROLL") return `${code} is about to take off.`;
+  if (event.event_type === "TRIP_STARTING") {
+    const minutes = Number(event.new_value?.minutesUntilDeparture);
+    return Number.isFinite(minutes) && minutes > 0
+      ? `${code} is scheduled to depart in about ${Math.round(minutes)} minutes.`
+      : `${code} is scheduled to depart soon.`;
+  }
   if (event.event_type === "TAXI_IN") return `${code} is taxiing to the gate.`;
   if (event.event_type === "ARRIVED_AT_GATE") return `${code} has arrived at the gate.`;
   if (event.event_type === "BAGGAGE_BELT_ASSIGNED") return `${code} bags are expected at belt ${event.new_value?.baggageBelt}.`;

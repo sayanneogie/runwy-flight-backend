@@ -3,6 +3,7 @@
 const FINAL_STATUSES = new Set(["landed", "arrived", "arrived_at_gate", "cancelled"]);
 const AIRBORNE_STATUSES = new Set(["airborne", "enroute", "departed"]);
 const TAXI_STATUSES = new Set(["taxiing", "taxi_out", "takeoff_roll", "taxi_in"]);
+const APPROACH_WINDOW_MINUTES = 45;
 
 function normalizeAirline(input) {
   return String(input || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -66,8 +67,124 @@ function isFinalStatus(status) {
   return FINAL_STATUSES.has(String(status || "").toLowerCase());
 }
 
+function timestampMs(value) {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function bestTime(record, names) {
+  for (const name of names) {
+    const ms = timestampMs(record?.[name]);
+    if (ms != null) return ms;
+  }
+  return null;
+}
+
+function phaseFromProviderStatus(status) {
+  const value = String(status || "").toLowerCase();
+  if (["cancelled", "canceled"].includes(value)) return "cancelled";
+  if (value === "diverted") return "diverted";
+  if (value === "arrived_at_gate") return "arrived_at_gate";
+  if (["landed", "arrived"].includes(value)) return value;
+  if (value === "taxi_in") return "taxi_in";
+  if (["airborne", "enroute", "departed"].includes(value)) return "airborne";
+  if (["takeoff_roll", "taxi_out", "taxiing", "boarding", "delayed"].includes(value)) return value;
+  if (["scheduled", "unknown"].includes(value)) return value;
+  return null;
+}
+
+function displayStatusForPhase(phase, fallbackStatus = "scheduled") {
+  switch (String(phase || "").toLowerCase()) {
+    case "airborne":
+    case "approaching":
+      return "enroute";
+    case "taxi_out":
+    case "takeoff_roll":
+    case "boarding":
+    case "taxi_in":
+    case "arrived_at_gate":
+    case "landed":
+    case "arrived":
+    case "cancelled":
+    case "diverted":
+    case "delayed":
+    case "scheduled":
+      return String(phase).toLowerCase();
+    default:
+      return String(fallbackStatus || "scheduled").toLowerCase();
+  }
+}
+
+function deriveFlightLifecyclePhase(flight, nowMs = Date.now()) {
+  const providerPhase = phaseFromProviderStatus(flight?.status);
+  const actualDeparture = bestTime(flight, ["actual_departure_at", "actualDepartureAt"]);
+  const actualArrival = bestTime(flight, ["actual_arrival_at", "actualArrivalAt"]);
+  const scheduledDeparture = bestTime(flight, ["scheduled_departure_at", "scheduledDepartureAt"]);
+  const estimatedDeparture = bestTime(flight, ["estimated_departure_at", "estimatedDepartureAt"]);
+  const scheduledArrival = bestTime(flight, ["scheduled_arrival_at", "scheduledArrivalAt"]);
+  const estimatedArrival = bestTime(flight, ["estimated_arrival_at", "estimatedArrivalAt"]);
+  const departure = actualDeparture || estimatedDeparture || scheduledDeparture;
+  const arrival = actualArrival || estimatedArrival || scheduledArrival;
+  const hasLivePosition =
+    flight?.position_lat != null ||
+    flight?.position?.lat != null ||
+    flight?.normalized_data?.position?.lat != null ||
+    flight?.normalizedData?.position?.lat != null ||
+    flight?.livePosition?.latitude != null;
+
+  if (providerPhase === "cancelled" || providerPhase === "diverted") {
+    return { phase: providerPhase, confidence: "provider_confirmed", reason: `provider_status_${providerPhase}` };
+  }
+  if (actualArrival) {
+    return { phase: providerPhase === "arrived_at_gate" ? "arrived_at_gate" : "landed", confidence: "timestamp_confirmed", reason: "actual_arrival_present" };
+  }
+  if (["landed", "arrived", "arrived_at_gate"].includes(providerPhase)) {
+    return { phase: providerPhase, confidence: "provider_confirmed", reason: `provider_status_${providerPhase}` };
+  }
+  if (providerPhase === "taxi_in") {
+    return { phase: "taxi_in", confidence: "provider_confirmed", reason: "provider_status_taxi_in" };
+  }
+  if (["airborne", "enroute", "departed"].includes(String(flight?.status || "").toLowerCase()) || actualDeparture || hasLivePosition) {
+    const minutesUntilArrival = arrival != null ? (arrival - nowMs) / 60000 : null;
+    return {
+      phase: minutesUntilArrival != null && minutesUntilArrival <= APPROACH_WINDOW_MINUTES && minutesUntilArrival >= -10 ? "approaching" : "airborne",
+      confidence: hasLivePosition ? "position_confirmed" : actualDeparture ? "timestamp_confirmed" : "provider_confirmed",
+      reason: hasLivePosition ? "live_position_present" : actualDeparture ? "actual_departure_present" : "provider_airborne_status",
+    };
+  }
+  if (["takeoff_roll", "taxi_out", "taxiing", "boarding"].includes(providerPhase)) {
+    return { phase: providerPhase === "taxiing" ? "taxi_out" : providerPhase, confidence: "provider_confirmed", reason: `provider_status_${providerPhase}` };
+  }
+
+  if (departure != null && arrival != null && arrival > departure) {
+    const routeMs = arrival - departure;
+    const taxiOutMs = Math.min(25 * 60000, Math.max(10 * 60000, Math.round(routeMs * 0.12)));
+    if (nowMs >= departure + taxiOutMs && nowMs < arrival + 10 * 60000) {
+      const minutesUntilArrival = (arrival - nowMs) / 60000;
+      return {
+        phase: minutesUntilArrival <= APPROACH_WINDOW_MINUTES ? "approaching" : "airborne",
+        confidence: "time_inferred",
+        reason: "now_between_departure_and_arrival_window",
+      };
+    }
+    if (nowMs >= departure && nowMs < departure + taxiOutMs) {
+      return { phase: "taxi_out", confidence: "time_inferred", reason: "now_inside_departure_taxi_window" };
+    }
+    if (nowMs >= arrival + 10 * 60000) {
+      return { phase: "landed", confidence: "time_inferred", reason: "now_after_arrival_window" };
+    }
+  }
+
+  if (providerPhase === "delayed") {
+    return { phase: "delayed", confidence: "provider_confirmed", reason: "provider_status_delayed" };
+  }
+  return { phase: providerPhase || "scheduled", confidence: "schedule_only", reason: "no_confirmed_movement" };
+}
+
 function getFlightFreshnessTTL(flightInstance, nowMs = Date.now(), random = Math.random, options = {}) {
-  const status = String(flightInstance?.status || "").toLowerCase();
+  const lifecycle = deriveFlightLifecyclePhase(flightInstance, nowMs);
+  const status = displayStatusForPhase(lifecycle.phase, flightInstance?.status || "").toLowerCase();
   const confidence = String(flightInstance?.data_confidence || flightInstance?.dataConfidence || "").toLowerCase();
   const activeViewerCount = Number(options.activeViewerCount || flightInstance?.active_viewer_count || flightInstance?.activeViewerCount || 0);
   const alertActive = isProviderAlertActive(flightInstance, nowMs);
@@ -210,6 +327,7 @@ function mapNormalizedToDb(normalized, params = {}) {
 
 function rowToFlightResponse(row, { source = "postgres", freshness = "fresh", isRefreshing = false } = {}) {
   if (!row) return null;
+  const lifecycle = deriveFlightLifecyclePhase(row);
   return {
     flightKey: row.flight_key,
     flightInstanceId: row.id,
@@ -218,7 +336,11 @@ function rowToFlightResponse(row, { source = "postgres", freshness = "fresh", is
     flightNumber: row.flight_number,
     origin: row.origin_airport,
     destination: row.destination_airport,
-    status: row.status,
+    status: displayStatusForPhase(lifecycle.phase, row.status),
+    providerStatus: row.status,
+    computedPhase: lifecycle.phase,
+    phaseConfidence: lifecycle.confidence,
+    phaseReason: lifecycle.reason,
     statusDetail: row.status_detail,
     scheduledDepartureAt: toIso(row.scheduled_departure_at),
     scheduledArrivalAt: toIso(row.scheduled_arrival_at),
@@ -352,6 +474,8 @@ function compareFlightState(oldState, newState, nowMs = Date.now()) {
 module.exports = {
   buildFlightKey,
   compareFlightState,
+  deriveFlightLifecyclePhase,
+  displayStatusForPhase,
   getFlightFreshnessTTL,
   isProviderAlertActive,
   isFinalStatus,

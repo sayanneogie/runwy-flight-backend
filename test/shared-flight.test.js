@@ -8,7 +8,13 @@ const path = require("node:path");
 const { createFlightCache, createMemoryRedis } = require("../src/shared-flight/cache");
 const { createMemorySharedFlightRepository } = require("../src/shared-flight/repository");
 const { createSharedFlightService } = require("../src/shared-flight/service");
-const { compareFlightState, getFlightFreshnessTTL } = require("../src/shared-flight/state");
+const { createProviderAdapter } = require("../src/shared-flight/provider-adapter");
+const {
+  compareFlightState,
+  deriveFlightLifecyclePhase,
+  displayStatusForPhase,
+  getFlightFreshnessTTL,
+} = require("../src/shared-flight/state");
 const { buildWeatherInsight } = require("../src/shared-flight/weather");
 
 function normalizedFlight(overrides = {}) {
@@ -62,6 +68,23 @@ function makeService(providerFlight = normalizedFlight(), options = {}) {
   });
   return { service, repository, providerCalls: () => calls };
 }
+
+test("production provider adapter exposes shared alert registration callbacks", async () => {
+  let calls = 0;
+  const adapter = createProviderAdapter({
+    providerName: "flightaware",
+    fetchFlights: async () => [],
+    normalizeRecord: (record) => record,
+    ensureFlightAlert: async (flight) => {
+      calls += 1;
+      return { providerAlertId: `alert-${flight.id}`, status: "active" };
+    },
+  });
+
+  const result = await adapter.ensureFlightAlert({ id: "shared-flight" });
+  assert.equal(calls, 1);
+  assert.equal(result.providerAlertId, "alert-shared-flight");
+});
 
 test("1000 users searching the same missing flight cause only one provider call", async () => {
   const { service, providerCalls } = makeService(normalizedFlight(), { delayMs: 300 });
@@ -155,6 +178,39 @@ test("gate change only emits on real change and respects alert preferences", asy
   await repository.upsertDeviceToken("u1", { deviceToken: "token-u1", environment: "sandbox" });
   await service.fanoutNotificationJob({ data: { flight_event_id: event.id } });
   assert.equal(repository.__memory.deliveries.size, 0);
+});
+
+test("newly saved user flights receive low severity travel notifications by default", async () => {
+  const sent = [];
+  const { service, repository } = makeService(normalizedFlight(), {
+    apns: { sendFlightEvent: async ({ token }) => sent.push(token.device_token) },
+  });
+
+  const saved = await service.saveUserFlight("u1", {
+    airline: "SQ",
+    number: "509",
+    date: "2026-05-27",
+    origin: "BLR",
+    destination: "SIN",
+  });
+  await repository.upsertDeviceToken("u1", { deviceToken: "token-u1", environment: "sandbox" });
+
+  const [event] = await repository.insertEvents(saved.flight.flightInstanceId, [
+    {
+      event_type: "BAGGAGE_BELT_ASSIGNED",
+      event_severity: "low",
+      old_value: { baggageBelt: null },
+      new_value: { baggageBelt: "7" },
+      summary: "Baggage belt assigned: 7",
+      notification_required: true,
+      confidence: "high",
+    },
+  ], "test");
+
+  await service.fanoutNotificationJob({ data: { flight_event_id: event.id } });
+
+  assert.deepEqual(sent, ["token-u1"]);
+  assert.equal(repository.__memory.deliveries.size, 1);
 });
 
 test("taxi, takeoff, and baggage belt shared events are meaningful and notify", () => {
@@ -293,6 +349,24 @@ test("final states receive long freshness TTLs and are not refreshed aggressivel
   assert.equal(ttl, 12 * 60 * 60);
 });
 
+test("shared lifecycle phase infers airborne near arrival when provider status is stale", () => {
+  const now = Date.parse("2026-05-10T11:32:00.000Z");
+  const lifecycle = deriveFlightLifecyclePhase(
+    {
+      status: "scheduled",
+      scheduled_departure_at: "2026-05-10T08:55:00.000Z",
+      estimated_departure_at: "2026-05-10T08:55:00.000Z",
+      scheduled_arrival_at: "2026-05-10T11:35:00.000Z",
+      estimated_arrival_at: "2026-05-10T11:35:00.000Z",
+    },
+    now
+  );
+
+  assert.equal(lifecycle.phase, "approaching");
+  assert.equal(lifecycle.confidence, "time_inferred");
+  assert.equal(displayStatusForPhase(lifecycle.phase, "scheduled"), "enroute");
+});
+
 test("webhook-backed flights avoid scheduled polling unless actively viewed or unsafe", () => {
   const now = Date.parse("2026-05-27T08:00:00.000Z");
   const webhookActive = {
@@ -409,6 +483,96 @@ test("saving a flight creates one shared provider alert when the adapter support
   assert.equal(alertCalls, 1);
   assert.equal(row.provider_alert_status, "active");
   assert.equal(row.provider_alert_id, "alert-sq509");
+});
+
+test("lifecycle recovery repairs missing alerts and reschedules active flights after restart", async () => {
+  let alertCalls = 0;
+  const { service, repository } = makeService(normalizedFlight(), {
+    ensureFlightAlert: async () => {
+      alertCalls += 1;
+      return { providerAlertId: "alert-recovered", status: "active" };
+    },
+  });
+  const flight = await service.searchFlight({ airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" });
+  const row = await repository.findFlightById(flight.flightInstanceId);
+  row.estimated_departure_at = new Date(Date.now() + 30 * 60_000).toISOString();
+  row.scheduled_departure_at = row.estimated_departure_at;
+  row.estimated_arrival_at = new Date(Date.now() + 8 * 60 * 60_000).toISOString();
+  row.scheduled_arrival_at = row.estimated_arrival_at;
+  await repository.updateFlight(row);
+
+  const recovered = await service.recoverLifecycleCatchups("test_restart");
+  const updated = await repository.findFlightById(row.id);
+
+  assert.equal(recovered.checked, 1);
+  assert.ok(recovered.scheduled >= 3);
+  assert.equal(alertCalls, 1);
+  assert.equal(updated.provider_alert_status, "active");
+  assert.ok(service.queue.jobs.some((job) => job.name === "departureCatchupJob"));
+  assert.ok(service.queue.jobs.some((job) => job.name === "arrivalCatchupJob"));
+});
+
+test("saving a flight mirrors canonical fields into the user flight row", async () => {
+  const { service, repository } = makeService();
+
+  const saved = await service.saveUserFlight("u1", {
+    airline: "SQ",
+    number: "509",
+    date: "2026-05-27",
+    origin: "BLR",
+    destination: "SIN",
+  });
+
+  const userFlight = saved.userFlight;
+  assert.equal(userFlight.flight_instance_id, saved.flight.flightInstanceId);
+  assert.equal(userFlight.display_flight_number, "SQ 509");
+  assert.equal(userFlight.origin_iata, "BLR");
+  assert.equal(userFlight.destination_iata, "SIN");
+  assert.equal(userFlight.scheduled_departure, "2026-05-27T18:30:00.000Z");
+  assert.equal(userFlight.provider_name, "test");
+  assert.equal(userFlight.provider_flight_id, "provider-sq509");
+
+  const listed = await repository.listUserFlights("u1");
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].userFlight.display_flight_number, "SQ 509");
+});
+
+test("live coverage links direct user flight rows to provider alerts", async () => {
+  let alertCalls = 0;
+  const { service, repository } = makeService(normalizedFlight(), {
+    ensureFlightAlert: async () => {
+      alertCalls += 1;
+      return {
+        providerAlertId: "alert-sq509",
+        status: "active",
+        expiresAt: "2026-05-28T23:00:00.000Z",
+      };
+    },
+  });
+  const directRow = {
+    id: "11111111-1111-4111-8111-111111111111",
+    user_id: "u1",
+    flight_instance_id: null,
+    display_flight_number: "SQ 509",
+    origin_iata: "BLR",
+    destination_iata: "SIN",
+    scheduled_departure: "2026-05-27T18:30:00.000Z",
+    lifecycle_state: "upcoming",
+    notifications_enabled: true,
+    alert_settings_json: { gateChange: true, delayUpdates: true, boardingTime: true, takeoffLanding: true, baggageClaim: true },
+  };
+  repository.__memory.userFlights.set("direct:u1:sq509", directRow);
+
+  const result = await service.ensureUserFlightLiveCoverage("u1", { ids: [directRow.id] });
+  const repaired = [...repository.__memory.userFlights.values()].find((row) => row.id === directRow.id);
+
+  assert.equal(result.checked, 1);
+  assert.equal(result.covered, 1);
+  assert.equal(result.failed.length, 0);
+  assert.ok(repaired.flight_instance_id);
+  assert.equal(repaired.notification_enabled, true);
+  assert.equal(repaired.alert_preferences.high, true);
+  assert.equal(alertCalls, 1);
 });
 
 test("active viewer heartbeat records temporary watcher state and queues stale refresh", async () => {
@@ -551,7 +715,66 @@ test("saved flights schedule low-call departure and arrival catchups without pol
 
   assert.equal(service.queue.jobs.filter((job) => job.name === "departureCatchupJob").length, 2);
   assert.equal(service.queue.jobs.filter((job) => job.name === "arrivalCatchupJob").length, 1);
+  assert.equal(service.queue.jobs.filter((job) => job.name === "arrivalDetailRefreshJob").length, 6);
   assert.equal(service.queue.jobs.filter((job) => job.name === "refreshFlightJob").length, 0);
+});
+
+test("arrival detail refresh fills destination gate terminal and baggage before arrival", async () => {
+  const departure = new Date(Date.now() - 6 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+  const { service, repository, providerCalls } = makeService((calls) => calls === 1
+    ? normalizedFlight({
+        status: "enroute",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        arrivalGate: null,
+        arrivalTerminal: null,
+        baggageBelt: null,
+      })
+    : normalizedFlight({
+        status: "enroute",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        arrivalGate: "S1",
+        arrivalTerminal: "4S",
+        baggageBelt: "6",
+      }));
+
+  const flight = await service.searchFlight({ airline: "SQ", number: "509", date: departure.slice(0, 10), origin: "BLR", destination: "SIN" });
+  await service.arrivalDetailRefreshJob({ data: { flight_instance_id: flight.flightInstanceId, stage: "t-2h" } });
+
+  const row = await repository.findFlightById(flight.flightInstanceId);
+  assert.equal(providerCalls(), 2);
+  assert.equal(row.normalized_data.arrivalGate, "S1");
+  assert.equal(row.normalized_data.arrivalTerminal, "4S");
+  assert.equal(row.baggage_belt, "6");
+});
+
+test("arrival detail refresh skips provider calls once destination details are complete", async () => {
+  const departure = new Date(Date.now() - 6 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+  const { service, providerCalls } = makeService(normalizedFlight({
+    status: "enroute",
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    actualDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    arrivalGate: "S1",
+    arrivalTerminal: "4S",
+    baggageBelt: "6",
+  }));
+
+  const flight = await service.searchFlight({ airline: "SQ", number: "509", date: departure.slice(0, 10), origin: "BLR", destination: "SIN" });
+  await service.arrivalDetailRefreshJob({ data: { flight_instance_id: flight.flightInstanceId, stage: "t-2h" } });
+
+  assert.equal(providerCalls(), 1);
 });
 
 test("departure catchup performs one live refresh after overdue departure", async () => {

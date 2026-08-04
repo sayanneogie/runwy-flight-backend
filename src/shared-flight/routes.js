@@ -21,6 +21,17 @@ function mountSharedFlightRoutes(app, service) {
     }
   });
 
+  app.post("/v1/user-flights/ensure-live-coverage", async (req, res) => {
+    const userId = String(req.auth?.userId || "").trim();
+    if (!userId) return res.status(401).json({ error: "Sign in is required" });
+    try {
+      const result = await service.ensureUserFlightLiveCoverage(userId, req.body || {});
+      return res.json(result);
+    } catch (error) {
+      return res.status(error.statusCode || 500).json({ error: error.message || "Unable to ensure live coverage" });
+    }
+  });
+
   app.get("/v1/user-flights", async (req, res) => {
     const userId = String(req.auth?.userId || "").trim();
     if (!userId) return res.status(401).json({ error: "Sign in is required" });

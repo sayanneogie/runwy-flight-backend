@@ -73,6 +73,56 @@ test("normalizes FlightAware alert payloads into Runwy flight events", () => {
   assert.equal(normalized.destination, "DEL");
 });
 
+test("impending departure remains preflight and does not masquerade as takeoff", () => {
+  const normalized = normalizeFlightAwareAlert({
+    event: "impending_departure",
+    ident: "AI2814",
+    fa_flight_id: "AI2814-2026-05-09",
+    origin: "BLR",
+    destination: "DEL",
+    scheduled_out: "2026-05-09T16:30:00Z",
+    event_time: "2026-05-09T15:30:00Z",
+    minutes_until_departure: 60,
+  });
+
+  assert.equal(normalized.event_type, "flight_departure_soon");
+  assert.equal(normalized.minutes_until_departure, 60);
+  assert.match(normalized.human_readable_summary, /starts in about 60 minutes/);
+});
+
+test("impending departure webhook creates a Trip Starting Soon APNs event without making the flight airborne", async () => {
+  const sent = [];
+  const { repository, service, row } = await makeAlertService({
+    apns: {
+      sendFlightEvent: async ({ token, event }) => {
+        sent.push({ token: token.device_token, type: event.event_type });
+        return { ok: true };
+      },
+    },
+  });
+  await repository.upsertUserFlight("u1", row.id, { alertPreferences: { low: true, medium: true, high: true, critical: true } });
+  await repository.upsertDeviceToken("u1", { deviceToken: "token-u1", environment: "sandbox" });
+
+  const result = await service.processFlightAwareAlertWebhook({
+    event: "impending_departure",
+    ident: "AI2814",
+    fa_flight_id: "AI2814-2026-05-09",
+    origin: "BLR",
+    destination: "DEL",
+    scheduled_out: "2026-05-09T16:30:00Z",
+    event_time: "2026-05-09T15:30:00Z",
+    minutes_until_departure: 60,
+  });
+  const event = [...repository.__memory.events.values()].find((item) => item.event_type === "TRIP_STARTING");
+  await service.fanoutNotificationJob({ data: { flight_event_id: event.id } });
+  const updated = await repository.findFlightById(row.id);
+
+  assert.equal(result.appliedEvents, 1);
+  assert.equal(updated.status, "scheduled");
+  assert.equal(event.notification_required, true);
+  assert.deepEqual(sent, [{ token: "token-u1", type: "TRIP_STARTING" }]);
+});
+
 test("dedupe key is stable for duplicate FlightAware alert payloads", () => {
   const raw = {
     event: "arrival",

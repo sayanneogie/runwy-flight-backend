@@ -56,6 +56,24 @@ Optional live-tracking transport:
      - API: `node src/server.js`
      - Poller: `node src/flight-poller.js`
 
+## Flight Livery Uploads
+Flight livery images live in Supabase Storage bucket `flight-liveries`.
+
+1. Apply the storage migration:
+   - `supabase db push`
+2. Add your service-role key to `.env`:
+   - `SUPABASE_SERVICE_ROLE_KEY=...`
+3. Drop images into `assets/liveries`, or prepare the downloaded livery pack:
+   - `npm run prepare:liveries`
+4. Upload:
+   - `npm run upload:liveries`
+
+The default public URL pattern is:
+
+```text
+https://auth.runwy.app/storage/v1/object/public/flight-liveries/AI.webp
+```
+
 ## Endpoints
 
 ### GET `/health`

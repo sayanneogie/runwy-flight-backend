@@ -1,7 +1,7 @@
 "use strict";
 
-function createProviderAdapter({ providerName, fetchFlights, fetchByProviderId, normalizeRecord, normalizeSelected, enrichNormalized, selectRecord }) {
-  return {
+function createProviderAdapter({ providerName, fetchFlights, fetchByProviderId, normalizeRecord, normalizeSelected, enrichNormalized, selectRecord, ensureFlightAlert, ensureFlightStream }) {
+  const adapter = {
     name: providerName,
     supportsProviderId: Boolean(fetchByProviderId),
     async fetchFlightByNumber(params) {
@@ -29,6 +29,9 @@ function createProviderAdapter({ providerName, fetchFlights, fetchByProviderId, 
       return normalizeProviderRecord(record, () => enriched, providerName, {});
     },
   };
+  if (typeof ensureFlightAlert === "function") adapter.ensureFlightAlert = ensureFlightAlert;
+  if (typeof ensureFlightStream === "function") adapter.ensureFlightStream = ensureFlightStream;
+  return adapter;
 }
 
 function normalizeProviderRecord(record, normalizeRecord, providerName, params) {

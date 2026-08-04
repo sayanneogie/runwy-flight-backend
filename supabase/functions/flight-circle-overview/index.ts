@@ -168,6 +168,8 @@ serve(async (request) => {
           owner_picture_url: summary.pictureURL,
           airline_name: flight.marketing_airline_name ?? flight.operating_airline_name ?? "Shared flight",
           flight_number: flight.display_flight_number ?? "Flight",
+          origin_iata: flight.origin_iata,
+          destination_iata: flight.destination_iata,
           route_title: routeTitle || "Route pending",
           departure_summary: departureSummary,
           status_summary: flight.status ?? "Upcoming",

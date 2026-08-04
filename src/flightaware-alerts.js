@@ -44,6 +44,7 @@ function normalizeFlightAwareAlert(rawPayload) {
     ? `${parsed.airlineCode}-${parsed.flightNumber}-${departureDate}-${origin || "UNKNOWN"}-${destination || "UNKNOWN"}`
     : null;
   const delayMinutes = numeric(firstPresent(event.delay_minutes, event.delayMinutes, event.departure_delay, event.arrival_delay));
+  const minutesUntilDeparture = impendingDepartureMinutes(event, eventType, eventTime, estimatedOut || scheduledOut);
   const gateOrigin = text(firstPresent(event.gate_origin, event.departure_gate, event.gate, event.gateOut, event.terminal_gate_origin));
   const gateDestination = text(firstPresent(event.gate_destination, event.arrival_gate, event.gateIn, event.arrivalGate));
   const terminalOrigin = text(firstPresent(event.terminal_origin, event.departure_terminal, event.terminal, event.terminalOut));
@@ -72,8 +73,9 @@ function normalizeFlightAwareAlert(rawPayload) {
     terminal_destination: terminalDestination,
     baggage_belt: text(firstPresent(event.baggage_belt, event.baggage_claim, event.bag_claim, event.baggageClaim)),
     delay_minutes: delayMinutes,
+    minutes_until_departure: minutesUntilDeparture,
     event_time: eventTime,
-    human_readable_summary: summaryForEvent(eventType, ident, { origin, destination, delayMinutes, gateOrigin, gateDestination }),
+    human_readable_summary: summaryForEvent(eventType, ident, { origin, destination, delayMinutes, minutesUntilDeparture, gateOrigin, gateDestination }),
   };
 }
 
@@ -150,6 +152,7 @@ function normalizeEventType(rawType, event) {
   if (joined.includes("gate")) return "gate_changed";
   if (joined.includes("schedule") || joined.includes("time_change") || joined.includes("reschedule")) return "schedule_changed";
   if (joined.includes("delay")) return "flight_delayed";
+  if (joined.includes("impending_departure") || joined.includes("impending departure") || joined.includes("departure soon")) return "flight_departure_soon";
   if (joined.includes("takeoff") || joined.includes("off") || joined.includes("depart")) return "flight_departed";
   if (joined.includes("arriv") || joined.includes("land") || joined.includes(" in")) return "flight_arrived";
   if (joined.includes("taxi")) return "flight_taxiing";
@@ -167,6 +170,11 @@ function statusForAlert(eventType, fallback) {
 
 function summaryForEvent(eventType, ident, details) {
   const code = ident || "Flight";
+  if (eventType === "flight_departure_soon") {
+    return details.minutesUntilDeparture != null
+      ? `${code} starts in about ${details.minutesUntilDeparture} minutes.`
+      : `${code} is starting soon.`;
+  }
   if (eventType === "flight_departed") return `${code} has taken off.`;
   if (eventType === "flight_arrived") return `${code} has landed.`;
   if (eventType === "flight_cancelled") return `${code} was cancelled.`;
@@ -174,6 +182,24 @@ function summaryForEvent(eventType, ident, details) {
   if (eventType === "gate_changed") return `${code} gate changed${details.gateOrigin ? ` to ${details.gateOrigin}` : ""}.`;
   if (eventType === "flight_diverted") return `${code} was diverted.`;
   return `${code} status changed.`;
+}
+
+function impendingDepartureMinutes(event, eventType, eventTime, departureTime) {
+  if (eventType !== "flight_departure_soon") return null;
+  const explicit = numeric(firstPresent(
+    event.minutes_until_departure,
+    event.minutesUntilDeparture,
+    event.impending_departure_minutes,
+    event.impendingDepartureMinutes,
+    event.minutes,
+    event.threshold
+  ));
+  if (explicit != null && explicit >= 0) return Math.round(explicit);
+  const departureMs = Date.parse(departureTime || "");
+  const eventMs = Date.parse(eventTime || "");
+  if (!Number.isFinite(departureMs)) return null;
+  const referenceMs = Number.isFinite(eventMs) ? eventMs : Date.now();
+  return Math.max(0, Math.round((departureMs - referenceMs) / 60_000));
 }
 
 function parseIdent(ident) {

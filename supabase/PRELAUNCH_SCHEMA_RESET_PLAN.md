@@ -37,8 +37,8 @@ The repo also still has app code or docs expecting:
 
 References:
 
-- `/Users/sayanneogie/Documents/New project/backend/aviationstack-proxy/src/tracking-store.js`
-- `/Users/sayanneogie/Documents/New project/backend/aviationstack-proxy/src/server.js`
+- `/Users/sayanneogie/Documents/New project/backend/flight-data-service/src/tracking-store.js`
+- `/Users/sayanneogie/Documents/New project/backend/flight-data-service/src/server.js`
 - `/Users/sayanneogie/Documents/New project/runwy/App/Features/FlightTracking/Recovery/RecoverPastFlightService.swift`
 - `/Users/sayanneogie/Documents/New project/runwy/ARCHITECTURE.md`
 
@@ -317,13 +317,13 @@ Columns:
 
 Keep the current shape from:
 
-- `/Users/sayanneogie/Documents/New project/backend/aviationstack-proxy/supabase/migrations/20260403_create_flight_circle.sql`
+- `/Users/sayanneogie/Documents/New project/backend/flight-data-service/supabase/migrations/20260403_create_flight_circle.sql`
 
 ### `friend_relationships`
 
 Keep the current shape from:
 
-- `/Users/sayanneogie/Documents/New project/backend/aviationstack-proxy/supabase/migrations/20260403_create_flight_circle.sql`
+- `/Users/sayanneogie/Documents/New project/backend/flight-data-service/supabase/migrations/20260403_create_flight_circle.sql`
 
 ### `friend_permissions`
 
@@ -407,8 +407,8 @@ Target behavior:
 
 Current files:
 
-- `/Users/sayanneogie/Documents/New project/backend/aviationstack-proxy/src/tracking-store.js`
-- `/Users/sayanneogie/Documents/New project/backend/aviationstack-proxy/src/server.js`
+- `/Users/sayanneogie/Documents/New project/backend/flight-data-service/src/tracking-store.js`
+- `/Users/sayanneogie/Documents/New project/backend/flight-data-service/src/server.js`
 
 Current behavior:
 
@@ -423,7 +423,7 @@ Target behavior:
 
 Current file:
 
-- `/Users/sayanneogie/Documents/New project/backend/aviationstack-proxy/src/tracking-store.js`
+- `/Users/sayanneogie/Documents/New project/backend/flight-data-service/src/tracking-store.js`
 
 Current behavior:
 
@@ -451,7 +451,7 @@ Target behavior:
 Because there are no launched users yet, the clean sequence is:
 
 1. Freeze schema changes on the additive path.
-2. Do not run `/Users/sayanneogie/Documents/New project/backend/aviationstack-proxy/supabase/migrations/20260407_add_core_user_data_tables.sql` in production as the final baseline.
+2. Do not run `/Users/sayanneogie/Documents/New project/backend/flight-data-service/supabase/migrations/20260407_add_core_user_data_tables.sql` in production as the final baseline.
 3. Create a new fresh baseline migration set for the tables in this document.
 4. Update backend worker/server SQL to the new table contracts.
 5. Update iOS app code that still depends on `past_flights`.
