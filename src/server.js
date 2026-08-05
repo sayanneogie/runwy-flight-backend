@@ -714,7 +714,13 @@ function normalizeStatus(rawStatus) {
   if (value.includes("taxi") || value.includes("offblock")) return "taxiing";
   if (value.includes("board")) return "boarding";
   if (value.includes("delay")) return "delayed";
-  if (value.includes("active") || value.includes("airborne") || value.includes("en-route") || value.includes("enroute")) return "enroute";
+  if (
+    value.includes("active") ||
+    value.includes("airborne") ||
+    value.includes("en route") ||
+    value.includes("en-route") ||
+    value.includes("enroute")
+  ) return "enroute";
   if (value.includes("depart") || value.includes("off")) return "departed";
   return "scheduled";
 }
@@ -1783,6 +1789,30 @@ function flightAwareOperationalBounds(queryDate, timezoneOffsetMinutes = 0) {
   };
 }
 
+// A flight number is reused every operating day. Before the origin airport is
+// known, a date selected on the phone cannot safely be converted with the
+// phone's timezone: the requested origin-local day can begin up to 14 hours
+// before UTC and end up to 12 hours after UTC. Fetch that complete occurrence
+// window in one provider request, then let normalized origin/status data select
+// the correct instance.
+function flightAwareOccurrenceBounds(query) {
+  const normalizedDate = normalizedQueryDateString(query?.date);
+  const isUnscopedFlightNumberSearch = Boolean(query?.flightNumber) && !query?.departureIata;
+  if (!normalizedDate || !isUnscopedFlightNumberSearch) {
+    return flightAwareOperationalBounds(query?.date, query?.timezoneOffsetMinutes);
+  }
+
+  const selectedDayStartMs = Date.parse(`${normalizedDate}T00:00:00Z`);
+  if (!Number.isFinite(selectedDayStartMs)) {
+    return null;
+  }
+
+  return {
+    start: secondPrecisionISOString(selectedDayStartMs - 14 * 60 * 60 * 1000),
+    end: secondPrecisionISOString(selectedDayStartMs + 36 * 60 * 60 * 1000 - 1000),
+  };
+}
+
 function flightAwareScheduleBounds(queryDate, timezoneOffsetMinutes = 0) {
   return flightAwareOperationalBounds(queryDate, timezoneOffsetMinutes);
 }
@@ -1813,7 +1843,7 @@ function flightAwareScheduleQueryItems(query) {
 async function fetchFlightAwareOperationalFlights(query) {
   const ident = normalizeFlightCode(query.flightNumber);
   const params = new URLSearchParams({ max_pages: "1" });
-  const bounds = flightAwareOperationalBounds(query.date, query.timezoneOffsetMinutes);
+  const bounds = flightAwareOccurrenceBounds(query);
 
   if (bounds) {
     params.set("start", bounds.start);
@@ -1852,7 +1882,7 @@ async function fetchFlightAwareOperationalFlights(query) {
 }
 
 async function fetchFlightAwareScheduleFlights(query) {
-  const bounds = flightAwareScheduleBounds(query.date, query.timezoneOffsetMinutes);
+  const bounds = flightAwareOccurrenceBounds(query);
   if (!bounds) {
     return [];
   }
@@ -2650,7 +2680,18 @@ function scoreCandidate(record, query, normalizer) {
   const arrDate = normalized.arrivalTimes?.scheduled?.slice(0, 10);
   if (query.date && (depDate === query.date || arrDate === query.date)) score += 2;
 
-  if (normalized.status === "enroute" || normalized.status === "boarding") score += 1;
+  if (
+    [
+      "boarding",
+      "taxiing",
+      "taxi_out",
+      "takeoff_roll",
+      "departed",
+      "airborne",
+      "enroute",
+      "taxi_in",
+    ].includes(normalized.status)
+  ) score += 8;
   return score;
 }
 
@@ -6479,6 +6520,7 @@ module.exports = {
     flightAwareAlertCreationDisposition,
     flightAwareAlertIDFromPayload,
     flightAwareWebhookTargetURL,
+    flightAwareOccurrenceBounds,
     flightAwareOperationalBounds,
     flightAwareHistoryBounds,
     healthBuildInfo,

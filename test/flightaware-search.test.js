@@ -147,6 +147,63 @@ test("flightAwareOperationalBounds expands a local day into the correct UTC inst
   assert.equal(__test__.flightAwareOperationalBounds("bad-date", 330), null);
 });
 
+test("flightAwareOccurrenceBounds covers an origin-local day before the origin timezone is known", () => {
+  assert.deepEqual(
+    __test__.flightAwareOccurrenceBounds({
+      flightNumber: "AA258",
+      date: "2026-08-04",
+      timezoneOffsetMinutes: 330,
+    }),
+    {
+      start: "2026-08-03T10:00:00Z",
+      end: "2026-08-05T11:59:59Z",
+    }
+  );
+
+  assert.deepEqual(
+    __test__.flightAwareOccurrenceBounds({
+      flightNumber: "AA258",
+      departureIata: "PHL",
+      date: "2026-08-04",
+      timezoneOffsetMinutes: -240,
+    }),
+    {
+      start: "2026-08-04T04:00:00Z",
+      end: "2026-08-05T03:59:59Z",
+    }
+  );
+});
+
+test("scoreCandidate prioritizes an airborne adjacent-date occurrence over a scheduled match", () => {
+  const query = { flightNumber: "AA258", date: "2026-08-05" };
+  const airborneScore = __test__.scoreCandidate(
+    {
+      ident_iata: "AA258",
+      status: "En Route",
+      scheduled_out: "2026-08-05T01:05:00Z",
+      scheduled_in: "2026-08-05T06:50:00Z",
+      origin_iata: "PHL",
+      destination_iata: "LIS",
+    },
+    query,
+    __test__.normalizeRecordFromFlightAware
+  );
+  const scheduledScore = __test__.scoreCandidate(
+    {
+      ident_iata: "AA258",
+      status: "Scheduled",
+      scheduled_out: "2026-08-05T21:05:00Z",
+      scheduled_in: "2026-08-06T02:50:00Z",
+      origin_iata: "PHL",
+      destination_iata: "LIS",
+    },
+    query,
+    __test__.normalizeRecordFromFlightAware
+  );
+
+  assert.ok(airborneScore > scheduledScore);
+});
+
 test("flightAwareHistoryBounds widens to UTC day coverage for the selected local day", () => {
   assert.deepEqual(__test__.flightAwareHistoryBounds("2026-04-23", 330), {
     start: "2026-04-22",
