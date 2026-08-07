@@ -29,6 +29,7 @@ const ACTIVE_VIEWER_TTL_SECONDS = 90;
 const DEPARTURE_CATCHUP_AFTER_MS = 2 * 60_000;
 const DEPARTURE_CATCHUP_FINAL_AFTER_MS = 17 * 60_000;
 const ARRIVAL_CATCHUP_AFTER_MS = 6 * 60_000;
+const PREFLIGHT_REMINDER_BEFORE_MS = 5 * 60 * 60_000;
 const ARRIVAL_DETAIL_CHECKPOINTS = [
   { stage: "t-4h", offsetMs: -4 * 60 * 60_000 },
   { stage: "t-2h", offsetMs: -2 * 60 * 60_000 },
@@ -193,9 +194,14 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     for (const target of targets) {
       const delivery = await repository.createNotificationDelivery(target.userFlight.user_id, data.flight.id, data.event.id, "apns");
       if (!delivery.created || !delivery.row) continue;
+      const notificationContext = {
+        isCircle: target.isCircle === true,
+        isTraveler: target.isTraveler !== false,
+        ownerDisplayName: target.ownerDisplayName || null,
+      };
       try {
         if (repository.createAppNotification) {
-          const payload = notificationPayload(data.flight, data.event);
+          const payload = notificationPayload(data.flight, data.event, notificationContext);
           await repository.createAppNotification({
             userId: target.userFlight.user_id,
             flightInstanceId: data.flight.id,
@@ -209,7 +215,12 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
         }
         const results = [];
         for (const token of target.tokens) {
-          const result = await apns.sendFlightEvent({ token, flight: data.flight, event: data.event });
+          const result = await apns.sendFlightEvent({
+            token,
+            flight: data.flight,
+            event: data.event,
+            context: notificationContext,
+          });
           results.push({ token, result });
           if (isInvalidApnsTokenResult(result) && repository.disableDeviceToken) {
             await repository.disableDeviceToken(token.device_token || token.apnsToken);
@@ -256,10 +267,10 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
   async function saveUserFlight(userId, input) {
     const flight = await searchFlight(input, { userId });
     if (!flight.flightInstanceId) return { flight, userFlight: null };
+    const userFlight = await repository.upsertUserFlight(userId, flight.flightInstanceId, input);
     await ensureLiveSource(flight.flightInstanceId, "user_saved");
     await scheduleLifecycleCatchups(flight.flightInstanceId, "user_saved");
     await scheduleWeatherInsight(flight.flightInstanceId, "user_saved");
-    const userFlight = await repository.upsertUserFlight(userId, flight.flightInstanceId, input);
     return { flight, userFlight };
   }
 
@@ -495,7 +506,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
           });
         }
         if (alert.event_type === "flight_departure_soon") {
-          const recent = await repository.findRecentEventByType?.(target.id, "TRIP_STARTING", 5 * 60_000);
+          const recent = await repository.findRecentEventByType?.(target.id, "TRIP_STARTING", 24 * 60 * 60_000);
           if (recent) continue;
           const [event] = await repository.insertEvents(target.id, [{
             event_type: "TRIP_STARTING",
@@ -621,10 +632,21 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
 
   async function scheduleLifecycleCatchups(flightInstanceId, reason) {
     const row = await repository.findFlightById(flightInstanceId);
-    if (!row || isFinalStatus(row.status) || isStreamingActive(row)) return [];
+    if (!row || isFinalStatus(row.status)) return [];
     const scheduled = [];
     const departureMs = new Date(row.estimated_departure_at || row.scheduled_departure_at || 0).getTime();
     if (Number.isFinite(departureMs)) {
+      if (!row.actual_departure_at && departureMs > Date.now()) {
+        scheduled.push(await queue.add("preflightReminderJob", {
+          flight_instance_id: flightInstanceId,
+          reason,
+        }, {
+          dedupe: true,
+          dedupeKey: `preflight-reminder:t-5h:${flightInstanceId}`,
+          delayMs: Math.max(0, departureMs - PREFLIGHT_REMINDER_BEFORE_MS - Date.now()),
+        }));
+      }
+      if (isStreamingActive(row)) return scheduled;
       if (Date.now() < departureMs + DEPARTURE_CATCHUP_FINAL_AFTER_MS) {
         scheduled.push(await queue.add("departureCatchupJob", { flight_instance_id: flightInstanceId, reason, stage: "first" }, {
           dedupe: true,
@@ -649,6 +671,44 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
       scheduled.push(...await scheduleArrivalDetailRefreshes(flightInstanceId, reason, row));
     }
     return scheduled;
+  }
+
+  async function preflightReminderJob(job) {
+    const row = await repository.findFlightById(job.data.flight_instance_id);
+    if (!row || isFinalStatus(row.status) || row.actual_departure_at) return null;
+
+    const departureAt = row.estimated_departure_at || row.scheduled_departure_at;
+    const departureMs = new Date(departureAt || 0).getTime();
+    const minutesUntilDeparture = Math.round((departureMs - Date.now()) / 60_000);
+    if (!Number.isFinite(departureMs) || minutesUntilDeparture <= 0 || minutesUntilDeparture > 330) {
+      return null;
+    }
+
+    const recent = await repository.findRecentEventByType?.(row.id, "TRIP_STARTING", 24 * 60 * 60_000);
+    if (recent) return recent;
+
+    const [event] = await repository.insertEvents(row.id, [{
+      event_type: "TRIP_STARTING",
+      event_severity: "low",
+      old_value: null,
+      new_value: {
+        minutesUntilDeparture,
+        scheduledDepartureAt: row.scheduled_departure_at || departureAt,
+        estimatedDepartureAt: row.estimated_departure_at || null,
+      },
+      summary: "Flight scheduled to depart in about five hours",
+      notification_required: true,
+      confidence: "high",
+      provider_event_time: new Date().toISOString(),
+    }], "runwy");
+
+    if (event?.notification_required) {
+      await queue.add("fanoutNotificationJob", { flight_event_id: event.id }, {
+        dedupe: true,
+        dedupeKey: `fanout:${event.id}`,
+      });
+    }
+    return event || null;
   }
 
   async function recoverLifecycleCatchups(reason = "lifecycle_recovery") {
@@ -752,6 +812,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
   queue.process("departureCatchupJob", departureCatchupJob);
   queue.process("arrivalCatchupJob", arrivalCatchupJob);
   queue.process("arrivalDetailRefreshJob", arrivalDetailRefreshJob);
+  queue.process("preflightReminderJob", preflightReminderJob);
 
   return {
     searchFlight,
@@ -766,6 +827,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     flightWithWeatherInsight,
     scheduleWeatherInsight,
     scheduleLifecycleCatchups,
+    preflightReminderJob,
     recoverLifecycleCatchups,
     ensureLiveSource,
     ensureStreamingRegistration,

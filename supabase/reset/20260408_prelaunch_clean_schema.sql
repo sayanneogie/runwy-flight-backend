@@ -108,7 +108,8 @@ create table public.user_flights (
         'manual_verified',
         'manual_recovery',
         'history_snapshot',
-        'history_repair'
+        'history_repair',
+        'travelled_archive'
       )
     ),
   lifecycle_state text not null default 'upcoming'

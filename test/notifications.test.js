@@ -423,13 +423,66 @@ test("arrival notifications include destination, weather, taxi, gate, timing, an
     { visitOrdinal: 66 }
   );
 
-  assert.equal(payload.aps.alert.title, "Welcome to Bengaluru! 🌤️ 28°");
+  assert.equal(payload.aps.alert.title, "✈️ Welcome to Bengaluru! 🌤️ 28°");
   assert.match(payload.aps.alert.body, /Taxiing for 8m\./);
   assert.match(payload.aps.alert.body, /BLR • Terminal 1 • Gate A1/);
   assert.match(payload.aps.alert.body, /4:48 PM local time \(17m early\)/);
   assert.match(payload.aps.alert.body, /66th time here\./);
   assert.equal(payload.flight_instance_id, "flight-id");
   assert.equal(payload.deep_link, "runwy://flights/flight-id");
+});
+
+test("tracking-only arrival notifications use observer language without a welcome", () => {
+  const payload = __test__.notificationPayloadFor(
+    {
+      flightNumber: "101",
+      airlineCode: "AI",
+      departureAirportIata: "FCO",
+      arrivalAirportIata: "JFK",
+      departureCity: "Rome",
+      arrivalCity: "New York",
+      arrivalTimezone: "America/New_York",
+      arrivalTimes: {
+        scheduled: "2026-08-07T20:44:00.000Z",
+        estimated: "2026-08-07T20:44:00.000Z",
+        actual: "2026-08-07T20:44:00.000Z",
+      },
+      status: "landed",
+      alerts: {
+        arrivedNow: true,
+      },
+    },
+    "flight-id",
+    { isOwner: true, isTraveler: false }
+  );
+
+  assert.equal(payload.aps.alert.title, "✈️ Tracked Flight Landed");
+  assert.equal(
+    payload.aps.alert.body,
+    "Flight AI 101, Rome to New York, that you were tracking has landed at 4:44 PM local time."
+  );
+  assert.equal(payload.runwy.trackingOnly, true);
+  assert.doesNotMatch(payload.aps.alert.title, /Welcome/);
+});
+
+test("circle takeoff notifications identify the traveler and use the plane emoji", () => {
+  const payload = __test__.notificationPayloadFor(
+    {
+      flightNumber: "AI101",
+      airlineCode: "AI",
+      departureAirportIata: "FCO",
+      arrivalAirportIata: "JFK",
+      departureCity: "Rome",
+      arrivalCity: "New York",
+      status: "airborne",
+      alerts: { departedNow: true },
+    },
+    "flight-id",
+    { isOwner: false, isTraveler: false, travelerName: "Maya Patel" }
+  );
+
+  assert.equal(payload.aps.alert.title, "✈️ Flight Took Off");
+  assert.equal(payload.aps.alert.body, "Maya's flight AI 101, Rome to New York, is now in the air.");
 });
 
 test("landing and baggage assignment create separate notification events", () => {
@@ -456,7 +509,7 @@ test("landing and baggage assignment create separate notification events", () =>
     events.map((event) => event.type),
     ["flight_arrived", "flight_baggage_claim"]
   );
-  assert.equal(events[1].title, "Baggage Claim Assigned");
+  assert.equal(events[1].title, "🧳 Baggage Claim Assigned");
   assert.equal(events[1].body, "Your luggage for flight 6E 123, Delhi to Bengaluru will be on belt 3.");
   assert.equal(
     __test__.notificationDedupeKey("flight-id", events[0]),
@@ -485,7 +538,7 @@ test("circle baggage notifications identify the traveler and flight", () => {
     { isOwner: false, travelerName: "Maya Patel" }
   );
 
-  assert.equal(events[0].title, "Baggage Claim Assigned");
+  assert.equal(events[0].title, "🧳 Baggage Claim Assigned");
   assert.equal(events[0].body, "Maya's luggage for flight AI 101, Rome to New York will be on belt 6.");
 });
 
@@ -527,7 +580,7 @@ test("reliable baggage reassignments name both the previous and new belt", () =>
     { previousNotifiedBaggageBelt: "7" }
   );
 
-  assert.equal(event.title, "Baggage Claim Changed");
+  assert.equal(event.title, "🧳 Baggage Claim Changed");
   assert.equal(
     event.body,
     "Your luggage for flight EK 379, Phuket to Dubai changed from belt 7 to belt 12."

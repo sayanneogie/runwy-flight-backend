@@ -31,5 +31,8 @@
     "helmet": "^8.1.0",
     "pg": "^8.11.5",
     "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "tz-lookup": "^6.1.25"
   }
 }

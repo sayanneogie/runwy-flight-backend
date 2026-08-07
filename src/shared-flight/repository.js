@@ -252,9 +252,17 @@ function createMemorySharedFlightRepository() {
     },
     async listNotificationTargets(flightInstanceId, severity, _eventType) {
       return [...userFlights.values()]
-        .filter((row) => row.flight_instance_id === flightInstanceId && row.notification_enabled !== false && row.alert_preferences?.[severity] !== false)
+        .filter((row) =>
+          row.flight_instance_id === flightInstanceId &&
+          row.notification_enabled !== false &&
+          row.alert_preferences?.[severity] !== false &&
+          (_eventType !== "TRIP_STARTING" || row.source_type !== "tracked")
+        )
         .map((userFlight) => ({
           userFlight,
+          isCircle: false,
+          isTraveler: userFlight.source_type !== "tracked",
+          ownerDisplayName: null,
           tokens: [...deviceTokens.values()].filter((token) => token.user_id === userFlight.user_id && token.is_active),
         }));
     },
@@ -780,23 +788,35 @@ function createPostgresSharedFlightRepository(pool) {
     },
     async listNotificationTargets(flightInstanceId, severity, eventType) {
       const circleCondition = circleNotificationPreferenceConditionForEventType(eventType);
+      const tripStartingCondition = eventType === "TRIP_STARTING"
+        ? "and coalesce(uf.source_type, 'tracked') <> 'tracked'"
+        : "";
       const result = await pool.query(
         `with owner_targets as (
            select
              uf as user_flight,
-             uf.user_id as recipient_user_id
+             uf.user_id as recipient_user_id,
+             false as is_circle,
+             p.display_name as owner_display_name,
+             coalesce(uf.source_type, 'tracked') <> 'tracked' as is_traveler
            from public.user_flights uf
+           left join public.profiles p on p.user_id = uf.user_id
            where uf.flight_instance_id = $1
              and uf.notification_enabled = true
              and uf.deleted_at is null
              and coalesce(uf.lifecycle_state, '') <> 'deleted'
              and coalesce((uf.alert_preferences ->> $2)::boolean, false) = true
+             ${tripStartingCondition}
          ),
          circle_targets as (
            select
              uf as user_flight,
-             fp.viewer_user_id as recipient_user_id
+             fp.viewer_user_id as recipient_user_id,
+             true as is_circle,
+             p.display_name as owner_display_name,
+             false as is_traveler
            from public.user_flights uf
+           left join public.profiles p on p.user_id = uf.user_id
            join public.friend_permissions fp
              on fp.owner_user_id = uf.user_id
            join public.friend_relationships fr
@@ -807,6 +827,7 @@ function createPostgresSharedFlightRepository(pool) {
              and fr.relationship_status = 'active'
              and fp.can_view_live = true
              and fp.can_receive_alerts = true
+             ${tripStartingCondition}
              and (
                fp.share_scope = 'all_flights'
                or (fp.share_scope = 'future_flights' and coalesce(uf.lifecycle_state, '') in ('upcoming', 'active'))
@@ -821,16 +842,22 @@ function createPostgresSharedFlightRepository(pool) {
          select
            user_flight,
            recipient_user_id,
+           is_circle,
+           owner_display_name,
+           is_traveler,
            coalesce(jsonb_agg(dt) filter (where dt.id is not null), '[]'::jsonb) as tokens
          from targets
          left join public.device_tokens dt
            on dt.user_id = targets.recipient_user_id
           and dt.is_active = true
-         group by user_flight, recipient_user_id`,
+         group by user_flight, recipient_user_id, is_circle, owner_display_name, is_traveler`,
         [flightInstanceId, severity]
       );
       return result.rows.map((row) => ({
         userFlight: { ...row.user_flight, user_id: row.recipient_user_id || row.user_flight?.user_id },
+        isCircle: row.is_circle === true,
+        isTraveler: row.is_traveler === true,
+        ownerDisplayName: row.owner_display_name || null,
         tokens: row.tokens || [],
       }));
     },

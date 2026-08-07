@@ -122,7 +122,10 @@ const FLIGHTAWARE_POSITION_CACHE_TTL_MS = toPositiveNumber(
   5 * 60_000
 );
 const FLIGHTAWARE_SCHEDULE_WINDOW_MS = 48 * 60 * 60_000;
-const RATE_LIMIT_PER_MINUTE = toPositiveNumber(process.env.RATE_LIMIT_PER_MINUTE, 60);
+// This bucket covers every authenticated /v1 request, including background
+// lifecycle, Circle, device-token, and cached status traffic. Keep enough
+// headroom that those requests cannot block an intentional flight search.
+const RATE_LIMIT_PER_MINUTE = toPositiveNumber(process.env.RATE_LIMIT_PER_MINUTE, 300);
 const WEBHOOK_SHARED_SECRET = (process.env.FLIGHTAWARE_WEBHOOK_SECRET || process.env.WEBHOOK_SHARED_SECRET || "").trim();
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
@@ -3717,6 +3720,15 @@ function routeCitiesForNotification(normalized) {
   return departure && arrival ? `${departure} to ${arrival}` : null;
 }
 
+function flightSubjectForNotification(normalized, context = {}, ownerPrefix = "Flight") {
+  const code = readableFlightCode(normalized);
+  const travelerName = firstNameForNotification(context.travelerName);
+  if (context.isOwner === false && travelerName) {
+    return `${travelerName}'s flight ${code}`;
+  }
+  return `${ownerPrefix} ${code}`;
+}
+
 function airportForNotification(iata) {
   const code = normalizeAirportCode(iata);
   if (!code) return null;
@@ -3810,7 +3822,7 @@ function arrivalWelcomePayload(normalized, flightId, context = {}) {
   const airportCode = normalizeAirportCode(normalized?.arrivalAirportIata) || "your destination";
   const airport = context.airport || airportForNotification(airportCode);
   const city = airport?.city || normalized?.arrivalCity || airportCode;
-  const title = `Welcome to ${city}!${arrivalWeatherTitleSuffix(normalized)}`;
+  const title = `✈️ Welcome to ${city}!${arrivalWeatherTitleSuffix(normalized)}`;
   const terminal = String(normalized?.arrivalTerminal || "").trim();
   const gate = String(normalized?.arrivalGate || "").trim();
   const locationParts = [
@@ -3868,6 +3880,44 @@ function arrivalWelcomePayload(normalized, flightId, context = {}) {
   };
 }
 
+function trackedArrivalPayload(normalized, flightId, context = {}) {
+  const code = readableFlightCode(normalized);
+  const route = routeCitiesForNotification(normalized);
+  const localTime = arrivalLocalTimeForNotification(normalized);
+  const travelerName = firstNameForNotification(context.travelerName);
+  const subject = context.isOwner === false && travelerName
+    ? `${travelerName}'s flight ${code}`
+    : `Flight ${code}`;
+
+  let body = `${subject}${route ? `, ${route},` : ""} that you were tracking has landed`;
+  if (localTime) {
+    body += ` at ${localTime} local time`;
+  }
+  body += ".";
+
+  return {
+    aps: {
+      alert: {
+        title: "✈️ Tracked Flight Landed",
+        body,
+      },
+      sound: "default",
+      "thread-id": `runwy.flight.${flightId}`,
+      "interruption-level": "active",
+    },
+    flight_instance_id: flightId,
+    deep_link: `runwy://flights/${flightId}`,
+    runwy: {
+      type: "flight_arrived",
+      flightId,
+      status: normalized.status || null,
+      route: `${normalized?.departureAirportIata || "---"} → ${normalized?.arrivalAirportIata || "---"}`,
+      destinationIata: normalizeAirportCode(normalized?.arrivalAirportIata),
+      trackingOnly: true,
+    },
+  };
+}
+
 function notificationPayloadFor(normalized, flightId, context = {}) {
   const alerts = normalized?.alerts;
   if (!alerts) return null;
@@ -3894,15 +3944,19 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
   }
 
   if (alerts.arrivedNow) {
-    return arrivalWelcomePayload(normalized, flightId, context);
+    return context.isTraveler === false
+      ? trackedArrivalPayload(normalized, flightId, context)
+      : arrivalWelcomePayload(normalized, flightId, context);
   }
 
   if (alerts.departedNow) {
+    const subject = flightSubjectForNotification(normalized, context);
+    const routeDescription = routeCitiesForNotification(normalized);
     return {
       aps: {
         alert: {
-          title: "Flight Took Off",
-          body: `${code} (${route}) is now in the air.`,
+          title: "✈️ Flight Took Off",
+          body: `${subject}${routeDescription ? `, ${routeDescription},` : ""} is now in the air.`,
         },
         sound: "default",
       },
@@ -3916,11 +3970,13 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
   }
 
   if (alerts.takeoffNow) {
+    const subject = flightSubjectForNotification(normalized, context);
+    const routeDescription = routeCitiesForNotification(normalized);
     return {
       aps: {
         alert: {
-          title: "Taking Off",
-          body: `${code} (${route}) is about to take off.`,
+          title: "✈️ Taking Off",
+          body: `${subject}${routeDescription ? `, ${routeDescription},` : ""} is about to take off.`,
         },
         sound: "default",
       },
@@ -4013,7 +4069,7 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
       return {
         aps: {
           alert: {
-            title: isReassignment ? "Baggage Claim Changed" : "Baggage Claim Assigned",
+            title: isReassignment ? "🧳 Baggage Claim Changed" : "🧳 Baggage Claim Assigned",
             body: isReassignment
               ? `${luggageOwner}${flightDescription ? ` for ${flightDescription}` : ""} changed from belt ${previousNotifiedBelt} to belt ${belt}.`
               : `${luggageOwner}${flightDescription ? ` for ${flightDescription}` : ""} will be on belt ${belt}.`,
@@ -4204,7 +4260,8 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
       select
         base.owner_user_id as user_id,
         null::uuid as friend_relationship_id,
-        base.owner_display_name
+        base.owner_display_name,
+        coalesce(uf.source_type, 'tracked') <> 'tracked' as is_traveler
       from base
       left join public.user_flights uf
         on uf.user_id = base.owner_user_id
@@ -4217,7 +4274,8 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
       select
         fp.viewer_user_id as user_id,
         fp.relationship_id as friend_relationship_id,
-        base.owner_display_name
+        base.owner_display_name,
+        false as is_traveler
       from base
       join public.friend_permissions fp
         on fp.owner_user_id = base.owner_user_id
@@ -4237,6 +4295,7 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
       recipients.user_id::text as user_id,
       recipients.friend_relationship_id::text as friend_relationship_id,
       recipients.owner_display_name,
+      recipients.is_traveler,
       pd.apns_token
     from recipients
     left join public.push_devices pd
@@ -4250,6 +4309,7 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
     userId: row.user_id,
     friendRelationshipId: row.friend_relationship_id || null,
     ownerDisplayName: row.owner_display_name || null,
+    isTraveler: row.is_traveler === true,
     apnsToken: row.apns_token || null,
   }));
 }
@@ -4447,6 +4507,7 @@ async function arrivalVisitOrdinalForUser(userId, flightId, destinationIata) {
     from public.user_flights uf
     where uf.user_id = $1::uuid
       and upper(coalesce(uf.destination_iata, '')) = upper($2)
+      and uf.source_type = 'travelled_archive'
       and uf.deleted_at is null
       and uf.tracking_session_id is distinct from $3::uuid
       and (
@@ -4468,6 +4529,7 @@ function groupedNotificationRecipients(recipients) {
       userId: recipient.userId,
       friendRelationshipId: recipient.friendRelationshipId || null,
       ownerDisplayName: recipient.ownerDisplayName || null,
+      isTraveler: recipient.isTraveler === true,
       tokens: [],
     };
     if (recipient.apnsToken) {
@@ -4635,7 +4697,7 @@ async function dispatchFlightStatusNotifications(flightId, normalized) {
     for (const recipient of recipients) {
       const isOwner = !recipient.friendRelationshipId;
       const visitOrdinal =
-        eventType === "flight_arrived" && isOwner
+        eventType === "flight_arrived" && isOwner && recipient.isTraveler
           ? await arrivalVisitOrdinalForUser(
               recipient.userId,
               flightId,
@@ -4649,6 +4711,7 @@ async function dispatchFlightStatusNotifications(flightId, normalized) {
       const event = notificationEventsFor(notificationNormalized, flightId, {
         visitOrdinal,
         isOwner,
+        isTraveler: recipient.isTraveler,
         travelerName: recipient.ownerDisplayName,
         previousNotifiedBaggageBelt,
       })

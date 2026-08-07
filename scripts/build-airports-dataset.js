@@ -2,6 +2,7 @@
 
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const lookupTimeZone = require("tz-lookup");
 
 const AIRPORTS_CSV_URL =
   "https://raw.githubusercontent.com/davidmegginson/ourairports-data/main/airports.csv";
@@ -219,6 +220,7 @@ function makeAirport(record) {
     name,
     city,
     countryCode: /^[A-Z]{2}$/.test(countryCode) ? countryCode : "--",
+    timeZoneIdentifier: lookupTimeZone(latitude, longitude),
     coordinate: {
       latitude,
       longitude,

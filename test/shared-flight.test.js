@@ -861,6 +861,46 @@ test("weather insights are cached by airport hour and can create one advisory ev
   assert.ok(service.queue.jobs.some((job) => job.name === "fanoutNotificationJob"));
 });
 
+test("five-hour reminder is durable and excludes tracking-only followers", async () => {
+  const departure = new Date(Date.now() + 5 * 60 * 60_000 + 5 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 8 * 60 * 60_000).toISOString();
+  const { service, repository } = makeService(normalizedFlight({
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+  }));
+
+  const traveler = await service.saveUserFlight("traveler", {
+    airline: "SQ",
+    number: "509",
+    date: departure.slice(0, 10),
+    origin: "BLR",
+    destination: "SIN",
+    sourceType: "manual_search",
+  });
+  await repository.upsertUserFlight("tracker", traveler.flight.flightInstanceId, {
+    sourceType: "tracked",
+  });
+
+  assert.ok(service.queue.jobs.some((job) =>
+    job.name === "preflightReminderJob" &&
+    job.data.flight_instance_id === traveler.flight.flightInstanceId
+  ));
+
+  const event = await service.preflightReminderJob({
+    data: { flight_instance_id: traveler.flight.flightInstanceId },
+  });
+  assert.equal(event.event_type, "TRIP_STARTING");
+
+  const targets = await repository.listNotificationTargets(
+    traveler.flight.flightInstanceId,
+    "low",
+    "TRIP_STARTING"
+  );
+  assert.deepEqual(targets.map((target) => target.userFlight.user_id), ["traveler"]);
+});
+
 test("WeatherKit response is normalized into a conservative flight weather insight", () => {
   const insight = buildWeatherInsight({
     raw: {
