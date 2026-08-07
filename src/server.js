@@ -126,6 +126,10 @@ const FLIGHTAWARE_SCHEDULE_WINDOW_MS = 48 * 60 * 60_000;
 // lifecycle, Circle, device-token, and cached status traffic. Keep enough
 // headroom that those requests cannot block an intentional flight search.
 const RATE_LIMIT_PER_MINUTE = toPositiveNumber(process.env.RATE_LIMIT_PER_MINUTE, 300);
+const SEARCH_RATE_LIMIT_PER_MINUTE = toPositiveNumber(
+  process.env.SEARCH_RATE_LIMIT_PER_MINUTE,
+  60
+);
 const WEBHOOK_SHARED_SECRET = (process.env.FLIGHTAWARE_WEBHOOK_SECRET || process.env.WEBHOOK_SHARED_SECRET || "").trim();
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
@@ -180,6 +184,10 @@ const HEALTH_PROVIDER_AUTH_CACHE_TTL_MS = toPositiveNumber(
 const MAX_PROVIDER_CACHE_ENTRIES = toPositiveNumber(process.env.MAX_PROVIDER_CACHE_ENTRIES, 2_000);
 const MAX_MEMORY_TRACKED_FLIGHTS = toPositiveNumber(process.env.MAX_MEMORY_TRACKED_FLIGHTS, 10_000);
 const MAX_MEMORY_PUSH_DEVICES = toPositiveNumber(process.env.MAX_MEMORY_PUSH_DEVICES, 25_000);
+const TEST_NOTIFICATION_RATE_LIMIT_PER_MINUTE = toPositiveNumber(
+  process.env.TEST_NOTIFICATION_RATE_LIMIT_PER_MINUTE,
+  2
+);
 const SERVER_STARTED_AT = new Date().toISOString();
 const BUILD_INFO = Object.freeze({
   version: PACKAGE_VERSION,
@@ -269,36 +277,74 @@ app.use(express.json({ limit: "100kb" }));
 
 const authTokenCache = new Map();
 
+function isTestNotificationRequest(req) {
+  const path = String(req.originalUrl || req.url || "").split("?", 1)[0];
+  return path === "/v1/devices/test-notification";
+}
+
+function isFlightSearchRequest(req) {
+  const path = String(req.originalUrl || req.url || "").split("?", 1)[0];
+  return path === "/v1/search" || path === "/v1/search/route";
+}
+
+function authenticatedRequestKey(req, namespace) {
+  const userID = String(req.auth?.userId || "").trim();
+  if (userID) {
+    return `${namespace}:user:${userID.slice(0, 128)}`;
+  }
+
+  const ip = req.ip || req.socket?.remoteAddress || "unknown";
+  const deviceID = normalizedHeaderDeviceID(req);
+  if (deviceID) {
+    return `${namespace}:ip:${ip}|device:${deviceID.slice(0, 128)}`;
+  }
+  return `${namespace}:ip:${ip}`;
+}
+
 const limiter = rateLimit({
   windowMs: 60_000,
   max: RATE_LIMIT_PER_MINUTE,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => {
-    const userID = String(req.auth?.userId || "").trim();
-    if (userID) {
-      return `user:${userID.slice(0, 128)}`;
-    }
-    const ip = req.ip || req.socket?.remoteAddress || "unknown";
-    const deviceID = normalizedHeaderDeviceID(req);
-    if (deviceID) {
-      return `ip:${ip}|device:${deviceID.slice(0, 128)}`;
-    }
-    return `ip:${ip}`;
-  },
+  // Test pushes have a dedicated limiter below. Counting them here as well
+  // lets unrelated foreground/background API traffic disable the diagnostic.
+  skip: (req) => isTestNotificationRequest(req) || isFlightSearchRequest(req),
+  keyGenerator: (req) => authenticatedRequestKey(req, "api"),
+});
+
+const searchLimiter = rateLimit({
+  windowMs: 60_000,
+  max: SEARCH_RATE_LIMIT_PER_MINUTE,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => authenticatedRequestKey(req, "flight-search"),
 });
 
 const testNotificationLimiter = rateLimit({
   windowMs: 60_000,
-  max: 2,
+  max: TEST_NOTIFICATION_RATE_LIMIT_PER_MINUTE,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => `test-push:${String(req.auth?.userId || req.ip || "unknown").slice(0, 128)}`,
-  message: { error: "Please wait before scheduling another test notification." },
+  keyGenerator: (req) => {
+    const userID = String(req.auth?.userId || req.ip || "unknown").slice(0, 128);
+    const deviceID = normalizedHeaderDeviceID(req) || "unknown-device";
+    return `test-push:${userID}:${deviceID.slice(0, 128)}`;
+  },
+  handler: (req, res) => {
+    const resetAt = req.rateLimit?.resetTime?.getTime?.() || Date.now() + 60_000;
+    const retryAfterSeconds = Math.max(1, Math.ceil((resetAt - Date.now()) / 1_000));
+    return res.status(429).json({
+      error: `Please wait ${retryAfterSeconds}s before scheduling another test notification.`,
+      retryAfterSeconds,
+    });
+  },
 });
 
 app.use("/v1", authenticateRequest);
 app.use("/v1", limiter);
+// Search has its own bucket so unrelated lifecycle and background requests
+// cannot prevent a user from deliberately looking up a flight.
+app.use("/v1/search", searchLimiter);
 
 const providerCache = new Map();
 const providerInFlightRequests = new Map();
