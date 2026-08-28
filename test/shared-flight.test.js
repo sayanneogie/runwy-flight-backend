@@ -1434,6 +1434,38 @@ test("departure catchup still refreshes after gate-out while takeoff is unconfir
   assert.equal((await repository.findFlightById(flight.flightInstanceId)).status, "enroute");
 });
 
+test("lifecycle recovery replaces a missed takeoff timer after a deploy", async () => {
+  const departure = new Date(Date.now() - 30 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+  const { service, repository } = makeService(normalizedFlight({
+    status: "taxiing",
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    actualDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    takeoffTimes: { actual: null },
+  }));
+  const saved = await service.saveUserFlight("u1", {
+    airline: "SQ",
+    number: "509",
+    date: departure.slice(0, 10),
+    origin: "BLR",
+    destination: "SIN",
+  });
+  const row = await repository.findFlightById(saved.flight.flightInstanceId);
+  row.last_fetched_at = new Date(Date.now() - 20 * 60_000).toISOString();
+  row.updated_at = row.last_fetched_at;
+  await repository.updateFlight(row);
+
+  const result = await service.recoverLifecycleCatchups("api_startup");
+
+  assert.equal(result.checked, 1);
+  assert.ok(service.queue.jobs.some((job) =>
+    job.name === "departureCatchupJob" && job.data.stage === "restart_recovery"
+  ));
+});
+
 test("weather insights are cached by airport hour and can create one advisory event", async () => {
   let weatherCalls = 0;
   const departure = new Date(Date.now() + 4 * 60 * 60_000).toISOString();

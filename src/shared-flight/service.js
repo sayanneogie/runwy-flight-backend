@@ -28,6 +28,8 @@ const REFRESH_LOCK_MS = 90_000;
 const ACTIVE_VIEWER_TTL_SECONDS = 90;
 const DEPARTURE_CATCHUP_AFTER_MS = 2 * 60_000;
 const DEPARTURE_CATCHUP_FINAL_AFTER_MS = 8 * 60_000;
+const MISSED_DEPARTURE_RECOVERY_MIN_STALE_MS = 10 * 60_000;
+const MISSED_DEPARTURE_RECOVERY_WINDOW_MS = 2 * 60 * 60_000;
 const ARRIVAL_CATCHUP_AFTER_MS = 6 * 60_000;
 const PREFLIGHT_REMINDER_BEFORE_MS = 5 * 60 * 60_000;
 const DEPARTURE_DETAIL_CHECKPOINTS = [
@@ -831,6 +833,21 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     for (const row of rows) {
       const jobs = await scheduleLifecycleCatchups(row.id, reason);
       scheduled += jobs.filter((job) => !job?.deduped).length;
+      // Timers are intentionally in-process and disappear during a deploy.
+      // If both bounded departure checks elapsed while this process was down,
+      // recover with one shared refresh. last_fetched_at limits retries during
+      // a long taxi or provider outage, independent of the number of users.
+      if (shouldRecoverMissedDeparture(row)) {
+        const recovery = await queue.add("departureCatchupJob", {
+          flight_instance_id: row.id,
+          reason,
+          stage: "restart_recovery",
+        }, {
+          dedupe: true,
+          dedupeKey: `departure-catchup:restart-recovery:${row.id}`,
+        });
+        if (!recovery?.deduped) scheduled += 1;
+      }
       if (!isProviderAlertActive(row) || needsProviderAlertConfigurationUpgrade(row, provider)) {
         await ensureLiveSource(row.id, `${reason}_alert_repair`);
       }
@@ -1045,6 +1062,14 @@ function isOperationallyOverdueWithoutTakeoff(row, nowMs = Date.now()) {
   if (actualTakeoff || hasAirbornePosition) return false;
   const departureMs = new Date(row?.estimated_departure_at || row?.scheduled_departure_at || "").getTime();
   return Number.isFinite(departureMs) && nowMs - departureMs >= 2 * 60_000;
+}
+
+function shouldRecoverMissedDeparture(row, nowMs = Date.now()) {
+  if (!isOperationallyOverdueWithoutTakeoff(row, nowMs)) return false;
+  const departureMs = new Date(row?.estimated_departure_at || row?.scheduled_departure_at || "").getTime();
+  if (!Number.isFinite(departureMs) || nowMs > departureMs + MISSED_DEPARTURE_RECOVERY_WINDOW_MS) return false;
+  const lastFetchedMs = new Date(row?.last_fetched_at || row?.updated_at || "").getTime();
+  return !Number.isFinite(lastFetchedMs) || nowMs - lastFetchedMs >= MISSED_DEPARTURE_RECOVERY_MIN_STALE_MS;
 }
 
 function isEffectivelyFinal(row) {
