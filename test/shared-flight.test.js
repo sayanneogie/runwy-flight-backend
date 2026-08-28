@@ -49,6 +49,7 @@ function makeService(providerFlight = normalizedFlight(), options = {}) {
   const queue = options.queue;
   const provider = {
     name: "test",
+    alertConfigurationChangedAt: options.alertConfigurationChangedAt,
     async fetchFlightByNumber(_params, fetchOptions = {}) {
       calls += 1;
       providerOptions.push(fetchOptions);
@@ -725,6 +726,40 @@ test("saving a flight creates one shared provider alert when the adapter support
   assert.equal(alertCalls, 1);
   assert.equal(row.provider_alert_status, "active");
   assert.equal(row.provider_alert_id, "alert-sq509");
+});
+
+test("lifecycle recovery upgrades an older active provider alert only once", async () => {
+  let alertCalls = 0;
+  const changedAt = new Date(Date.now() - 1_000).toISOString();
+  const { service, repository } = makeService(normalizedFlight(), {
+    alertConfigurationChangedAt: changedAt,
+    ensureFlightAlert: async (flight) => {
+      alertCalls += 1;
+      return {
+        providerAlertId: flight.provider_alert_id,
+        status: "active",
+        createdAt: new Date().toISOString(),
+      };
+    },
+  });
+  const flight = await service.searchFlight({ airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" });
+  const row = await repository.findFlightById(flight.flightInstanceId);
+  row.estimated_departure_at = new Date(Date.now() + 30 * 60_000).toISOString();
+  row.scheduled_departure_at = row.estimated_departure_at;
+  row.estimated_arrival_at = new Date(Date.now() + 3 * 60 * 60_000).toISOString();
+  row.scheduled_arrival_at = row.estimated_arrival_at;
+  await repository.updateFlight(row);
+  await repository.updateProviderAlert(row.id, {
+    providerAlertId: "old-alert",
+    status: "active",
+    createdAt: "2026-08-01T00:00:00.000Z",
+  });
+
+  await service.recoverLifecycleCatchups("first_recovery");
+  await service.recoverLifecycleCatchups("second_recovery");
+
+  assert.equal(alertCalls, 1);
+  assert.ok(Date.parse((await repository.findFlightById(row.id)).provider_alert_created_at) >= Date.parse(changedAt));
 });
 
 test("lifecycle recovery repairs missing alerts and reschedules active flights after restart", async () => {

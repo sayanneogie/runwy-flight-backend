@@ -238,6 +238,7 @@ const FLIGHTAWARE_AUTO_ALERT_EVENTS = Object.freeze({
 });
 const FLIGHTAWARE_AUTO_ALERT_IMPENDING_DEPARTURE_MINUTES = Object.freeze([120, 60, 15]);
 const FLIGHTAWARE_AUTO_ALERT_IMPENDING_ARRIVAL_MINUTES = Object.freeze([30]);
+const FLIGHTAWARE_ALERT_CONFIGURATION_CHANGED_AT = "2026-08-28T11:07:22.000Z";
 let flightAwareAlertEndpointReadyURL = null;
 let flightAwareAlertEndpointPromise = null;
 
@@ -3180,6 +3181,7 @@ const sharedFlightService = createSharedFlightService({
     ensureFlightAlert: FLIGHT_DATA_PROVIDER === "flightaware"
       ? (flight, options) => ensureFlightAwareAlertForSharedFlight(flight, options)
       : null,
+    alertConfigurationChangedAt: FLIGHTAWARE_ALERT_CONFIGURATION_CHANGED_AT,
   }),
 });
 
@@ -3363,7 +3365,9 @@ async function ensureFlightAwareAlertForSharedFlight(flight) {
   const disposition = flightAwareAlertCreationDisposition(context);
   if (!disposition.eligible) return null;
   const creationContext = { ...context, windowStrategy: disposition.windowStrategy };
-  const created = await createFlightAwareAlert({ targetUrl, context: creationContext });
+  const created = flight.provider_alert_id
+    ? await updateFlightAwareAlert({ alertId: flight.provider_alert_id, targetUrl, context: creationContext })
+    : await createFlightAwareAlert({ targetUrl, context: creationContext });
   return {
     providerAlertId: created.alertId,
     status: "active",
@@ -3371,6 +3375,25 @@ async function ensureFlightAwareAlertForSharedFlight(flight) {
     expiresAt: `${context.endDate}T23:59:59.999Z`,
     refreshPriority: "minimal",
   };
+}
+
+async function updateFlightAwareAlert({ alertId, targetUrl, context }) {
+  await ensureFlightAwareAlertEndpoint(targetUrl);
+  const payload = buildFlightAwareAlertPayload({ targetUrl, context });
+  const response = await fetch(`${FLIGHTAWARE_BASE_URL}/alerts/${encodeURIComponent(alertId)}`, {
+    method: "PUT",
+    headers: {
+      "x-apikey": FLIGHTAWARE_API_KEY,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  const responseText = await response.text();
+  if (!response.ok) {
+    throw new Error(`FlightAware alert update failed (${response.status}): ${responseText.slice(0, 200)}`);
+  }
+  return { alertId };
 }
 
 function flightAwareAlertFingerprint(context) {
@@ -6746,6 +6769,7 @@ module.exports = {
     ordinalNumber,
     shouldRefreshTrackedRecordFromWebhook,
     testPushNotificationPayload,
+    updateFlightAwareAlert,
     webhookStatusFromEvent,
     ownerNotificationPreferenceConditionForEventType,
     reconcileOperationalStatus,

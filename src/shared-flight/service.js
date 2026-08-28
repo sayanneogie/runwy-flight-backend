@@ -468,7 +468,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
   async function ensureProviderAlert(flightInstanceId, reason) {
     if (typeof provider.ensureFlightAlert !== "function") return null;
     const flight = await repository.findFlightById(flightInstanceId);
-    if (!flight || flight.provider_alert_status === "active" || isFinalStatus(flight.status)) return flight;
+    if (!flight || (!needsProviderAlertConfigurationUpgrade(flight, provider) && flight.provider_alert_status === "active") || isFinalStatus(flight.status)) return flight;
     try {
       const alert = await provider.ensureFlightAlert(flight, { reason });
       if (!alert) return flight;
@@ -826,7 +826,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     for (const row of rows) {
       const jobs = await scheduleLifecycleCatchups(row.id, reason);
       scheduled += jobs.filter((job) => !job?.deduped).length;
-      if (!isProviderAlertActive(row) && !isStreamingActive(row)) {
+      if ((!isProviderAlertActive(row) || needsProviderAlertConfigurationUpgrade(row, provider)) && !isStreamingActive(row)) {
         await ensureLiveSource(row.id, `${reason}_alert_repair`);
       }
     }
@@ -1106,6 +1106,14 @@ function needsArrivalDetailsForStage(row, stage) {
 
 function isArrivalDetailsRefreshReason(reason) {
   return String(reason || "").startsWith("arrival_details_");
+}
+
+function needsProviderAlertConfigurationUpgrade(row, provider) {
+  if (row?.provider_alert_status !== "active" || !row?.provider_alert_id) return false;
+  const changedAt = Date.parse(provider?.alertConfigurationChangedAt || "");
+  if (!Number.isFinite(changedAt)) return false;
+  const configuredAt = Date.parse(row.provider_alert_created_at || "");
+  return !Number.isFinite(configuredAt) || configuredAt < changedAt;
 }
 
 function isOperationalDetailsRefreshReason(reason) {

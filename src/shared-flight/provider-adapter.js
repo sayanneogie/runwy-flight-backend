@@ -1,6 +1,6 @@
 "use strict";
 
-function createProviderAdapter({ providerName, fetchFlights, fetchByProviderId, normalizeRecord, normalizeSelected, enrichNormalized, selectRecord, ensureFlightAlert, ensureFlightStream }) {
+function createProviderAdapter({ providerName, fetchFlights, fetchByProviderId, normalizeRecord, normalizeSelected, enrichNormalized, selectRecord, ensureFlightAlert, ensureFlightStream, alertConfigurationChangedAt }) {
   const adapter = {
     name: providerName,
     supportsProviderId: Boolean(fetchByProviderId),
@@ -30,6 +30,7 @@ function createProviderAdapter({ providerName, fetchFlights, fetchByProviderId, 
     },
   };
   if (typeof ensureFlightAlert === "function") adapter.ensureFlightAlert = ensureFlightAlert;
+  if (alertConfigurationChangedAt) adapter.alertConfigurationChangedAt = alertConfigurationChangedAt;
   if (typeof ensureFlightStream === "function") adapter.ensureFlightStream = ensureFlightStream;
   return adapter;
 }

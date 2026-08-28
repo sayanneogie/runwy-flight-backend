@@ -272,6 +272,38 @@ test("FlightAware alert payload prefers the exact provider flight id", () => {
   assert.equal(payload.events.in, true);
 });
 
+test("existing FlightAware alerts are updated in place for configuration changes", async () => {
+  const originalFetch = global.fetch;
+  const requests = [];
+  global.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options });
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+
+  try {
+    const result = await __test__.updateFlightAwareAlert({
+      alertId: "alert-existing",
+      targetUrl: "https://runwy.example.com/v1/webhooks/flightaware?secret=test",
+      context: {
+        providerFlightId: "AIC2418-instance",
+        flightNumber: "AI2418",
+        departureIata: "BLR",
+        arrivalIata: "DEL",
+        startDate: "2026-08-28",
+        endDate: "2026-08-30",
+        windowStrategy: "bounded",
+      },
+    });
+
+    const update = requests.find((request) => request.url.endsWith("/alerts/alert-existing"));
+    assert.equal(result.alertId, "alert-existing");
+    assert.equal(update.options.method, "PUT");
+    assert.equal(JSON.parse(update.options.body).events.out, true);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test("FlightAware alert ids are extracted from scalar, array, and object responses", () => {
   assert.equal(__test__.flightAwareAlertIDFromPayload(12345), "12345");
   assert.equal(__test__.flightAwareAlertIDFromPayload("67890"), "67890");
