@@ -354,6 +354,7 @@ function statusReconciledWithActualTimes(normalized) {
 function rowToFlightResponse(row, { source = "postgres", freshness = "fresh", isRefreshing = false } = {}) {
   if (!row) return null;
   const lifecycle = deriveFlightLifecyclePhase(row);
+  const normalized = row.normalized_data || {};
   return {
     flightKey: row.flight_key,
     flightInstanceId: row.id,
@@ -374,13 +375,25 @@ function rowToFlightResponse(row, { source = "postgres", freshness = "fresh", is
     estimatedArrivalAt: toIso(row.estimated_arrival_at),
     actualDepartureAt: toIso(row.actual_departure_at),
     actualArrivalAt: toIso(row.actual_arrival_at),
+    departureTimes: normalized.departureTimes || {
+      scheduled: toIso(row.scheduled_departure_at),
+      estimated: toIso(row.estimated_departure_at),
+      actual: toIso(row.actual_departure_at),
+    },
+    takeoffTimes: normalized.takeoffTimes || null,
+    landingTimes: normalized.landingTimes || null,
+    arrivalTimes: normalized.arrivalTimes || {
+      scheduled: toIso(row.scheduled_arrival_at),
+      estimated: toIso(row.estimated_arrival_at),
+      actual: toIso(row.actual_arrival_at),
+    },
     gate: row.gate,
     terminal: row.terminal,
-    departureGate: row.normalized_data?.departureGate || row.gate,
-    departureTerminal: row.normalized_data?.departureTerminal || row.terminal,
-    arrivalGate: row.normalized_data?.arrivalGate || null,
-    arrivalTerminal: row.normalized_data?.arrivalTerminal || null,
-    arrivalTimezone: row.normalized_data?.arrivalTimezone || null,
+    departureGate: normalized.departureGate || row.gate,
+    departureTerminal: normalized.departureTerminal || row.terminal,
+    arrivalGate: normalized.arrivalGate || null,
+    arrivalTerminal: normalized.arrivalTerminal || null,
+    arrivalTimezone: normalized.arrivalTimezone || null,
     baggageBelt: row.baggage_belt,
     position: {
       lat: row.position_lat,

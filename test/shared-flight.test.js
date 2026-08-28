@@ -159,6 +159,33 @@ test("provider adapter forwards detail-refresh options to enrichment", async () 
   assert.deepEqual(enrichmentOptions, { skipLivePosition: true });
 });
 
+test("provider adapter preserves separate gate-out and wheels-off timestamps", async () => {
+  const adapter = createProviderAdapter({
+    providerName: "flightaware",
+    fetchFlights: async () => [{ fa_flight_id: "AIC2418-instance" }],
+    normalizeRecord: () => normalizedFlight({
+      departureTimes: {
+        scheduled: "2026-08-28T11:00:00.000Z",
+        estimated: "2026-08-28T11:00:00.000Z",
+        actual: "2026-08-28T10:53:00.000Z",
+      },
+      takeoffTimes: {
+        scheduled: "2026-08-28T11:00:00.000Z",
+        estimated: "2026-08-28T11:03:00.000Z",
+        actual: "2026-08-28T11:07:35.000Z",
+      },
+    }),
+    selectRecord: (records) => records[0],
+  });
+
+  const result = await adapter.fetchFlightByNumber({
+    airline: "AI", number: "2418", date: "2026-08-28", origin: "BLR", destination: "DEL",
+  });
+
+  assert.equal(result.departureTimes.actual, "2026-08-28T10:53:00.000Z");
+  assert.equal(result.takeoffTimes.actual, "2026-08-28T11:07:35.000Z");
+});
+
 test("1000 users searching the same missing flight cause only one provider call", async () => {
   const { service, providerCalls } = makeService(normalizedFlight(), { delayMs: 300 });
   const requests = Array.from({ length: 1000 }, () =>

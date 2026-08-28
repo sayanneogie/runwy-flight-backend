@@ -344,6 +344,23 @@ test("normalizeRecordFromFlightAware reads nested airport operational fields", (
   assert.equal(normalized.arrivalTerminal, "2");
 });
 
+test("normalizeRecordFromFlightAware converts AeroAPI altitude hundreds to feet", () => {
+  const normalized = __test__.normalizeRecordFromFlightAware({
+    ident_iata: "AI2418",
+    origin: { code_iata: "BLR" },
+    destination: { code_iata: "DEL" },
+    last_position: {
+      latitude: 16.13584,
+      longitude: 77.81175,
+      altitude: 378,
+      groundspeed: 456,
+    },
+  });
+
+  assert.equal(normalized.livePosition.altitudeFeet, 37_800);
+  assert.equal(normalized.livePosition.groundSpeedKnots, 456);
+});
+
 test("normalizeRecordFromAviationstack preserves both airport operation sides", () => {
   const normalized = __test__.normalizeRecordFromAviationstack({
     flight: { iata: "6E174" },

@@ -951,15 +951,24 @@ function normalizeLivePositionFromFlightAware(record) {
       lastPosition.speed ??
       record?.groundspeed ??
       record?.ground_speed,
-    altitudeFeet:
-      lastPosition.altitude ??
-      lastPosition.reported_altitude ??
-      record?.altitude,
+    altitudeFeet: flightAwareAltitudeFeet(lastPosition, record),
     recordedAt:
       lastPosition.date ??
       record?.updated ??
       record?.filed_time,
   });
+}
+
+function flightAwareAltitudeFeet(...records) {
+  for (const record of records) {
+    const explicitFeet = finiteNumberOrNull(
+      record?.altitude_feet ?? record?.altitudeFeet ?? record?.reported_altitude_feet
+    );
+    if (explicitFeet !== null) return explicitFeet;
+    const hundredsOfFeet = finiteNumberOrNull(record?.altitude ?? record?.reported_altitude);
+    if (hundredsOfFeet !== null) return hundredsOfFeet * 100;
+  }
+  return null;
 }
 
 function firstNonBlank(...values) {
@@ -2311,11 +2320,7 @@ function normalizeFlightAwareTrackPoint(record) {
       properties.groundspeed ??
       properties.ground_speed ??
       properties.speed,
-    altitudeFeet:
-      record.altitude ??
-      record.reported_altitude ??
-      properties.altitude ??
-      properties.reported_altitude,
+    altitudeFeet: flightAwareAltitudeFeet(record, properties),
     recordedAt:
       record.timestamp ??
       record.recorded_at ??
@@ -6104,12 +6109,18 @@ function trackedPayloadFromSharedFlight(flight) {
     : deriveFlightLifecyclePhase(flight);
   const providerStatus = String(flight.providerStatus || flight.status || "scheduled").toLowerCase();
   const status = displayStatusForPhase(lifecycle.phase, providerStatus);
-  const scheduledDeparture = flight.scheduledDepartureAt || flight.estimatedDepartureAt || null;
-  const estimatedDeparture = flight.estimatedDepartureAt || flight.scheduledDepartureAt || null;
-  const actualDeparture = flight.actualDepartureAt || null;
-  const scheduledArrival = flight.scheduledArrivalAt || flight.estimatedArrivalAt || null;
-  const estimatedArrival = flight.estimatedArrivalAt || flight.scheduledArrivalAt || null;
-  const actualArrival = flight.actualArrivalAt || null;
+  const scheduledDeparture = flight.departureTimes?.scheduled || flight.scheduledDepartureAt || flight.estimatedDepartureAt || null;
+  const estimatedDeparture = flight.departureTimes?.estimated || flight.estimatedDepartureAt || flight.scheduledDepartureAt || null;
+  const actualDeparture = flight.departureTimes?.actual || flight.actualDepartureAt || null;
+  const scheduledTakeoff = flight.takeoffTimes?.scheduled || scheduledDeparture;
+  const estimatedTakeoff = flight.takeoffTimes?.estimated || estimatedDeparture;
+  const actualTakeoff = flight.takeoffTimes?.actual || null;
+  const scheduledArrival = flight.arrivalTimes?.scheduled || flight.scheduledArrivalAt || flight.estimatedArrivalAt || null;
+  const estimatedArrival = flight.arrivalTimes?.estimated || flight.estimatedArrivalAt || flight.scheduledArrivalAt || null;
+  const actualArrival = flight.arrivalTimes?.actual || flight.actualArrivalAt || null;
+  const scheduledLanding = flight.landingTimes?.scheduled || scheduledArrival;
+  const estimatedLanding = flight.landingTimes?.estimated || estimatedArrival;
+  const actualLanding = flight.landingTimes?.actual || null;
   const livePosition =
     flight.position?.lat != null && flight.position?.lon != null
       ? {
@@ -6137,14 +6148,14 @@ function trackedPayloadFromSharedFlight(flight) {
       actual: actualDeparture,
     },
     takeoffTimes: {
-      scheduled: scheduledDeparture,
-      estimated: estimatedDeparture,
-      actual: ["airborne", "enroute", "landed", "arrived", "arrived_at_gate"].includes(status) ? actualDeparture : null,
+      scheduled: scheduledTakeoff,
+      estimated: estimatedTakeoff,
+      actual: actualTakeoff,
     },
     landingTimes: {
-      scheduled: scheduledArrival,
-      estimated: estimatedArrival,
-      actual: ["landed", "arrived", "arrived_at_gate", "taxi_in"].includes(status) ? actualArrival : null,
+      scheduled: scheduledLanding,
+      estimated: estimatedLanding,
+      actual: actualLanding,
     },
     arrivalTimes: {
       scheduled: scheduledArrival,
