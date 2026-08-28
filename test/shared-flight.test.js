@@ -610,6 +610,36 @@ test("shared lifecycle phase infers airborne near arrival when provider status i
   assert.equal(displayStatusForPhase(lifecycle.phase, "scheduled"), "enroute");
 });
 
+test("gate-out timestamp does not masquerade as takeoff while provider says taxiing", () => {
+  const lifecycle = deriveFlightLifecyclePhase({
+    status: "taxiing",
+    actual_departure_at: "2026-08-28T10:53:00.000Z",
+    scheduled_departure_at: "2026-08-28T11:00:00.000Z",
+    estimated_arrival_at: "2026-08-28T13:34:00.000Z",
+    normalized_data: {
+      takeoffTimes: { actual: null },
+      position: { lat: null, lon: null },
+    },
+  }, Date.parse("2026-08-28T11:12:00.000Z"));
+
+  assert.equal(lifecycle.phase, "taxi_out");
+  assert.equal(lifecycle.confidence, "provider_confirmed");
+});
+
+test("actual OFF timestamp confirms airborne lifecycle", () => {
+  const lifecycle = deriveFlightLifecyclePhase({
+    status: "scheduled",
+    actual_departure_at: "2026-08-28T10:53:00.000Z",
+    estimated_arrival_at: "2026-08-28T13:34:00.000Z",
+    normalized_data: {
+      takeoffTimes: { actual: "2026-08-28T11:03:00.000Z" },
+    },
+  }, Date.parse("2026-08-28T11:12:00.000Z"));
+
+  assert.equal(lifecycle.phase, "airborne");
+  assert.equal(lifecycle.reason, "actual_takeoff_present");
+});
+
 test("webhook-backed flights avoid scheduled polling unless actively viewed or unsafe", () => {
   const now = Date.parse("2026-05-27T08:00:00.000Z");
   const webhookActive = {
@@ -920,7 +950,7 @@ test("active viewer heartbeat records temporary watcher state and queues stale r
   assert.ok(service.queue.jobs.some((job) => job.name === "refreshFlightJob" && job.data.reason === "active_viewer"));
 });
 
-test("streaming switch registers shared flights for stream updates instead of provider alerts", async () => {
+test("streaming switch keeps one shared provider alert as a delivery safety net", async () => {
   let streamCalls = 0;
   let alertCalls = 0;
   const { service, repository } = makeService(normalizedFlight(), {
@@ -945,7 +975,7 @@ test("streaming switch registers shared flights for stream updates instead of pr
 
   const row = await repository.findFlightById(saved.flight.flightInstanceId);
   assert.equal(streamCalls, 1);
-  assert.equal(alertCalls, 0);
+  assert.equal(alertCalls, 1);
   assert.equal(row.live_data_source, "streaming");
   assert.equal(row.streaming_status, "active");
 });
@@ -1372,6 +1402,36 @@ test("departure catchup performs one live refresh after overdue departure", asyn
   assert.equal(providerCalls(), 2);
   assert.equal(row.status, "enroute");
   assert.equal(row.actual_departure_at, departure);
+});
+
+test("departure catchup still refreshes after gate-out while takeoff is unconfirmed", async () => {
+  const departure = new Date(Date.now() - 4 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+  const { service, repository, providerCalls } = makeService((calls) => calls === 1
+    ? normalizedFlight({
+        status: "taxiing",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        takeoffTimes: { actual: null },
+      })
+    : normalizedFlight({
+        status: "enroute",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        takeoffTimes: { actual: departure },
+      }));
+  const flight = await service.searchFlight({ airline: "SQ", number: "509", date: departure.slice(0, 10), origin: "BLR", destination: "SIN" });
+
+  await service.departureCatchupJob({ data: { flight_instance_id: flight.flightInstanceId, stage: "final" } });
+
+  assert.equal(providerCalls(), 2);
+  assert.equal((await repository.findFlightById(flight.flightInstanceId)).status, "enroute");
 });
 
 test("weather insights are cached by airport hour and can create one advisory event", async () => {

@@ -27,7 +27,7 @@ const FETCH_LOCK_MS = 90_000;
 const REFRESH_LOCK_MS = 90_000;
 const ACTIVE_VIEWER_TTL_SECONDS = 90;
 const DEPARTURE_CATCHUP_AFTER_MS = 2 * 60_000;
-const DEPARTURE_CATCHUP_FINAL_AFTER_MS = 17 * 60_000;
+const DEPARTURE_CATCHUP_FINAL_AFTER_MS = 8 * 60_000;
 const ARRIVAL_CATCHUP_AFTER_MS = 6 * 60_000;
 const PREFLIGHT_REMINDER_BEFORE_MS = 5 * 60 * 60_000;
 const DEPARTURE_DETAIL_CHECKPOINTS = [
@@ -427,11 +427,16 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
   }
 
   async function ensureLiveSource(flightInstanceId, reason) {
+    let stream = null;
     if (streamingEnabled) {
-      const stream = await ensureStreamingRegistration(flightInstanceId, reason);
-      if (stream?.streaming_status === "active") return stream;
+      stream = await ensureStreamingRegistration(flightInstanceId, reason);
     }
-    return ensureProviderAlert(flightInstanceId, reason);
+    // A Firehose registration is a useful low-call live source, but it is not
+    // proof that the worker is connected or that every lifecycle event will be
+    // delivered. Keep one provider alert per shared flight as the inexpensive
+    // delivery safety net; downstream event dedupe prevents double pushes.
+    const alert = await ensureProviderAlert(flightInstanceId, reason);
+    return alert || stream;
   }
 
   async function ensureStreamingRegistration(flightInstanceId, reason) {
@@ -826,7 +831,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     for (const row of rows) {
       const jobs = await scheduleLifecycleCatchups(row.id, reason);
       scheduled += jobs.filter((job) => !job?.deduped).length;
-      if ((!isProviderAlertActive(row) || needsProviderAlertConfigurationUpgrade(row, provider)) && !isStreamingActive(row)) {
+      if (!isProviderAlertActive(row) || needsProviderAlertConfigurationUpgrade(row, provider)) {
         await ensureLiveSource(row.id, `${reason}_alert_repair`);
       }
     }
@@ -1031,7 +1036,13 @@ function isOperationallyOverdueWithoutTakeoff(row, nowMs = Date.now()) {
   if (["departed", "airborne", "enroute", "taxi_in", "landed", "arrived", "arrived_at_gate", "cancelled", "diverted"].includes(status)) {
     return false;
   }
-  if (row?.actual_departure_at) return false;
+  const normalized = row?.normalized_data || {};
+  const actualTakeoff = normalized?.takeoffTimes?.actual || normalized?.actualTakeoffAt || null;
+  const hasAirbornePosition =
+    row?.position_lat != null ||
+    normalized?.position?.lat != null ||
+    normalized?.livePosition?.latitude != null;
+  if (actualTakeoff || hasAirbornePosition) return false;
   const departureMs = new Date(row?.estimated_departure_at || row?.scheduled_departure_at || "").getTime();
   return Number.isFinite(departureMs) && nowMs - departureMs >= 2 * 60_000;
 }

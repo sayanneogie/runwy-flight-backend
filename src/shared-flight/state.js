@@ -119,6 +119,12 @@ function displayStatusForPhase(phase, fallbackStatus = "scheduled") {
 function deriveFlightLifecyclePhase(flight, nowMs = Date.now()) {
   const providerPhase = phaseFromProviderStatus(flight?.status);
   const actualDeparture = bestTime(flight, ["actual_departure_at", "actualDepartureAt"]);
+  const actualTakeoff = timestampMs(
+    flight?.normalized_data?.takeoffTimes?.actual ||
+    flight?.normalizedData?.takeoffTimes?.actual ||
+    flight?.takeoffTimes?.actual ||
+    flight?.actualTakeoffAt
+  );
   const actualArrival = bestTime(flight, ["actual_arrival_at", "actualArrivalAt"]);
   const scheduledDeparture = bestTime(flight, ["scheduled_departure_at", "scheduledDepartureAt"]);
   const estimatedDeparture = bestTime(flight, ["estimated_departure_at", "estimatedDepartureAt"]);
@@ -145,16 +151,21 @@ function deriveFlightLifecyclePhase(flight, nowMs = Date.now()) {
   if (providerPhase === "taxi_in") {
     return { phase: "taxi_in", confidence: "provider_confirmed", reason: "provider_status_taxi_in" };
   }
-  if (["airborne", "enroute", "departed"].includes(String(flight?.status || "").toLowerCase()) || actualDeparture || hasLivePosition) {
+  if (["takeoff_roll", "taxi_out", "taxiing", "boarding"].includes(providerPhase)) {
+    return { phase: providerPhase === "taxiing" ? "taxi_out" : providerPhase, confidence: "provider_confirmed", reason: `provider_status_${providerPhase}` };
+  }
+  if (["airborne", "enroute", "departed"].includes(String(flight?.status || "").toLowerCase()) || actualTakeoff || hasLivePosition) {
     const minutesUntilArrival = arrival != null ? (arrival - nowMs) / 60000 : null;
     return {
       phase: minutesUntilArrival != null && minutesUntilArrival <= APPROACH_WINDOW_MINUTES && minutesUntilArrival >= -10 ? "approaching" : "airborne",
-      confidence: hasLivePosition ? "position_confirmed" : actualDeparture ? "timestamp_confirmed" : "provider_confirmed",
-      reason: hasLivePosition ? "live_position_present" : actualDeparture ? "actual_departure_present" : "provider_airborne_status",
+      confidence: hasLivePosition ? "position_confirmed" : actualTakeoff ? "timestamp_confirmed" : "provider_confirmed",
+      reason: hasLivePosition ? "live_position_present" : actualTakeoff ? "actual_takeoff_present" : "provider_airborne_status",
     };
   }
-  if (["takeoff_roll", "taxi_out", "taxiing", "boarding"].includes(providerPhase)) {
-    return { phase: providerPhase === "taxiing" ? "taxi_out" : providerPhase, confidence: "provider_confirmed", reason: `provider_status_${providerPhase}` };
+  // FlightAware's actual OUT timestamp means the aircraft left the gate. It is
+  // not the OFF timestamp and must never, by itself, be shown as airborne.
+  if (actualDeparture) {
+    return { phase: "taxi_out", confidence: "timestamp_confirmed", reason: "actual_gate_departure_present" };
   }
 
   if (departure != null && arrival != null && arrival > departure) {
