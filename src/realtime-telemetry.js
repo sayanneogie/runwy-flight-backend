@@ -94,6 +94,17 @@ function mergeRealtimeTelemetry(previousNormalized, nextNormalized) {
   }
 
   const nextStatus = String(nextNormalized.status || "").toLowerCase();
+  const nextWithOperationalFallbacks = {
+    ...nextNormalized,
+    terminal: nextNormalized.terminal || previousNormalized.terminal || null,
+    gate: nextNormalized.gate || previousNormalized.gate || null,
+    departureTerminal: nextNormalized.departureTerminal || previousNormalized.departureTerminal || null,
+    departureGate: nextNormalized.departureGate || previousNormalized.departureGate || null,
+    arrivalTerminal: nextNormalized.arrivalTerminal || previousNormalized.arrivalTerminal || null,
+    arrivalGate: nextNormalized.arrivalGate || previousNormalized.arrivalGate || null,
+    baggageClaim: nextNormalized.baggageClaim || previousNormalized.baggageClaim || null,
+    baggageBelt: nextNormalized.baggageBelt || previousNormalized.baggageBelt || null,
+  };
   if (
     isTerminalStatus(nextStatus) ||
     nextNormalized.landingTimes?.actual ||
@@ -105,7 +116,7 @@ function mergeRealtimeTelemetry(previousNormalized, nextNormalized) {
     );
 
     return {
-      ...nextNormalized,
+      ...nextWithOperationalFallbacks,
       livePosition: null,
       trackPoints,
       progressPercent: normalizedProgressPercent(nextNormalized.progressPercent) ?? 100,
@@ -132,7 +143,7 @@ function mergeRealtimeTelemetry(previousNormalized, nextNormalized) {
     new Date().toISOString();
 
   return {
-    ...nextNormalized,
+    ...nextWithOperationalFallbacks,
     livePosition,
     trackPoints,
     progressPercent,

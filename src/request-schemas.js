@@ -79,22 +79,6 @@ const searchQuerySchema = z.object({
   timezoneOffsetMinutes: optionalTimezoneOffsetMinutesSchema,
 });
 
-const routeSearchQuerySchema = z.object({
-  date: dateSchema,
-  dep: optionalIataSchema,
-  arr: optionalIataSchema,
-  historical: optionalBooleanQuerySchema,
-  preferSchedules: optionalBooleanQuerySchema,
-  timezoneOffsetMinutes: optionalTimezoneOffsetMinutesSchema,
-}).superRefine((value, ctx) => {
-  if (!value.dep || !value.arr) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "Route search requires both dep and arr airport codes",
-    });
-  }
-});
-
 const pushTokenBodySchema = z.object({
   token: pushTokenSchema,
   platform: pushPlatformSchema.default("ios"),
@@ -133,22 +117,6 @@ function validateSearchQuery(query) {
   };
 }
 
-function validateRouteSearchQuery(query) {
-  const parsed = parseSchema(routeSearchQuerySchema, query);
-  if (parsed.error) return parsed;
-
-  return {
-    value: {
-      date: parsed.value.date,
-      departureIata: parsed.value.dep,
-      arrivalIata: parsed.value.arr,
-      historical: parsed.value.historical === true,
-      preferSchedules: parsed.value.preferSchedules === true,
-      timezoneOffsetMinutes: parsed.value.timezoneOffsetMinutes,
-    },
-  };
-}
-
 function validatePushTokenPayload(body) {
   const parsed = parseSchema(pushTokenBodySchema, body);
   if (parsed.error) return parsed;
@@ -163,7 +131,6 @@ function validatePushTokenPayload(body) {
 
 module.exports = {
   validatePushTokenPayload,
-  validateRouteSearchQuery,
   validateSearchQuery,
   validateTrackPayload,
 };

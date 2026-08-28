@@ -15,7 +15,7 @@ test("test push payload is a visible fixed APNs alert", () => {
         title: "Runwy Test Notification",
         body: "Closed-app notifications are working.",
       },
-      sound: "default",
+      sound: "RunwyNotification.caf",
     },
     runwy: {
       type: "push_test",

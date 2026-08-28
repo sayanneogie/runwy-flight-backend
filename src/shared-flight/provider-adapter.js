@@ -4,28 +4,28 @@ function createProviderAdapter({ providerName, fetchFlights, fetchByProviderId, 
   const adapter = {
     name: providerName,
     supportsProviderId: Boolean(fetchByProviderId),
-    async fetchFlightByNumber(params) {
+    async fetchFlightByNumber(params, options = {}) {
       const query = {
         flightNumber: `${params.airline}${params.number}`,
         date: params.date,
         departureIata: params.origin === "UNKNOWN" ? null : params.origin,
         arrivalIata: params.destination === "UNKNOWN" ? null : params.destination,
       };
-      const records = await fetchFlights(query);
+      const records = await fetchFlights(query, options);
       const selected = selectRecord ? selectRecord(records, query, normalizeRecord) : records?.[0];
       if (!selected) return null;
       const normalized = normalizeSelected
         ? await normalizeSelected(selected, records, query, params)
         : normalizeRecord(selected);
-      const enriched = enrichNormalized ? await enrichNormalized(normalized, selected, query, params) : normalized;
+      const enriched = enrichNormalized ? await enrichNormalized(normalized, selected, query, params, options) : normalized;
       return normalizeProviderRecord(selected, () => enriched, providerName, params);
     },
-    async fetchFlightByProviderId(providerFlightId) {
+    async fetchFlightByProviderId(providerFlightId, options = {}) {
       if (!fetchByProviderId) throw new Error("fetchFlightByProviderId is not configured");
-      const record = await fetchByProviderId(providerFlightId);
+      const record = await fetchByProviderId(providerFlightId, options);
       if (!record) return null;
       const normalized = normalizeRecord(record);
-      const enriched = enrichNormalized ? await enrichNormalized(normalized, record, {}, {}) : normalized;
+      const enriched = enrichNormalized ? await enrichNormalized(normalized, record, {}, {}, options) : normalized;
       return normalizeProviderRecord(record, () => enriched, providerName, {});
     },
   };

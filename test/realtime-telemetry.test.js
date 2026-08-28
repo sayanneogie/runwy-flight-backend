@@ -45,6 +45,35 @@ test("mergeRealtimeTelemetry preserves previous live position when next refresh 
   assert.equal(merged.lastUpdated, "2026-03-18T10:00:05.000Z");
 });
 
+test("mergeRealtimeTelemetry preserves gates and terminals when a later snapshot omits them", () => {
+  const previous = {
+    status: "enroute",
+    departureGate: "A6",
+    departureTerminal: "3",
+    arrivalGate: "C23",
+    arrivalTerminal: "1",
+    gate: "A6",
+    terminal: "3",
+  };
+  const next = {
+    status: "enroute",
+    departureGate: null,
+    departureTerminal: "3",
+    arrivalGate: null,
+    arrivalTerminal: "1",
+    gate: null,
+    terminal: "3",
+  };
+
+  const merged = mergeRealtimeTelemetry(previous, next);
+
+  assert.equal(merged.departureGate, "A6");
+  assert.equal(merged.arrivalGate, "C23");
+  assert.equal(merged.gate, "A6");
+  assert.equal(merged.departureTerminal, "3");
+  assert.equal(merged.arrivalTerminal, "1");
+});
+
 test("mergeRealtimeTelemetry prefers the newer live position", () => {
   const previous = {
     status: "enroute",

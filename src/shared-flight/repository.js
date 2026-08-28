@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const { mapNormalizedToDb } = require("./state");
 
 const DEFAULT_ALERT_PREFERENCES = Object.freeze({
@@ -19,10 +20,25 @@ function createMemorySharedFlightRepository() {
   const deliveries = new Map();
   const deviceTokens = new Map();
   const apiLogs = [];
+  const providerRequestLeases = new Map();
   let idCounter = 0;
   const nextId = () => `00000000-0000-4000-8000-${String(++idCounter).padStart(12, "0")}`;
 
   return {
+    async acquireProviderRequestLease(lockKey, ttlMs) {
+      const now = Date.now();
+      const existing = providerRequestLeases.get(lockKey);
+      if (existing && existing.expiresAt > now) return null;
+      const token = crypto.randomUUID();
+      providerRequestLeases.set(lockKey, { token, expiresAt: now + ttlMs });
+      return token;
+    },
+    async releaseProviderRequestLease(lockKey, token) {
+      const existing = providerRequestLeases.get(lockKey);
+      if (!existing || existing.token !== token) return false;
+      providerRequestLeases.delete(lockKey);
+      return true;
+    },
     async findFlightByKeyOrAlias(flightKey) {
       const aliasId = aliases.get(flightKey);
       if (aliasId) return [...flights.values()].find((row) => row.id === aliasId) || null;
@@ -231,6 +247,47 @@ function createMemorySharedFlightRepository() {
       userFlights.set(key, saved);
       return saved;
     },
+    async removeNotificationArtifactsForUserFlight(userId, userFlight = {}) {
+      const flightInstanceId = userFlight.flight_instance_id || null;
+      const trackingSessionId = userFlight.tracking_session_id || null;
+      const userFlightId = userFlight.id || null;
+      let notificationsRemoved = 0;
+      let deliveriesRemoved = 0;
+
+      for (const [key, row] of appNotifications.entries()) {
+        const payload = row.payload_json || {};
+        const matchesUserFlight = userFlightId && (
+          payload.user_flight_id === userFlightId ||
+          payload.userFlightId === userFlightId ||
+          payload.flight_id === userFlightId ||
+          payload.flightId === userFlightId
+        );
+        const matchesOwnedFlight = row.user_id === userId && (
+          (flightInstanceId && row.flight_instance_id === flightInstanceId) ||
+          (trackingSessionId && (
+            row.tracking_session_id === trackingSessionId ||
+            payload.tracking_session_id === trackingSessionId ||
+            payload.trackingSessionId === trackingSessionId
+          ))
+        );
+        if (matchesUserFlight || matchesOwnedFlight) {
+          appNotifications.delete(key);
+          notificationsRemoved += 1;
+        }
+      }
+
+      for (const [key, row] of deliveries.entries()) {
+        const matchesFlight =
+          (userFlightId && row.user_flight_id === userFlightId) ||
+          (row.user_id === userId && flightInstanceId && row.flight_instance_id === flightInstanceId);
+        if (matchesFlight) {
+          deliveries.delete(key);
+          deliveriesRemoved += 1;
+        }
+      }
+
+      return { notificationsRemoved, deliveriesRemoved };
+    },
     async upsertDeviceToken(userId, input) {
       const key = `${userId}:${input.deviceToken}`;
       const saved = { id: deviceTokens.get(key)?.id || nextId(), user_id: userId, device_token: input.deviceToken, platform: input.platform || "ios", environment: input.environment, is_active: true, updated_at: new Date().toISOString() };
@@ -266,10 +323,20 @@ function createMemorySharedFlightRepository() {
           tokens: [...deviceTokens.values()].filter((token) => token.user_id === userFlight.user_id && token.is_active),
         }));
     },
-    async createNotificationDelivery(userId, flightInstanceId, eventId, channel = "apns") {
+    async isUserFlightNotificationActive(ownerUserId, userFlightId) {
+      const row = [...userFlights.values()].find((item) =>
+        item.id === userFlightId && item.user_id === ownerUserId
+      );
+      return Boolean(
+        row &&
+        !row.deleted_at &&
+        row.lifecycle_state !== "deleted"
+      );
+    },
+    async createNotificationDelivery(userId, flightInstanceId, eventId, channel = "apns", userFlightId = null) {
       const key = `${userId}:${eventId}:${channel}`;
       if (deliveries.has(key)) return { row: deliveries.get(key), created: false };
-      const row = { id: nextId(), user_id: userId, flight_instance_id: flightInstanceId, flight_event_id: eventId, channel, status: "pending", created_at: new Date().toISOString() };
+      const row = { id: nextId(), user_id: userId, user_flight_id: userFlightId, flight_instance_id: flightInstanceId, flight_event_id: eventId, channel, status: "pending", created_at: new Date().toISOString() };
       deliveries.set(key, row);
       return { row, created: true };
     },
@@ -322,6 +389,34 @@ function createMemorySharedFlightRepository() {
 function createPostgresSharedFlightRepository(pool) {
   const one = (result) => result.rows[0] || null;
   return {
+    async acquireProviderRequestLease(lockKey, ttlMs) {
+      const token = crypto.randomUUID();
+      const result = await pool.query(
+        `
+        insert into public.provider_request_leases (lock_key, lease_token, expires_at)
+        values ($1, $2::uuid, now() + ($3::bigint * interval '1 millisecond'))
+        on conflict (lock_key) do update set
+          lease_token = excluded.lease_token,
+          expires_at = excluded.expires_at,
+          updated_at = now()
+        where public.provider_request_leases.expires_at <= now()
+        returning lease_token::text
+        `,
+        [lockKey, token, Math.max(1, Math.round(ttlMs))]
+      );
+      return result.rows[0]?.lease_token || null;
+    },
+    async releaseProviderRequestLease(lockKey, token) {
+      const result = await pool.query(
+        `
+        delete from public.provider_request_leases
+        where lock_key = $1 and lease_token = $2::uuid
+        returning lock_key
+        `,
+        [lockKey, token]
+      );
+      return result.rowCount > 0;
+    },
     async findFlightByKeyOrAlias(flightKey) {
       return one(await pool.query(
         `
@@ -763,6 +858,37 @@ function createPostgresSharedFlightRepository(pool) {
         [userId, id]
       ));
     },
+    async removeNotificationArtifactsForUserFlight(userId, userFlight = {}) {
+      const flightInstanceId = userFlight.flight_instance_id || null;
+      const trackingSessionId = userFlight.tracking_session_id || null;
+      const userFlightId = userFlight.id || null;
+
+      const notifications = await pool.query(
+        `delete from public.notifications
+         where ($4::uuid is not null and payload_json ->> 'user_flight_id' = $4::text)
+            or (user_id = $1::uuid and (
+             ($2::uuid is not null and payload_json ->> 'flight_instance_id' = $2::text)
+             or ($3::uuid is not null and tracking_session_id = $3::uuid)
+             or ($3::uuid is not null and payload_json ->> 'tracking_session_id' = $3::text)
+             or ($4::uuid is not null and payload_json ->> 'userFlightId' = $4::text)
+             or ($4::uuid is not null and payload_json ->> 'flight_id' = $4::text)
+             or ($4::uuid is not null and payload_json ->> 'flightId' = $4::text)
+           ))`,
+        [userId, flightInstanceId, trackingSessionId, userFlightId]
+      );
+
+      const deliveries = await pool.query(
+        `delete from public.notification_deliveries
+         where ($3::uuid is not null and user_flight_id = $3::uuid)
+            or (user_id = $1::uuid and $2::uuid is not null and flight_instance_id = $2::uuid)`,
+        [userId, flightInstanceId, userFlightId]
+      );
+
+      return {
+        notificationsRemoved: notifications.rowCount || 0,
+        deliveriesRemoved: deliveries.rowCount || 0,
+      };
+    },
     async upsertDeviceToken(userId, input) {
       return one(await pool.query(
         `insert into public.device_tokens (user_id, device_token, platform, environment, is_active, updated_at)
@@ -854,20 +980,38 @@ function createPostgresSharedFlightRepository(pool) {
         [flightInstanceId, severity]
       );
       return result.rows.map((row) => ({
-        userFlight: { ...row.user_flight, user_id: row.recipient_user_id || row.user_flight?.user_id },
+        userFlight: {
+          ...row.user_flight,
+          owner_user_id: row.user_flight?.user_id || null,
+          user_id: row.recipient_user_id || row.user_flight?.user_id,
+        },
         isCircle: row.is_circle === true,
         isTraveler: row.is_traveler === true,
         ownerDisplayName: row.owner_display_name || null,
         tokens: row.tokens || [],
       }));
     },
-    async createNotificationDelivery(userId, flightInstanceId, eventId, channel = "apns") {
+    async isUserFlightNotificationActive(ownerUserId, userFlightId) {
+      const result = await pool.query(
+        `select exists (
+           select 1
+           from public.user_flights
+           where id = $2::uuid
+             and user_id = $1::uuid
+             and deleted_at is null
+             and coalesce(lifecycle_state, '') <> 'deleted'
+         ) as active`,
+        [ownerUserId, userFlightId]
+      );
+      return result.rows[0]?.active === true;
+    },
+    async createNotificationDelivery(userId, flightInstanceId, eventId, channel = "apns", userFlightId = null) {
       const row = one(await pool.query(
-        `insert into public.notification_deliveries (user_id, flight_instance_id, flight_event_id, channel)
-         values ($1, $2, $3, $4)
+        `insert into public.notification_deliveries (user_id, user_flight_id, flight_instance_id, flight_event_id, channel)
+         values ($1, $2, $3, $4, $5)
          on conflict (user_id, flight_event_id, channel) do nothing
          returning *`,
-        [userId, flightInstanceId, eventId, channel]
+        [userId, userFlightId, flightInstanceId, eventId, channel]
       ));
       return { row, created: Boolean(row) };
     },

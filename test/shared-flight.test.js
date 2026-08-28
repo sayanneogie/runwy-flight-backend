@@ -7,7 +7,7 @@ const path = require("node:path");
 
 const { createFlightCache, createMemoryRedis } = require("../src/shared-flight/cache");
 const { createMemorySharedFlightRepository } = require("../src/shared-flight/repository");
-const { createSharedFlightService } = require("../src/shared-flight/service");
+const { createSharedFlightService, preserveKnownOperationalFields } = require("../src/shared-flight/service");
 const { createProviderAdapter } = require("../src/shared-flight/provider-adapter");
 const {
   compareFlightState,
@@ -44,12 +44,14 @@ function normalizedFlight(overrides = {}) {
 
 function makeService(providerFlight = normalizedFlight(), options = {}) {
   let calls = 0;
+  const providerOptions = [];
   const repository = createMemorySharedFlightRepository();
   const queue = options.queue;
   const provider = {
     name: "test",
-    async fetchFlightByNumber() {
+    async fetchFlightByNumber(_params, fetchOptions = {}) {
       calls += 1;
+      providerOptions.push(fetchOptions);
       if (options.delayMs) await new Promise((resolve) => setTimeout(resolve, options.delayMs));
       return typeof providerFlight === "function" ? providerFlight(calls) : providerFlight;
     },
@@ -66,8 +68,38 @@ function makeService(providerFlight = normalizedFlight(), options = {}) {
     wait: options.wait || ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
     apns: options.apns,
   });
-  return { service, repository, providerCalls: () => calls };
+  return { service, repository, providerCalls: () => calls, providerOptions };
 }
+
+test("shared refresh preserves known gates when the provider temporarily omits them", () => {
+  const merged = preserveKnownOperationalFields(
+    normalizedFlight({
+      gate: null,
+      terminal: "3",
+      departureGate: null,
+      departureTerminal: "3",
+      arrivalGate: null,
+      arrivalTerminal: "1",
+    }),
+    {
+      gate: "A6",
+      terminal: "3",
+      baggage_belt: null,
+      normalized_data: {
+        departureGate: "A6",
+        departureTerminal: "3",
+        arrivalGate: "C23",
+        arrivalTerminal: "1",
+      },
+    }
+  );
+
+  assert.equal(merged.gate, "A6");
+  assert.equal(merged.departureGate, "A6");
+  assert.equal(merged.arrivalGate, "C23");
+  assert.equal(merged.departureTerminal, "3");
+  assert.equal(merged.arrivalTerminal, "1");
+});
 
 test("production provider adapter exposes shared alert registration callbacks", async () => {
   let calls = 0;
@@ -84,6 +116,46 @@ test("production provider adapter exposes shared alert registration callbacks", 
   const result = await adapter.ensureFlightAlert({ id: "shared-flight" });
   assert.equal(calls, 1);
   assert.equal(result.providerAlertId, "alert-shared-flight");
+});
+
+test("provider adapter forwards forced refresh options for an exact flight instance", async () => {
+  let receivedOptions = null;
+  const adapter = createProviderAdapter({
+    providerName: "flightaware",
+    fetchFlights: async () => [],
+    fetchByProviderId: async (_providerFlightId, options) => {
+      receivedOptions = options;
+      return {
+        fa_flight_id: "EK354-instance",
+        ident_iata: "EK354",
+        origin: { code_iata: "DXB" },
+        destination: { code_iata: "SIN" },
+      };
+    },
+    normalizeRecord: () => normalizedFlight({ providerFlightId: "EK354-instance" }),
+  });
+
+  await adapter.fetchFlightByProviderId("EK354-instance", { forceRefresh: true });
+
+  assert.deepEqual(receivedOptions, { forceRefresh: true });
+});
+
+test("provider adapter forwards detail-refresh options to enrichment", async () => {
+  let enrichmentOptions = null;
+  const adapter = createProviderAdapter({
+    providerName: "flightaware",
+    fetchFlights: async () => [],
+    fetchByProviderId: async () => ({ fa_flight_id: "SQ509-instance" }),
+    normalizeRecord: () => normalizedFlight({ providerFlightId: "SQ509-instance" }),
+    enrichNormalized: async (normalized, _record, _query, _params, options) => {
+      enrichmentOptions = options;
+      return normalized;
+    },
+  });
+
+  await adapter.fetchFlightByProviderId("SQ509-instance", { skipLivePosition: true });
+
+  assert.deepEqual(enrichmentOptions, { skipLivePosition: true });
 });
 
 test("1000 users searching the same missing flight cause only one provider call", async () => {
@@ -107,6 +179,48 @@ test("1000 users searching the same fresh flight cause zero new provider calls",
   );
   assert.equal(providerCalls(), before);
   assert.ok(responses.every((response) => response.source === "redis"));
+});
+
+test("separate backend replicas share a provider lease", async () => {
+  const repository = createMemorySharedFlightRepository();
+  let providerCalls = 0;
+  const provider = {
+    name: "test",
+    async fetchFlightByNumber() {
+      providerCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return normalizedFlight();
+    },
+  };
+  const createReplica = () => createSharedFlightService({
+    repository,
+    provider,
+    cache: createFlightCache(createMemoryRedis()),
+    wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  });
+  const firstReplica = createReplica();
+  const secondReplica = createReplica();
+  const input = { airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" };
+
+  const responses = await Promise.all([
+    firstReplica.searchFlight(input),
+    secondReplica.searchFlight(input),
+  ]);
+
+  assert.equal(providerCalls, 1);
+  assert.ok(responses.some((response) => response.flightInstanceId));
+  assert.ok(responses.some((response) => response.status === "pending"));
+});
+
+test("provider leases can only be released by their owner", async () => {
+  const repository = createMemorySharedFlightRepository();
+  const token = await repository.acquireProviderRequestLease("provider:flight", 1_000);
+
+  assert.ok(token);
+  assert.equal(await repository.releaseProviderRequestLease("provider:flight", "not-the-owner"), false);
+  assert.equal(await repository.acquireProviderRequestLease("provider:flight", 1_000), null);
+  assert.equal(await repository.releaseProviderRequestLease("provider:flight", token), true);
+  assert.ok(await repository.acquireProviderRequestLease("provider:flight", 1_000));
 });
 
 test("stale flight data is returned immediately and only one refresh is queued", async () => {
@@ -317,6 +431,75 @@ test("shared fanout mirrors takeoff landing and baggage events into app notifica
   assert.deepEqual(sent.sort(), ["token-u1", "token-u1", "token-u1"]);
 });
 
+test("deleting a saved flight removes owner and circle notification artifacts", async () => {
+  const { service, repository } = makeService();
+  const saved = await service.saveUserFlight("u1", {
+    airline: "SQ",
+    number: "509",
+    date: "2026-05-27",
+    origin: "BLR",
+    destination: "SIN",
+  });
+  const userFlight = saved.userFlight;
+  const flightInstanceId = saved.flight.flightInstanceId;
+  await repository.upsertDeviceToken("u1", { deviceToken: "token-u1", environment: "sandbox" });
+
+  const [event] = await repository.insertEvents(flightInstanceId, [{
+    event_type: "GATE_CHANGED",
+    event_severity: "high",
+    old_value: { gate: "A4" },
+    new_value: { gate: "B7" },
+    summary: "Gate changed to B7",
+    notification_required: true,
+    confidence: "high",
+  }], "test");
+  await service.fanoutNotificationJob({ data: { flight_event_id: event.id } });
+
+  await repository.createAppNotification({
+    userId: "u2",
+    flightInstanceId,
+    flightEventId: "circle-event",
+    notificationType: "flight_gate_changed",
+    title: "Circle flight gate changed",
+    body: "Gate B7",
+    payload: { user_flight_id: userFlight.id, owner_user_id: "u1" },
+  });
+  await repository.createNotificationDelivery(
+    "u2",
+    flightInstanceId,
+    "circle-event",
+    "apns",
+    userFlight.id
+  );
+
+  assert.equal(repository.__memory.appNotifications.size, 2);
+  assert.equal(repository.__memory.deliveries.size, 2);
+
+  const deleted = await service.deleteUserFlight("u1", userFlight.id);
+
+  assert.ok(deleted.deleted_at);
+  assert.equal(deleted.notification_enabled, false);
+  assert.equal(repository.__memory.appNotifications.size, 0);
+  assert.equal(repository.__memory.deliveries.size, 0);
+
+  const [postDeleteEvent] = await repository.insertEvents(flightInstanceId, [{
+    event_type: "BAGGAGE_BELT_CHANGED",
+    event_severity: "high",
+    old_value: { baggageBelt: null },
+    new_value: { baggageBelt: "7" },
+    summary: "Baggage belt assigned: 7",
+    notification_required: true,
+    confidence: "high",
+  }], "test");
+  const postDeleteFanout = await service.fanoutNotificationJob({
+    data: { flight_event_id: postDeleteEvent.id },
+  });
+
+  assert.equal(postDeleteFanout.sent, 0);
+  assert.equal(repository.__memory.appNotifications.size, 0);
+  assert.equal(repository.__memory.deliveries.size, 0);
+});
+
 test("stream update targets can be found by provider id or canonical flight number", async () => {
   const repository = createMemorySharedFlightRepository();
   const row = await repository.upsertFlightFromNormalized(normalizedFlight(), {
@@ -349,6 +532,46 @@ test("RLS migration protects user-specific rows and shared flight mutation", () 
   assert.match(sql, /alter table public\.user_flights enable row level security/i);
   assert.match(sql, /auth\.uid\(\) = user_id/i);
   assert.match(sql, /revoke insert, update, delete on public\.flight_instances from anon, authenticated/i);
+});
+
+test("provider refresh cleanup migration pauses bridged sessions and finalizes arrivals", () => {
+  const sql = fs.readFileSync(
+    path.join(__dirname, "../supabase/migrations/20260828_stop_duplicate_provider_refreshes.sql"),
+    "utf8"
+  );
+
+  assert.match(sql, /providerRefreshOwner/);
+  assert.match(sql, /shared_flight_instance/);
+  assert.match(sql, /next_poll_after = null/);
+  assert.match(sql, /actual_arrival_at is not null/);
+  assert.match(sql, /is_final = actual_arrival_at is not null or is_final/);
+});
+
+test("provider request lease migration protects distributed call locks", () => {
+  const sql = fs.readFileSync(
+    path.join(__dirname, "../supabase/migrations/20260828_add_provider_request_leases.sql"),
+    "utf8"
+  );
+
+  assert.match(sql, /create table if not exists public\.provider_request_leases/i);
+  assert.match(sql, /lock_key text primary key/i);
+  assert.match(sql, /expires_at timestamptz not null/i);
+  assert.match(sql, /revoke all .* anon, authenticated/i);
+});
+
+test("deleted-flight cleanup removes queued notifications and pauses orphaned tracking", () => {
+  const sql = fs.readFileSync(
+    path.join(__dirname, "../supabase/migrations/20260828_cleanup_deleted_flight_notifications.sql"),
+    "utf8"
+  );
+  const serverSource = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
+
+  assert.match(sql, /create trigger cleanup_deleted_user_flight_notifications/i);
+  assert.match(sql, /delete from public\.notification_deliveries/i);
+  assert.match(sql, /delete from public\.notifications/i);
+  assert.match(sql, /polling_stopped_reason = 'user_flight_deleted'/i);
+  assert.match(serverSource, /join public\.user_flights uf[\s\S]*uf\.deleted_at is null[\s\S]*lifecycle_state[\s\S]*<> 'deleted'/i);
+  assert.match(serverSource, /hasActiveNotificationSubscription\(flightId\)/);
 });
 
 test("Redis locks expire safely and release checks token ownership", async () => {
@@ -529,6 +752,60 @@ test("lifecycle recovery repairs missing alerts and reschedules active flights a
   assert.equal(updated.provider_alert_status, "active");
   assert.ok(service.queue.jobs.some((job) => job.name === "departureCatchupJob"));
   assert.ok(service.queue.jobs.some((job) => job.name === "arrivalCatchupJob"));
+});
+
+test("lifecycle recovery does not requeue catchups whose windows are already past", async () => {
+  const departure = new Date(Date.now() - 6 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+  const { service, providerCalls } = makeService(normalizedFlight({
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+  }));
+  await service.saveUserFlight("u1", {
+    airline: "SQ",
+    number: "509",
+    date: departure.slice(0, 10),
+    origin: "BLR",
+    destination: "SIN",
+  });
+
+  service.queue.jobs.length = 0;
+  const before = providerCalls();
+  const recovered = await service.recoverLifecycleCatchups("periodic_recovery");
+
+  assert.equal(recovered.checked, 1);
+  assert.equal(recovered.scheduled, 0);
+  assert.equal(providerCalls(), before);
+  assert.equal(service.queue.jobs.some((job) => job.name.endsWith("CatchupJob")), false);
+});
+
+test("actual provider timestamps override a stale scheduled status", async () => {
+  const departure = new Date(Date.now() - 4 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() - 30 * 60_000).toISOString();
+  const { service, repository } = makeService(normalizedFlight({
+    status: "scheduled",
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    actualDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    actualArrivalAt: arrival,
+  }));
+
+  const flight = await service.searchFlight({
+    airline: "SQ",
+    number: "509",
+    date: departure.slice(0, 10),
+    origin: "BLR",
+    destination: "SIN",
+  });
+  const row = await repository.findFlightById(flight.flightInstanceId);
+
+  assert.equal(row.status, "arrived_at_gate");
+  assert.equal(row.is_final, true);
+  assert.equal(row.normalized_data.status, "arrived_at_gate");
 });
 
 test("saving a flight mirrors canonical fields into the user flight row", async () => {
@@ -734,14 +1011,162 @@ test("saved flights schedule low-call departure and arrival catchups without pol
 
   assert.equal(service.queue.jobs.filter((job) => job.name === "departureCatchupJob").length, 2);
   assert.equal(service.queue.jobs.filter((job) => job.name === "arrivalCatchupJob").length, 1);
-  assert.equal(service.queue.jobs.filter((job) => job.name === "arrivalDetailRefreshJob").length, 6);
+  assert.equal(service.queue.jobs.filter((job) => job.name === "arrivalDetailRefreshJob").length, 5);
   assert.equal(service.queue.jobs.filter((job) => job.name === "refreshFlightJob").length, 0);
+});
+
+test("streaming flights retain bounded departure and arrival catchups", async () => {
+  const departure = new Date(Date.now() + 30 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 150 * 60_000).toISOString();
+  const { service } = makeService(normalizedFlight({
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+  }), {
+    streamingEnabled: true,
+    ensureFlightStream: async () => ({ status: "active", liveDataSource: "streaming" }),
+  });
+
+  await service.saveUserFlight("u1", {
+    airline: "SQ",
+    number: "509",
+    date: departure.slice(0, 10),
+    origin: "BLR",
+    destination: "SIN",
+  });
+
+  assert.equal(service.queue.jobs.filter((job) => job.name === "departureCatchupJob").length, 2);
+  assert.equal(service.queue.jobs.filter((job) => job.name === "arrivalCatchupJob").length, 1);
+});
+
+test("saved flights with missing departure details schedule bounded pre-departure refreshes", async () => {
+  const departure = new Date(Date.now() + 150 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 330 * 60_000).toISOString();
+  const { service } = makeService(normalizedFlight({
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    gate: null,
+    terminal: null,
+  }));
+
+  await service.saveUserFlight("u1", {
+    airline: "SQ",
+    number: "509",
+    date: departure.slice(0, 10),
+    origin: "BLR",
+    destination: "SIN",
+  });
+
+  const jobs = service.queue.jobs.filter((job) => job.name === "departureDetailRefreshJob");
+  assert.deepEqual(jobs.map((job) => job.data.stage), ["t-2h", "t-30m"]);
+  assert.ok(jobs.every((job) => job.options.delayMs >= 0));
+});
+
+test("departure detail refresh fills terminal and gate before departure", async () => {
+  const departure = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 5 * 60 * 60_000).toISOString();
+  const { service, repository, providerCalls } = makeService((calls) => calls === 1
+    ? normalizedFlight({
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        gate: null,
+        terminal: null,
+      })
+    : normalizedFlight({
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        gate: "D8",
+        terminal: "2",
+      }));
+
+  const flight = await service.searchFlight({
+    airline: "SQ",
+    number: "509",
+    date: departure.slice(0, 10),
+    origin: "BLR",
+    destination: "SIN",
+  });
+  await service.departureDetailRefreshJob({
+    data: { flight_instance_id: flight.flightInstanceId, stage: "t-2h" },
+  });
+
+  const row = await repository.findFlightById(flight.flightInstanceId);
+  assert.equal(providerCalls(), 2);
+  assert.equal(row.gate, "D8");
+  assert.equal(row.terminal, "2");
+});
+
+test("departure detail refresh skips provider calls when gate and terminal are complete", async () => {
+  const departure = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 5 * 60 * 60_000).toISOString();
+  const { service, providerCalls } = makeService(normalizedFlight({
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    gate: "D8",
+    terminal: "2",
+  }));
+
+  const flight = await service.searchFlight({ airline: "SQ", number: "509", date: departure.slice(0, 10), origin: "BLR", destination: "SIN" });
+  await service.departureDetailRefreshJob({
+    data: { flight_instance_id: flight.flightInstanceId, stage: "t-2h" },
+  });
+
+  assert.equal(providerCalls(), 1);
+});
+
+test("arrival catchup reconciles a streamed flight when both lifecycle events were missed", async () => {
+  const departure = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() - 10 * 60_000).toISOString();
+  const { service, repository, providerCalls } = makeService((calls) => calls === 1
+    ? normalizedFlight({
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+      })
+    : normalizedFlight({
+        status: "landed",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        actualArrivalAt: arrival,
+      }));
+
+  const flight = await service.searchFlight({
+    airline: "SQ",
+    number: "509",
+    date: departure.slice(0, 10),
+    origin: "BLR",
+    destination: "SIN",
+  });
+  await repository.updateStreamingState(flight.flightInstanceId, {
+    status: "active",
+    liveDataSource: "streaming",
+  });
+
+  await service.arrivalCatchupJob({ data: { flight_instance_id: flight.flightInstanceId } });
+
+  const row = await repository.findFlightById(flight.flightInstanceId);
+  assert.equal(providerCalls(), 2);
+  assert.equal(row.status, "landed");
+  assert.equal(row.actual_arrival_at, arrival);
 });
 
 test("arrival detail refresh fills destination gate terminal and baggage before arrival", async () => {
   const departure = new Date(Date.now() - 6 * 60 * 60_000).toISOString();
   const arrival = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
-  const { service, repository, providerCalls } = makeService((calls) => calls === 1
+  const { service, repository, providerCalls, providerOptions } = makeService((calls) => calls === 1
     ? normalizedFlight({
         status: "enroute",
         scheduledDepartureAt: departure,
@@ -773,6 +1198,54 @@ test("arrival detail refresh fills destination gate terminal and baggage before 
   assert.equal(row.normalized_data.arrivalGate, "S1");
   assert.equal(row.normalized_data.arrivalTerminal, "4S");
   assert.equal(row.baggage_belt, "6");
+  assert.equal(providerOptions.at(-1).skipLivePosition, true);
+});
+
+test("arrival detail refresh still enriches an active streamed flight", async () => {
+  const departure = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 60 * 60_000).toISOString();
+  const { service, repository, providerCalls } = makeService((calls) => calls === 1
+    ? normalizedFlight({
+        status: "enroute",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        arrivalGate: null,
+        arrivalTerminal: null,
+      })
+    : normalizedFlight({
+        status: "enroute",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        arrivalGate: "C3",
+        arrivalTerminal: "2",
+      }));
+
+  const flight = await service.searchFlight({
+    airline: "SQ",
+    number: "509",
+    date: departure.slice(0, 10),
+    origin: "BLR",
+    destination: "SIN",
+  });
+  const streamedRow = await repository.findFlightById(flight.flightInstanceId);
+  streamedRow.live_data_source = "streaming";
+  streamedRow.streaming_status = "active";
+  await repository.updateFlight(streamedRow);
+
+  await service.arrivalDetailRefreshJob({
+    data: { flight_instance_id: flight.flightInstanceId, stage: "t-60m" },
+  });
+
+  const refreshed = await repository.findFlightById(flight.flightInstanceId);
+  assert.equal(providerCalls(), 2);
+  assert.equal(refreshed.normalized_data.arrivalGate, "C3");
+  assert.equal(refreshed.normalized_data.arrivalTerminal, "2");
 });
 
 test("arrival detail refresh skips provider calls once destination details are complete", async () => {
@@ -794,6 +1267,49 @@ test("arrival detail refresh skips provider calls once destination details are c
   await service.arrivalDetailRefreshJob({ data: { flight_instance_id: flight.flightInstanceId, stage: "t-2h" } });
 
   assert.equal(providerCalls(), 1);
+});
+
+test("pre-arrival detail refresh does not poll only for a missing baggage belt", async () => {
+  const departure = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 60 * 60_000).toISOString();
+  const { service, providerCalls } = makeService(normalizedFlight({
+    status: "enroute",
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    actualDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    arrivalGate: "C3",
+    arrivalTerminal: "2",
+    baggageBelt: null,
+  }));
+
+  const flight = await service.searchFlight({ airline: "SQ", number: "509", date: departure.slice(0, 10), origin: "BLR", destination: "SIN" });
+  await service.arrivalDetailRefreshJob({ data: { flight_instance_id: flight.flightInstanceId, stage: "t-60m" } });
+
+  assert.equal(providerCalls(), 1);
+});
+
+test("post-arrival detail refresh still polls for a missing baggage belt", async () => {
+  const departure = new Date(Date.now() - 5 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() - 5 * 60_000).toISOString();
+  const { service, providerCalls } = makeService(normalizedFlight({
+    status: "landed",
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    actualDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    actualArrivalAt: arrival,
+    arrivalGate: "C3",
+    arrivalTerminal: "2",
+    baggageBelt: null,
+  }));
+
+  const flight = await service.searchFlight({ airline: "SQ", number: "509", date: departure.slice(0, 10), origin: "BLR", destination: "SIN" });
+  await service.arrivalDetailRefreshJob({ data: { flight_instance_id: flight.flightInstanceId, stage: "post-5m" } });
+
+  assert.equal(providerCalls(), 2);
 });
 
 test("departure catchup performs one live refresh after overdue departure", async () => {

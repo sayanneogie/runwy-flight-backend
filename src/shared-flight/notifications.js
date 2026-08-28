@@ -1,6 +1,7 @@
 "use strict";
 
 const { getAirportCatalog } = require("../airport-catalog");
+const RUNWY_NOTIFICATION_SOUND = "RunwyNotification.caf";
 
 function createApnsSender({ send } = {}) {
   return {
@@ -153,7 +154,7 @@ function notificationPayload(flight, event, context = {}) {
         title: notificationTitle(flight, event, context),
         body: notificationBody(flight, event, context),
       },
-      sound: "default",
+      sound: RUNWY_NOTIFICATION_SOUND,
     },
     flight_instance_id: flight.id,
     flight_event_id: event.id,

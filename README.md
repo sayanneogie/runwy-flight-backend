@@ -185,6 +185,11 @@ Returns refreshed `normalized` data with updated `alerts` flags (useful for dela
 ### GET `/v1/search?flightNumber=AI203&date=2026-02-22&dep=DEL`
 Returns normalized candidate list.
 
+### GET `/v1/search/route?dep=DEL&arr=BLR&date=2026-08-10&preferSchedules=true`
+Returns the direct flights published for the route and departure date. Upcoming
+route searches use FlightAware's schedules endpoint and request multiple bounded
+result pages so busy routes are not limited to the first page.
+
 ### POST `/v1/devices/push-token`
 Registers/updates a device APNs token for background alerts.
 

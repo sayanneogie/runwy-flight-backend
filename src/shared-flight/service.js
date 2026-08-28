@@ -23,16 +23,18 @@ const {
   targetMatchesAlert,
 } = require("../flightaware-alerts");
 
-const FETCH_LOCK_MS = 8_000;
-const REFRESH_LOCK_MS = 20_000;
+const FETCH_LOCK_MS = 90_000;
+const REFRESH_LOCK_MS = 90_000;
 const ACTIVE_VIEWER_TTL_SECONDS = 90;
 const DEPARTURE_CATCHUP_AFTER_MS = 2 * 60_000;
 const DEPARTURE_CATCHUP_FINAL_AFTER_MS = 17 * 60_000;
 const ARRIVAL_CATCHUP_AFTER_MS = 6 * 60_000;
 const PREFLIGHT_REMINDER_BEFORE_MS = 5 * 60 * 60_000;
-const ARRIVAL_DETAIL_CHECKPOINTS = [
-  { stage: "t-4h", offsetMs: -4 * 60 * 60_000 },
+const DEPARTURE_DETAIL_CHECKPOINTS = [
   { stage: "t-2h", offsetMs: -2 * 60 * 60_000 },
+  { stage: "t-30m", offsetMs: -30 * 60_000 },
+];
+const ARRIVAL_DETAIL_CHECKPOINTS = [
   { stage: "t-60m", offsetMs: -60 * 60_000 },
   { stage: "t-30m", offsetMs: -30 * 60_000 },
   { stage: "post-5m", offsetMs: 5 * 60_000 },
@@ -40,11 +42,72 @@ const ARRIVAL_DETAIL_CHECKPOINTS = [
   { stage: "post-30m", offsetMs: 30 * 60_000 },
 ];
 
+function preserveKnownOperationalFields(normalized, row) {
+  const previous = row?.normalized_data || {};
+  const preferred = (next, fallback) => {
+    if (next === null || next === undefined || String(next).trim() === "") {
+      return fallback ?? null;
+    }
+    return next;
+  };
+
+  return {
+    ...normalized,
+    gate: preferred(normalized?.gate, row?.gate ?? previous.gate),
+    terminal: preferred(normalized?.terminal, row?.terminal ?? previous.terminal),
+    departureGate: preferred(
+      normalized?.departureGate,
+      previous.departureGate ?? row?.gate
+    ),
+    departureTerminal: preferred(
+      normalized?.departureTerminal,
+      previous.departureTerminal ?? row?.terminal
+    ),
+    arrivalGate: preferred(normalized?.arrivalGate, previous.arrivalGate),
+    arrivalTerminal: preferred(normalized?.arrivalTerminal, previous.arrivalTerminal),
+    baggageBelt: preferred(
+      normalized?.baggageBelt,
+      row?.baggage_belt ?? previous.baggageBelt
+    ),
+  };
+}
+
 // Shared flight-state design: client requests only touch Runwy-owned state.
 // Provider calls are guarded by Redis-compatible locks, normalized, validated,
 // snapshotted, diffed into shared events, then fanned out to private user links.
 function createSharedFlightService({ repository, provider, cache = createFlightCache(), queue = createSharedFlightQueue(), apns = createApnsSender(), weather = null, streamingEnabled = false, wait = sleep } = {}) {
   const weatherService = weather || createFlightWeatherService({ cache, repository });
+
+  async function acquireProviderCallLock(lockKey, ttlMs) {
+    const localToken = await cache.acquireLock(lockKey, ttlMs);
+    if (!localToken) return null;
+    if (typeof repository.acquireProviderRequestLease !== "function") {
+      return { lockKey, localToken, distributedToken: null };
+    }
+
+    try {
+      const distributedToken = await repository.acquireProviderRequestLease(`provider:${lockKey}`, ttlMs);
+      if (!distributedToken) {
+        await cache.releaseLock(lockKey, localToken);
+        return null;
+      }
+      return { lockKey, localToken, distributedToken };
+    } catch (error) {
+      await cache.releaseLock(lockKey, localToken);
+      throw error;
+    }
+  }
+
+  async function releaseProviderCallLock(lock) {
+    if (!lock) return;
+    try {
+      if (lock.distributedToken && typeof repository.releaseProviderRequestLease === "function") {
+        await repository.releaseProviderRequestLease(`provider:${lock.lockKey}`, lock.distributedToken);
+      }
+    } finally {
+      await cache.releaseLock(lock.lockKey, lock.localToken);
+    }
+  }
 
   async function searchFlight(input, context = {}) {
     const params = normalizeSearchParams(input);
@@ -70,8 +133,8 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     }
 
     const lockKey = `fetch_lock:${params.flightKey}`;
-    const token = await cache.acquireLock(lockKey, FETCH_LOCK_MS);
-    if (!token) {
+    const lock = await acquireProviderCallLock(lockKey, FETCH_LOCK_MS);
+    if (!lock) {
       await wait(150);
       const afterWait = (await cache.getJSON(cacheKey)) || rowToFlightResponse(await repository.findFlightByKeyOrAlias(params.flightKey), { source: "postgres", freshness: "fresh" });
       if (afterWait) return afterWait;
@@ -111,7 +174,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
       await repository.logApiUsage({ provider: provider.name, endpoint: "fetchFlightByNumber", flight_key: saved.flight_key, user_id: context.userId, response_time_ms: Date.now() - startedAt, cache_status: "miss", status_code: 200 });
       return response;
     } finally {
-      await cache.releaseLock(lockKey, token);
+      await releaseProviderCallLock(lock);
     }
   }
 
@@ -130,18 +193,24 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
       ? await repository.findFlightById(job.data.flight_instance_id)
       : await repository.findFlightByKeyOrAlias(job.data.flight_key);
     if (!row || (row.is_final && job.data.reason !== "forced" && !isArrivalDetailsRefreshReason(job.data.reason))) return null;
-    const token = await cache.acquireLock(`refresh_lock:${row.flight_key}`, REFRESH_LOCK_MS);
-    if (!token) return null;
+    const lockKey = `refresh_lock:${row.flight_key}`;
+    const lock = await acquireProviderCallLock(lockKey, REFRESH_LOCK_MS);
+    if (!lock) return null;
     const startedAt = Date.now();
     try {
       const params = { airline: row.airline_code, number: row.flight_number, date: dateOnly(row.departure_date), origin: row.origin_airport || "UNKNOWN", destination: row.destination_airport || "UNKNOWN", flightKey: row.flight_key };
-      const normalized = row.provider_flight_id && provider.supportsProviderId && provider.fetchFlightByProviderId
-        ? await provider.fetchFlightByProviderId(row.provider_flight_id)
-        : await provider.fetchFlightByNumber(params);
-      if (!normalized) {
+      const providerOptions = {
+        forceRefresh: ["detail_open", "forced"].includes(String(job.data.reason || "")),
+        skipLivePosition: isOperationalDetailsRefreshReason(job.data.reason),
+      };
+      const providerNormalized = row.provider_flight_id && provider.supportsProviderId && provider.fetchFlightByProviderId
+        ? await provider.fetchFlightByProviderId(row.provider_flight_id, providerOptions)
+        : await provider.fetchFlightByNumber(params, providerOptions);
+      if (!providerNormalized) {
         await repository.logApiUsage({ provider: provider.name, endpoint: "refreshFlightJob", flight_key: row.flight_key, response_time_ms: Date.now() - startedAt, error: "no_match" });
         return row;
       }
+      const normalized = preserveKnownOperationalFields(providerNormalized, row);
       const validation = validateProviderFlight(normalized, params, row);
       normalized.dataConfidence = validation.confidence;
       if (!validation.ok) {
@@ -182,7 +251,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
       await repository.logApiUsage({ provider: provider.name, endpoint: "refreshFlightJob", flight_key: row.flight_key, response_time_ms: Date.now() - startedAt, error: error?.message || String(error) });
       throw error;
     } finally {
-      await cache.releaseLock(`refresh_lock:${row.flight_key}`, token);
+      await releaseProviderCallLock(lock);
     }
   }
 
@@ -192,7 +261,18 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     const targets = await repository.listNotificationTargets(data.flight.id, data.event.event_severity, data.event.event_type);
     let sent = 0;
     for (const target of targets) {
-      const delivery = await repository.createNotificationDelivery(target.userFlight.user_id, data.flight.id, data.event.id, "apns");
+      const ownerUserId = target.userFlight.owner_user_id || target.userFlight.user_id;
+      if (repository.isUserFlightNotificationActive) {
+        const active = await repository.isUserFlightNotificationActive(ownerUserId, target.userFlight.id);
+        if (!active) continue;
+      }
+      const delivery = await repository.createNotificationDelivery(
+        target.userFlight.user_id,
+        data.flight.id,
+        data.event.id,
+        "apns",
+        target.userFlight.id || null
+      );
       if (!delivery.created || !delivery.row) continue;
       const notificationContext = {
         isCircle: target.isCircle === true,
@@ -202,6 +282,8 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
       try {
         if (repository.createAppNotification) {
           const payload = notificationPayload(data.flight, data.event, notificationContext);
+          payload.user_flight_id = target.userFlight.id || null;
+          payload.owner_user_id = target.userFlight.owner_user_id || target.userFlight.user_id || null;
           await repository.createAppNotification({
             userId: target.userFlight.user_id,
             flightInstanceId: data.flight.id,
@@ -212,6 +294,16 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
             payload,
             deliveryStatus: "queued",
           });
+        }
+        if (repository.isUserFlightNotificationActive) {
+          const active = await repository.isUserFlightNotificationActive(ownerUserId, target.userFlight.id);
+          if (!active) {
+            await repository.updateNotificationDelivery(delivery.row.id, {
+              status: "failed",
+              error: "user_flight_deleted_before_delivery",
+            });
+            continue;
+          }
         }
         const results = [];
         for (const token of target.tokens) {
@@ -323,7 +415,15 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
   }
 
   async function deleteUserFlight(userId, id) {
-    return repository.deleteUserFlight(userId, id);
+    const existingRows = typeof repository.listUserFlightsByIds === "function"
+      ? await repository.listUserFlightsByIds(userId, [id])
+      : [];
+    const existing = existingRows[0] || null;
+    const deleted = await repository.deleteUserFlight(userId, id);
+    if (deleted && typeof repository.removeNotificationArtifactsForUserFlight === "function") {
+      await repository.removeNotificationArtifactsForUserFlight(userId, existing || deleted);
+    }
+    return deleted;
   }
 
   async function ensureLiveSource(flightInstanceId, reason) {
@@ -632,41 +732,47 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
 
   async function scheduleLifecycleCatchups(flightInstanceId, reason) {
     const row = await repository.findFlightById(flightInstanceId);
-    if (!row || isFinalStatus(row.status)) return [];
+    if (!row || isEffectivelyFinal(row)) return [];
     const scheduled = [];
+    const nowMs = Date.now();
     const departureMs = new Date(row.estimated_departure_at || row.scheduled_departure_at || 0).getTime();
     if (Number.isFinite(departureMs)) {
-      if (!row.actual_departure_at && departureMs > Date.now()) {
+      if (!row.actual_departure_at && departureMs > nowMs) {
         scheduled.push(await queue.add("preflightReminderJob", {
           flight_instance_id: flightInstanceId,
           reason,
         }, {
           dedupe: true,
           dedupeKey: `preflight-reminder:t-5h:${flightInstanceId}`,
-          delayMs: Math.max(0, departureMs - PREFLIGHT_REMINDER_BEFORE_MS - Date.now()),
+          delayMs: Math.max(0, departureMs - PREFLIGHT_REMINDER_BEFORE_MS - nowMs),
         }));
       }
-      if (isStreamingActive(row)) return scheduled;
-      if (Date.now() < departureMs + DEPARTURE_CATCHUP_FINAL_AFTER_MS) {
+      // A stream is the primary live source, but it is not a delivery guarantee.
+      // Keep these bounded catch-ups as a safety net so one missed departure or
+      // arrival event cannot leave a flight permanently stuck as scheduled.
+      if (nowMs < departureMs + DEPARTURE_CATCHUP_AFTER_MS) {
         scheduled.push(await queue.add("departureCatchupJob", { flight_instance_id: flightInstanceId, reason, stage: "first" }, {
           dedupe: true,
           dedupeKey: `departure-catchup:first:${flightInstanceId}`,
-          delayMs: Math.max(0, departureMs + DEPARTURE_CATCHUP_AFTER_MS - Date.now()),
+          delayMs: departureMs + DEPARTURE_CATCHUP_AFTER_MS - nowMs,
         }));
       }
-      scheduled.push(await queue.add("departureCatchupJob", { flight_instance_id: flightInstanceId, reason, stage: "final" }, {
-        dedupe: true,
-        dedupeKey: `departure-catchup:final:${flightInstanceId}`,
-        delayMs: Math.max(0, departureMs + DEPARTURE_CATCHUP_FINAL_AFTER_MS - Date.now()),
-      }));
+      if (nowMs < departureMs + DEPARTURE_CATCHUP_FINAL_AFTER_MS) {
+        scheduled.push(await queue.add("departureCatchupJob", { flight_instance_id: flightInstanceId, reason, stage: "final" }, {
+          dedupe: true,
+          dedupeKey: `departure-catchup:final:${flightInstanceId}`,
+          delayMs: departureMs + DEPARTURE_CATCHUP_FINAL_AFTER_MS - nowMs,
+        }));
+      }
+      scheduled.push(...await scheduleDepartureDetailRefreshes(flightInstanceId, reason, row));
     }
 
     const arrivalMs = new Date(row.estimated_arrival_at || row.scheduled_arrival_at || 0).getTime();
-    if (Number.isFinite(arrivalMs)) {
+    if (Number.isFinite(arrivalMs) && nowMs < arrivalMs + ARRIVAL_CATCHUP_AFTER_MS) {
       scheduled.push(await queue.add("arrivalCatchupJob", { flight_instance_id: flightInstanceId, reason }, {
         dedupe: true,
         dedupeKey: `arrival-catchup:${flightInstanceId}`,
-        delayMs: Math.max(0, arrivalMs + ARRIVAL_CATCHUP_AFTER_MS - Date.now()),
+        delayMs: arrivalMs + ARRIVAL_CATCHUP_AFTER_MS - nowMs,
       }));
       scheduled.push(...await scheduleArrivalDetailRefreshes(flightInstanceId, reason, row));
     }
@@ -729,15 +835,19 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
 
   async function scheduleArrivalDetailRefreshes(flightInstanceId, reason, existingRow = null) {
     const row = existingRow || await repository.findFlightById(flightInstanceId);
-    if (!row || isStreamingActive(row) || !hasIncompleteArrivalDetails(row)) return [];
+    // The stream is authoritative for movement, but its position/status events
+    // often omit gate, terminal, and baggage details. Keep the low-frequency
+    // full-provider checkpoints active so those operational fields can fill in.
+    if (!row || !hasIncompleteArrivalDetails(row)) return [];
     const arrivalMs = new Date(row.estimated_arrival_at || row.scheduled_arrival_at || 0).getTime();
     if (!Number.isFinite(arrivalMs)) return [];
 
     const nowMs = Date.now();
     const scheduled = [];
     for (const checkpoint of ARRIVAL_DETAIL_CHECKPOINTS) {
+      if (!needsArrivalDetailsForStage(row, checkpoint.stage)) continue;
       const scheduledAtMs = arrivalMs + checkpoint.offsetMs;
-      if (scheduledAtMs < nowMs - 10 * 60_000) continue;
+      if (scheduledAtMs <= nowMs) continue;
       scheduled.push(await queue.add("arrivalDetailRefreshJob", {
         flight_instance_id: flightInstanceId,
         reason,
@@ -751,9 +861,36 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     return scheduled;
   }
 
+  async function scheduleDepartureDetailRefreshes(flightInstanceId, reason, existingRow = null) {
+    const row = existingRow || await repository.findFlightById(flightInstanceId);
+    // Alert and streaming payloads are optimized for state changes and may not
+    // include terminal or gate assignments. Use a bounded set of full-provider
+    // refreshes as departure approaches so early null values do not remain TBA.
+    if (!row || !hasIncompleteDepartureDetails(row)) return [];
+    const departureMs = new Date(row.estimated_departure_at || row.scheduled_departure_at || 0).getTime();
+    if (!Number.isFinite(departureMs)) return [];
+
+    const nowMs = Date.now();
+    const scheduled = [];
+    for (const checkpoint of DEPARTURE_DETAIL_CHECKPOINTS) {
+      const scheduledAtMs = departureMs + checkpoint.offsetMs;
+      if (scheduledAtMs <= nowMs) continue;
+      scheduled.push(await queue.add("departureDetailRefreshJob", {
+        flight_instance_id: flightInstanceId,
+        reason,
+        stage: checkpoint.stage,
+      }, {
+        dedupe: true,
+        dedupeKey: `departure-detail:${checkpoint.stage}:${flightInstanceId}`,
+        delayMs: Math.max(0, scheduledAtMs - nowMs),
+      }));
+    }
+    return scheduled;
+  }
+
   async function departureCatchupJob(job) {
     const row = await repository.findFlightById(job.data.flight_instance_id);
-    if (!row || isFinalStatus(row.status) || isStreamingActive(row) || !isOperationallyOverdueWithoutTakeoff(row)) return row;
+    if (!row || isFinalStatus(row.status) || !isOperationallyOverdueWithoutTakeoff(row)) return row;
     return refreshFlightJob({
       data: {
         flight_key: row.flight_key,
@@ -763,11 +900,26 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     });
   }
 
+  async function departureDetailRefreshJob(job) {
+    const row = await repository.findFlightById(job.data.flight_instance_id);
+    if (!row || !shouldRefreshDepartureDetails(row)) return row;
+    return refreshFlightJob({
+      data: {
+        flight_key: row.flight_key,
+        flight_instance_id: row.id,
+        reason: `departure_details_${job.data.stage || "scheduled"}`,
+      },
+    });
+  }
+
   async function arrivalCatchupJob(job) {
     const row = await repository.findFlightById(job.data.flight_instance_id);
-    if (!row || isFinalStatus(row.status) || isStreamingActive(row)) return row;
+    if (!row || isFinalStatus(row.status)) return row;
     const status = String(row.status || "").toLowerCase();
-    const shouldCheckArrival = ["departed", "airborne", "enroute", "taxi_in"].includes(status) || Boolean(row.actual_departure_at);
+    const shouldCheckArrival =
+      ["departed", "airborne", "enroute", "taxi_in"].includes(status) ||
+      Boolean(row.actual_departure_at) ||
+      isOperationallyPastArrivalWithoutFinalState(row);
     if (!shouldCheckArrival) return row;
     return refreshFlightJob({
       data: {
@@ -780,7 +932,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
 
   async function arrivalDetailRefreshJob(job) {
     const row = await repository.findFlightById(job.data.flight_instance_id);
-    if (!row || isStreamingActive(row) || !shouldRefreshArrivalDetails(row)) return row;
+    if (!row || !shouldRefreshArrivalDetails(row, Date.now(), job.data.stage)) return row;
     return refreshFlightJob({
       data: {
         flight_key: row.flight_key,
@@ -809,6 +961,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
   queue.process("fanoutNotificationJob", fanoutNotificationJob);
   queue.process("revalidateSuspiciousFlightJob", revalidateSuspiciousFlightJob);
   queue.process("weatherInsightJob", weatherInsightJob);
+  queue.process("departureDetailRefreshJob", departureDetailRefreshJob);
   queue.process("departureCatchupJob", departureCatchupJob);
   queue.process("arrivalCatchupJob", arrivalCatchupJob);
   queue.process("arrivalDetailRefreshJob", arrivalDetailRefreshJob);
@@ -839,9 +992,11 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     fanoutNotificationJob,
     revalidateSuspiciousFlightJob,
     weatherInsightJob,
+    departureDetailRefreshJob,
     departureCatchupJob,
     arrivalCatchupJob,
     arrivalDetailRefreshJob,
+    scheduleDepartureDetailRefreshes,
     scheduleArrivalDetailRefreshes,
     queue,
     cache,
@@ -881,11 +1036,42 @@ function isOperationallyOverdueWithoutTakeoff(row, nowMs = Date.now()) {
   return Number.isFinite(departureMs) && nowMs - departureMs >= 2 * 60_000;
 }
 
+function isEffectivelyFinal(row) {
+  return isFinalStatus(row?.status) || Boolean(row?.actual_arrival_at);
+}
+
+function isOperationallyPastArrivalWithoutFinalState(row, nowMs = Date.now()) {
+  if (isFinalStatus(row?.status)) return false;
+  const arrivalMs = new Date(row?.estimated_arrival_at || row?.scheduled_arrival_at || "").getTime();
+  return Number.isFinite(arrivalMs) && nowMs >= arrivalMs + ARRIVAL_CATCHUP_AFTER_MS;
+}
+
 function isAirborne(status) {
   return ["airborne", "enroute", "departed"].includes(String(status || "").toLowerCase());
 }
 
-function shouldRefreshArrivalDetails(row, nowMs = Date.now()) {
+function shouldRefreshDepartureDetails(row, nowMs = Date.now()) {
+  const status = String(row?.status || "").toLowerCase();
+  if (["departed", "airborne", "enroute", "taxi_in", "landed", "arrived", "arrived_at_gate", "cancelled", "diverted"].includes(status)) {
+    return false;
+  }
+  if (row?.actual_departure_at) return false;
+
+  const departureMs = new Date(row?.estimated_departure_at || row?.scheduled_departure_at || "").getTime();
+  if (!Number.isFinite(departureMs)) return false;
+  if (nowMs < departureMs - 4.25 * 60 * 60_000) return false;
+  if (nowMs > departureMs + 10 * 60_000) return false;
+  return hasIncompleteDepartureDetails(row);
+}
+
+function hasIncompleteDepartureDetails(row) {
+  const normalized = row?.normalized_data || {};
+  const departureGate = row?.gate || normalized.departureGate || normalized.departure_gate || normalized.gateOrigin || normalized.gate || null;
+  const departureTerminal = row?.terminal || normalized.departureTerminal || normalized.departure_terminal || normalized.terminalOrigin || normalized.terminal || null;
+  return !departureGate || !departureTerminal;
+}
+
+function shouldRefreshArrivalDetails(row, nowMs = Date.now(), stage = "scheduled") {
   const status = String(row?.status || "").toLowerCase();
   if (["cancelled", "diverted"].includes(status)) return false;
 
@@ -893,19 +1079,38 @@ function shouldRefreshArrivalDetails(row, nowMs = Date.now()) {
   if (!Number.isFinite(arrivalMs)) return false;
   if (nowMs < arrivalMs - 4.25 * 60 * 60_000) return false;
   if (nowMs > arrivalMs + 90 * 60_000) return false;
-  return hasIncompleteArrivalDetails(row);
+  return needsArrivalDetailsForStage(row, stage);
 }
 
 function hasIncompleteArrivalDetails(row) {
+  return hasIncompleteArrivalGateDetails(row) || !arrivalBaggageBelt(row);
+}
+
+function hasIncompleteArrivalGateDetails(row) {
   const normalized = row.normalized_data || {};
   const arrivalGate = normalized.arrivalGate || normalized.arrival_gate || normalized.gateDestination || null;
   const arrivalTerminal = normalized.arrivalTerminal || normalized.arrival_terminal || normalized.terminalDestination || null;
-  const baggageBelt = row.baggage_belt || normalized.baggageBelt || normalized.baggageClaim || normalized.baggage_belt || null;
-  return !arrivalGate || !arrivalTerminal || !baggageBelt;
+  return !arrivalGate || !arrivalTerminal;
+}
+
+function arrivalBaggageBelt(row) {
+  const normalized = row.normalized_data || {};
+  return row.baggage_belt || normalized.baggageBelt || normalized.baggageClaim || normalized.baggage_belt || null;
+}
+
+function needsArrivalDetailsForStage(row, stage) {
+  return String(stage || "").startsWith("post-")
+    ? hasIncompleteArrivalDetails(row)
+    : hasIncompleteArrivalGateDetails(row);
 }
 
 function isArrivalDetailsRefreshReason(reason) {
   return String(reason || "").startsWith("arrival_details_");
+}
+
+function isOperationalDetailsRefreshReason(reason) {
+  const value = String(reason || "");
+  return value.startsWith("arrival_details_") || value.startsWith("departure_details_");
 }
 
 function sleep(ms) {
@@ -985,4 +1190,4 @@ function sharedAlertPreferencesFromLegacySettings(settings = {}) {
   };
 }
 
-module.exports = { createSharedFlightService };
+module.exports = { createSharedFlightService, preserveKnownOperationalFields };

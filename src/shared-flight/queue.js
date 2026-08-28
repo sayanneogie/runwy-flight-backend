@@ -1,6 +1,6 @@
 "use strict";
 
-function createSharedFlightQueue() {
+function createSharedFlightQueue({ onError = null } = {}) {
   const jobs = [];
   const handlers = new Map();
   const dedupe = new Set();
@@ -15,6 +15,16 @@ function createSharedFlightQueue() {
       const run = async () => {
         try {
           await handlers.get(name)(job);
+        } catch (error) {
+          if (typeof onError === "function") {
+            onError(error, job);
+          } else {
+            console.error("Shared flight background job failed", {
+              jobName: name,
+              jobId: job.id,
+              error: error?.message || String(error),
+            });
+          }
         } finally {
           dedupe.delete(dedupeKey);
         }

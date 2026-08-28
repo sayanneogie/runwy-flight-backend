@@ -282,6 +282,7 @@ function isStreamingActive(flightInstance) {
 function mapNormalizedToDb(normalized, params = {}) {
   const origin = normalizeAirport(normalized.origin || params.origin);
   const destination = normalizeAirport(normalized.destination || params.destination);
+  const status = statusReconciledWithActualTimes(normalized);
   return {
     flight_key: buildFlightKey({
       airline: normalized.airlineCode || params.airline,
@@ -302,7 +303,7 @@ function mapNormalizedToDb(normalized, params = {}) {
     estimated_arrival_at: toIso(normalized.estimatedArrivalAt),
     actual_departure_at: toIso(normalized.actualDepartureAt),
     actual_arrival_at: toIso(normalized.actualArrivalAt),
-    status: String(normalized.status || "unknown").toLowerCase(),
+    status,
     status_detail: normalized.statusDetail || null,
     gate: normalized.departureGate || normalized.gate || null,
     terminal: normalized.departureTerminal || normalized.terminal || null,
@@ -317,12 +318,26 @@ function mapNormalizedToDb(normalized, params = {}) {
     live_data_source: normalized.liveDataSource || params.liveDataSource || "on_demand",
     streaming_status: normalized.streamingStatus || params.streamingStatus || "disabled",
     data_confidence: normalized.dataConfidence || "medium",
-    normalized_data: normalized,
+    normalized_data: { ...normalized, status },
     raw_provider_response: normalized.rawProviderResponse || null,
     last_fetched_at: new Date().toISOString(),
     needs_revalidation: normalized.dataConfidence === "suspicious",
-    is_final: isFinalStatus(normalized.status),
+    is_final: isFinalStatus(status),
   };
+}
+
+function statusReconciledWithActualTimes(normalized) {
+  const status = String(normalized?.status || "unknown").toLowerCase();
+  if (normalized?.actualArrivalAt) {
+    return status === "landed" ? "landed" : "arrived_at_gate";
+  }
+  if (
+    normalized?.actualDepartureAt &&
+    ["unknown", "scheduled", "boarding", "delayed"].includes(status)
+  ) {
+    return "taxiing";
+  }
+  return status;
 }
 
 function rowToFlightResponse(row, { source = "postgres", freshness = "fresh", isRefreshing = false } = {}) {

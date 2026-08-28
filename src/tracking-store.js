@@ -1245,6 +1245,7 @@ function createTrackingStore({
       left join public.live_snapshots ls
         on ls.tracking_session_id = ts.id
       where ts.session_status in ('pending', 'active', 'errored')
+        and coalesce(ts.metadata_json->>'providerRefreshOwner', '') <> 'shared_flight_instance'
         and ts.next_poll_after is not null
         and ts.next_poll_after <= now()
         and exists (
@@ -1318,6 +1319,7 @@ function createTrackingStore({
       left join public.live_snapshots ls
         on ls.tracking_session_id = ts.id
       where ts.session_status in ('pending', 'active', 'errored')
+        and coalesce(ts.metadata_json->>'providerRefreshOwner', '') <> 'shared_flight_instance'
         and exists (
           select 1
           from public.user_flights uf
