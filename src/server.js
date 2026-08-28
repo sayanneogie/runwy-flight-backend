@@ -229,7 +229,7 @@ const FLIGHTAWARE_AUTO_ALERT_EVENTS = Object.freeze({
   departure: true,
   diverted: true,
   filed: true,
-  out: false,
+  out: true,
   off: true,
   on: true,
   in: true,

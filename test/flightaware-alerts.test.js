@@ -88,6 +88,20 @@ test("normalizes terse FlightAware ON and IN arrival event codes", () => {
   }
 });
 
+test("normalizes a FlightAware OUT event as taxiing", () => {
+  const normalized = normalizeFlightAwareAlert({
+    event: "OUT",
+    ident_iata: "AI2418",
+    origin: "BLR",
+    destination: "DEL",
+    scheduled_out: "2026-08-28T11:00:00.000Z",
+    actual_out: "2026-08-28T10:53:00.000Z",
+  });
+
+  assert.equal(normalized.event_type, "flight_taxiing");
+  assert.equal(normalized.actual_out, "2026-08-28T10:53:00.000Z");
+});
+
 test("impending departure remains preflight and does not masquerade as takeoff", () => {
   const normalized = normalizeFlightAwareAlert({
     event: "impending_departure",

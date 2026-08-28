@@ -249,6 +249,7 @@ test("FlightAware alert payload uses canonical ident/origin/destination keys", (
   assert.ok(!("ident_iata" in payload));
   assert.ok(!("origin_iata" in payload));
   assert.ok(!("destination_iata" in payload));
+  assert.equal(payload.events.out, true);
   assert.equal(payload.events.in, true);
 });
 
