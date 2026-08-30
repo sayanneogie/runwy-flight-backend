@@ -1767,21 +1767,37 @@ function makeProviderQueryKey(providerName, query) {
   });
 }
 
-function dedupeFlightAwareRecords(records) {
+function flightNumberSuffix(input) {
+  return normalizeFlightCode(input).match(/(\d+[A-Z]?)$/)?.[1] || null;
+}
+
+function dedupeFlightAwareRecords(records, query = {}) {
   const seen = new Set();
   const deduped = [];
+  const requestedFlightNumber = normalizeFlightCode(query?.flightNumber);
+  const requestedSuffix = flightNumberSuffix(requestedFlightNumber);
 
   for (const record of Array.isArray(records) ? records : []) {
     const normalized = normalizeRecordFromFlightAware(record);
+    const normalizedFlightNumber = normalizeFlightCode(normalized.flightNumber);
+    // FlightAware can return the same occurrence once as an IATA marketing
+    // flight (DL2307) and once as its ICAO/operator identity (DAL2307). When
+    // both share the requested numeric suffix, treat the requested code as the
+    // canonical identity; route + departure time still preserve legitimate
+    // multiple same-day occurrences.
+    const occurrenceFlightNumber = requestedFlightNumber && requestedSuffix &&
+      flightNumberSuffix(normalizedFlightNumber) === requestedSuffix
+      ? requestedFlightNumber
+      : normalizedFlightNumber;
     const scheduledDeparture =
       normalized.departureTimes?.scheduled || normalized.departureTimes?.estimated || "";
     const occurrenceKey = [
-      normalized.flightNumber || "",
+      occurrenceFlightNumber,
       normalized.departureAirportIata || "",
       normalized.arrivalAirportIata || "",
       scheduledDeparture,
     ].join("|");
-    const hasOccurrenceIdentity = Boolean(normalized.flightNumber && scheduledDeparture);
+    const hasOccurrenceIdentity = Boolean(occurrenceFlightNumber && scheduledDeparture);
     const key = hasOccurrenceIdentity
       ? occurrenceKey
       : String(record?.fa_flight_id || occurrenceKey);
@@ -3176,7 +3192,7 @@ async function fetchFlightAwareSearchSources(fetchers, query, { mergeAll = false
     throw errors[0];
   }
 
-  return dedupeFlightAwareRecords(rows);
+  return dedupeFlightAwareRecords(rows, query);
 }
 
 async function fetchFlightAwareFlights(query, options = {}) {
@@ -7203,6 +7219,7 @@ module.exports = {
     circleNotificationPreferenceConditionForEventType,
     classifyFlightAwareAuthProbeResult,
     deriveAlertFlags,
+    dedupeFlightAwareRecords,
     extractFlightAwareSearchRows,
     fetchFlightAwareFlights,
     fetchFlightAwareOperationalFlights,

@@ -108,6 +108,54 @@ test("extractFlightAwareSearchRows returns scheduled payload rows", () => {
   assert.equal(rows[1].ident_iata, "6E6993");
 });
 
+test("FlightAware IATA and ICAO copies collapse into one real occurrence", () => {
+  const records = [
+    {
+      fa_flight_id: "DAL2307-20260830-schedule",
+      ident_iata: "DL2307",
+      ident: "DAL2307",
+      origin_iata: "MSP",
+      destination_iata: "BIS",
+      scheduled_out: "2026-08-30T23:15:00Z",
+      scheduled_in: "2026-08-31T00:45:00Z",
+    },
+    {
+      fa_flight_id: "DAL2307-1788131700-airline",
+      ident: "DAL2307",
+      origin_iata: "MSP",
+      destination_iata: "BIS",
+      scheduled_out: "2026-08-30T23:15:00Z",
+      scheduled_in: "2026-08-31T00:45:00Z",
+    },
+  ];
+
+  const deduped = __test__.dedupeFlightAwareRecords(records, { flightNumber: "DL2307" });
+  assert.equal(deduped.length, 1);
+  assert.equal(deduped[0].ident_iata, "DL2307");
+});
+
+test("occurrence dedupe preserves two real same-day flights at different times", () => {
+  const records = [
+    {
+      ident_iata: "AI101",
+      origin_iata: "DEL",
+      destination_iata: "JFK",
+      scheduled_out: "2026-08-30T10:00:00Z",
+    },
+    {
+      ident: "AIC101",
+      origin_iata: "DEL",
+      destination_iata: "JFK",
+      scheduled_out: "2026-08-30T11:00:00Z",
+    },
+  ];
+
+  assert.equal(
+    __test__.dedupeFlightAwareRecords(records, { flightNumber: "AI101" }).length,
+    2
+  );
+});
+
 test("flightAwareScheduleQueryItems scopes the primary lookup and can open a codeshare fallback", () => {
   const params = __test__.flightAwareScheduleQueryItems({
     flightNumber: "AI101",
