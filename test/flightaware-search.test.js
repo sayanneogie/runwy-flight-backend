@@ -12,8 +12,31 @@ const { __test__ } = require("../src/server.js");
 test("FlightAware reserves bounded capacity for user searches", () => {
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("flight_instance"), 500);
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("position"), 500);
+  assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("inbound_flight_instance"), 600);
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("operational"), 600);
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("schedules"), 600);
+});
+
+test("shared-flight tracking projection keeps resolved inbound aircraft details", () => {
+  const inboundFlight = {
+    providerFlightId: "DAL2521-instance",
+    flightNumber: "DL2521",
+    originAirportIata: "FAR",
+    destinationAirportIata: "MSP",
+    estimatedArrival: "2026-08-30T22:55:00.000Z",
+  };
+  const projected = __test__.trackedPayloadFromSharedFlight({
+    airlineCode: "DL",
+    flightNumber: "2307",
+    origin: "MSP",
+    destination: "BIS",
+    status: "scheduled",
+    scheduledDepartureAt: "2026-08-30T23:15:00.000Z",
+    scheduledArrivalAt: "2026-08-31T00:45:00.000Z",
+    inboundFlight,
+  });
+
+  assert.deepEqual(projected.inboundFlight, inboundFlight);
 });
 
 test("opening flight details does not bypass FlightAware caches", () => {

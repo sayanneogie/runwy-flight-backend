@@ -61,6 +61,10 @@ function makeService(providerFlight = normalizedFlight(), options = {}) {
     ensureInboundFlightAlert: options.ensureInboundFlightAlert,
     ensureFlightStream: options.ensureFlightStream,
   };
+  if (typeof options.fetchFlightByProviderId === "function") {
+    provider.supportsProviderId = true;
+    provider.fetchFlightByProviderId = options.fetchFlightByProviderId;
+  }
   const service = createSharedFlightService({
     repository,
     provider,
@@ -931,6 +935,59 @@ test("a flight inside three hours registers one exact inbound aircraft alert", a
 
   assert.equal(inboundAlertCalls, 1);
   assert.equal(row.normalized_data.inboundFlight.providerAlertId, "alert-inbound-ai202");
+  assert.equal(row.normalized_data.inboundFlight.providerAlertStatus, "active");
+});
+
+test("an active but incomplete inbound aircraft retries detail resolution with reserved budget", async () => {
+  const departure = new Date(Date.now() + 37 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+  let detailCalls = 0;
+  let inboundAlertCalls = 0;
+  const { service, repository } = makeService(normalizedFlight({
+    providerFlightId: "DAL2307-instance",
+    airlineCode: "DL",
+    flightNumber: "2307",
+    origin: "MSP",
+    destination: "BIS",
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    inboundFlight: {
+      providerFlightId: "DAL2521-instance",
+      destinationAirportIata: "MSP",
+      providerAlertId: "alert-inbound-dal2521",
+      providerAlertStatus: "active",
+    },
+  }), {
+    fetchFlightByProviderId: async (providerFlightId, fetchOptions) => {
+      detailCalls += 1;
+      assert.equal(providerFlightId, "DAL2521-instance");
+      assert.equal(fetchOptions.budgetEndpoint, "inbound_flight_instance");
+      return normalizedFlight({
+        providerFlightId,
+        airlineCode: "DL",
+        flightNumber: "2521",
+        origin: "FAR",
+        destination: "MSP",
+        estimatedArrivalAt: new Date(Date.now() + 20 * 60_000).toISOString(),
+      });
+    },
+    ensureInboundFlightAlert: async () => {
+      inboundAlertCalls += 1;
+      return { providerAlertId: "replacement", status: "active" };
+    },
+  });
+
+  const saved = await service.saveUserFlight("u1", {
+    airline: "DL", number: "2307", date: departure.slice(0, 10), origin: "MSP", destination: "BIS",
+  });
+  const row = await repository.findFlightById(saved.flight.flightInstanceId);
+
+  assert.equal(detailCalls, 1);
+  assert.equal(inboundAlertCalls, 0);
+  assert.equal(row.normalized_data.inboundFlight.originAirportIata, "FAR");
+  assert.ok(row.normalized_data.inboundFlight.estimatedArrival);
   assert.equal(row.normalized_data.inboundFlight.providerAlertStatus, "active");
 });
 

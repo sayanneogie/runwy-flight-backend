@@ -377,9 +377,9 @@ const pool = DATABASE_URL
   : null;
 
 function flightAwareDailyBudgetLimitForEndpoint(endpoint) {
-  const isSearchRequest = ["operational", "schedules", "historical"].includes(String(endpoint || ""));
+  const isReservedRequest = ["operational", "schedules", "historical", "inbound_flight_instance"].includes(String(endpoint || ""));
   return FLIGHTAWARE_DAILY_FLIGHT_CALL_LIMIT +
-    (isSearchRequest ? FLIGHTAWARE_DAILY_SEARCH_RESERVE : 0);
+    (isReservedRequest ? FLIGHTAWARE_DAILY_SEARCH_RESERVE : 0);
 }
 
 async function flightAwareFlightFetch(url, options, { endpoint, units = 1 } = {}) {
@@ -3273,7 +3273,7 @@ async function fetchFlightAwareFlightByProviderId(providerFlightId, options = {}
           Accept: "application/json",
         },
       },
-      { endpoint: "flight_instance" }
+      { endpoint: options.budgetEndpoint || "flight_instance" }
     );
 
     if (response.status === 404) {
@@ -6626,7 +6626,7 @@ function trackedPayloadFromSharedFlight(flight) {
     baggageClaim: flight.baggageBelt || null,
     weatherInsight: flight.weatherInsight || null,
     delayMinutes: calculateDelayMinutes({ scheduled: scheduledDeparture, estimated: estimatedDeparture, actual: actualDeparture }),
-    inboundFlight: null,
+    inboundFlight: flight.inboundFlight || null,
     recentHistory: [],
     alerts: null,
     progressPercent: null,
@@ -7250,6 +7250,7 @@ module.exports = {
     ordinalNumber,
     shouldRefreshTrackedRecordFromWebhook,
     testPushNotificationPayload,
+    trackedPayloadFromSharedFlight,
     trackedProviderRefreshOptions,
     updateFlightAwareAlert,
     webhookStatusFromEvent,

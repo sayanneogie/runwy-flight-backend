@@ -271,6 +271,10 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
       return saved;
     } catch (error) {
       await repository.logApiUsage({ provider: provider.name, endpoint: "refreshFlightJob", flight_key: row.flight_key, response_time_ms: Date.now() - startedAt, error: error?.message || String(error) });
+      // A failed refresh of the outbound flight must not starve the separately
+      // identified inbound aircraft. Inbound resolution has its own bounded
+      // provider budget and is still useful when the main refresh is throttled.
+      await ensureInboundFlightMonitoring(row.id, `${job.data.reason || "refresh"}_fallback`);
       throw error;
     } finally {
       await releaseProviderCallLock(lock);
@@ -489,11 +493,12 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     let inbound = flight?.normalized_data?.inboundFlight;
     const departureMs = new Date(flight?.estimated_departure_at || flight?.scheduled_departure_at || 0).getTime();
     const untilDepartureMs = departureMs - Date.now();
+    const needsDetails = !inbound?.originAirportIata || !inbound?.estimatedArrival;
     if (
       !flight ||
       isFinalStatus(flight.status) ||
       !inbound?.providerFlightId ||
-      inbound.providerAlertStatus === "active" ||
+      (inbound.providerAlertStatus === "active" && !needsDetails) ||
       !Number.isFinite(departureMs) ||
       untilDepartureMs > INBOUND_MONITOR_WINDOW_MS ||
       untilDepartureMs < -30 * 60_000
@@ -503,10 +508,12 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
 
     try {
       const lastLookupMs = new Date(inbound.detailsLookupAttemptedAt || 0).getTime();
-      const needsDetails = !inbound.originAirportIata || !inbound.estimatedArrival;
       const mayRetryDetails = !Number.isFinite(lastLookupMs) || Date.now() - lastLookupMs >= 45 * 60_000;
       if (needsDetails && mayRetryDetails && provider.supportsProviderId && provider.fetchFlightByProviderId) {
-        const resolved = await provider.fetchFlightByProviderId(inbound.providerFlightId, { skipLivePosition: true });
+        const resolved = await provider.fetchFlightByProviderId(inbound.providerFlightId, {
+          skipLivePosition: true,
+          budgetEndpoint: "inbound_flight_instance",
+        });
         inbound = {
           ...inbound,
           flightNumber: resolved?.airlineCode && resolved?.flightNumber
@@ -531,6 +538,10 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
           cache_status: resolved ? "miss" : "no_match",
           status_code: resolved ? 200 : null,
         });
+      }
+      if (inbound.providerAlertStatus === "active") {
+        await cache.setJSON(`flight:${flight.flight_key}`, rowToFlightResponse(flight, { source: "redis", freshness: "fresh" }), await freshnessTTL(flight));
+        return flight;
       }
       const alert = await provider.ensureInboundFlightAlert(flight, inbound, { reason });
       if (!alert) return flight;
