@@ -6868,6 +6868,11 @@ app.get("/v1/flights/:flightId", async (req, res) => {
             flight_instance_id: flightId,
             reason: "detail_open",
           },
+        }).catch((error) => {
+          console.warn("Shared flight detail refresh failed; returning available live data", {
+            flightId,
+            error: error?.message || String(error),
+          });
         });
       }
       const weatherAwareFlight = await sharedFlightService.flightWithWeatherInsight(flightId, { userId, cacheStatus: "detail_view" }) || shared.flight;
@@ -6889,6 +6894,12 @@ app.get("/v1/flights/:flightId", async (req, res) => {
               flight_instance_id: tracked.metadata.sharedFlightInstanceId,
               reason: "detail_open",
             },
+          }).catch((error) => {
+            console.warn("Bridged flight detail refresh failed; returning available live data", {
+              flightId,
+              sharedFlightInstanceId: tracked.metadata.sharedFlightInstanceId,
+              error: error?.message || String(error),
+            });
           });
         }
         const weatherAwareFlight = await sharedFlightService.flightWithWeatherInsight(tracked.metadata.sharedFlightInstanceId, { userId, cacheStatus: "detail_view" }) || shared.flight;
