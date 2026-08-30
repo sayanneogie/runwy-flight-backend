@@ -89,6 +89,8 @@ create table public.user_settings (
     check (preferred_theme in ('light', 'dark', 'system')),
   distance_unit text not null default 'km'
     check (distance_unit in ('km', 'miles')),
+  temperature_unit text not null default 'celsius'
+    check (temperature_unit in ('celsius', 'fahrenheit')),
   uses_24_hour_time boolean not null default false,
   default_airport_code text not null default '',
   validate_with_provider_enabled boolean not null default true,

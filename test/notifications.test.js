@@ -2,11 +2,29 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 
 process.env.ALLOW_INSECURE_NO_AUTH = "true";
 process.env.WEBHOOK_SHARED_SECRET = process.env.WEBHOOK_SHARED_SECRET || "test webhook secret";
 
 const { __test__ } = require("../src/server.js");
+
+test("APNs ES256 provider signatures use JWT-compatible IEEE-P1363 encoding", () => {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", {
+    namedCurve: "prime256v1",
+  });
+  const signingInput = "header.payload";
+  const signature = __test__.signApnsJwtInput(signingInput, privateKey);
+
+  assert.equal(signature.length, 64);
+  assert.equal(
+    crypto.verify("sha256", Buffer.from(signingInput), {
+      key: publicKey,
+      dsaEncoding: "ieee-p1363",
+    }, signature),
+    true
+  );
+});
 
 test("test push payload is a visible fixed APNs alert", () => {
   assert.deepEqual(__test__.testPushNotificationPayload(), {
@@ -272,6 +290,55 @@ test("FlightAware alert payload prefers the exact provider flight id", () => {
   assert.equal(payload.events.in, true);
 });
 
+test("inbound FlightAware alert requests wheels-off without paid countdown callbacks", () => {
+  const payload = __test__.buildFlightAwareAlertPayload({
+    targetUrl: "https://example.com/v1/webhooks/flightaware",
+    context: {
+      providerFlightId: "AI202-instance",
+      flightNumber: "AI202",
+      departureIata: "DEL",
+      arrivalIata: "BLR",
+      windowStrategy: "open",
+      impendingDepartureMinutes: [],
+      impendingArrivalMinutes: [],
+      events: {
+        arrival: false, cancelled: true, departure: false, diverted: true,
+        filed: false, out: false, off: true, on: false, in: false,
+        hold_start: false, hold_end: false,
+      },
+    },
+  });
+
+  assert.equal(payload.ident, "AI202-instance");
+  assert.deepEqual(payload.impending_departure, []);
+  assert.deepEqual(payload.impending_arrival, []);
+  assert.deepEqual(payload.events, {
+    arrival: false, cancelled: true, departure: false, diverted: true,
+    filed: false, out: false, off: true, on: false, in: false,
+    hold_start: false, hold_end: false,
+  });
+  assert.equal(payload.start, undefined);
+  assert.equal(payload.end, undefined);
+});
+
+test("shared FlightAware alert context accepts PostgreSQL Date objects", () => {
+  const context = __test__.flightAwareAlertContextForSharedFlight({
+    provider: "flightaware",
+    status: "enroute",
+    provider_flight_id: "ABY496-instance",
+    airline_code: "G9",
+    flight_number: "496",
+    departure_date: new Date("2026-08-28T18:30:00.000Z"),
+    scheduled_departure_at: new Date("2026-08-29T19:25:00.000Z"),
+    origin_airport: "SHJ",
+    destination_airport: "BLR",
+  });
+
+  assert.equal(context.startDate, "2026-08-29");
+  assert.equal(context.endDate, "2026-08-31");
+  assert.equal(context.providerFlightId, "ABY496-instance");
+});
+
 test("existing FlightAware alerts are updated in place for configuration changes", async () => {
   const originalFetch = global.fetch;
   const requests = [];
@@ -315,6 +382,20 @@ test("FlightAware alert ids are extracted from scalar, array, and object respons
     __test__.flightAwareAlertIDFromPayload([{ id: "alert-1" }]),
     "alert-1"
   );
+});
+
+test("FlightAware alert ids are extracted from AeroAPI Location headers", () => {
+  assert.equal(
+    __test__.flightAwareAlertIDFromLocation("/alerts/130865591"),
+    "130865591"
+  );
+  assert.equal(
+    __test__.flightAwareAlertIDFromLocation(
+      "https://aeroapi.flightaware.com/aeroapi/alerts/abc-123?source=create"
+    ),
+    "abc-123"
+  );
+  assert.equal(__test__.flightAwareAlertIDFromLocation(null), null);
 });
 
 test("FlightAware lifecycle webhooks bypass freshness throttling", () => {
@@ -575,7 +656,7 @@ test("circle baggage notifications identify the traveler and flight", () => {
   assert.equal(events[0].body, "Maya's luggage for flight AI 101, Rome to New York will be on belt 6.");
 });
 
-test("unstable baggage assignments are silent until the final arrival hour", () => {
+test("baggage assignments stay silent until landing is confirmed", () => {
   const now = Date.now();
   const normalized = {
     flightNumber: "EK379",
@@ -593,6 +674,10 @@ test("unstable baggage assignments are silent until the final arrival hour", () 
   assert.deepEqual(__test__.notificationEventsFor(normalized, "flight-id"), []);
 
   normalized.arrivalTimes.estimated = new Date(now + 45 * 60_000).toISOString();
+  assert.deepEqual(__test__.notificationEventsFor(normalized, "flight-id"), []);
+
+  normalized.status = "landed";
+  normalized.landingTimes = { actual: new Date(now).toISOString() };
   const [event] = __test__.notificationEventsFor(normalized, "flight-id");
   assert.equal(event.type, "flight_baggage_claim");
   assert.equal(event.body, "Your luggage for flight EK 379, Phuket to Dubai will be on belt 7.");

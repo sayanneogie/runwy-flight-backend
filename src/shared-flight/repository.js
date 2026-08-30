@@ -57,6 +57,17 @@ function createMemorySharedFlightRepository() {
         );
       });
     },
+    async listInboundUpdateTargets({ providerFlightId, flightNumber }) {
+      const normalizedFlightNumber = String(flightNumber || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+      return [...flights.values()].filter((row) => {
+        const inbound = row.normalized_data?.inboundFlight || {};
+        const inboundNumber = String(inbound.flightNumber || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+        return Boolean(
+          (providerFlightId && inbound.providerFlightId === providerFlightId) ||
+          (normalizedFlightNumber && inboundNumber === normalizedFlightNumber)
+        );
+      });
+    },
     async listLifecycleRecoveryCandidates() {
       const now = Date.now();
       const earliest = now - 24 * 60 * 60_000;
@@ -68,6 +79,19 @@ function createMemorySharedFlightRepository() {
         return (Number.isFinite(departure) && departure >= earliest && departure <= latest) ||
           (Number.isFinite(arrival) && arrival >= earliest && arrival <= latest);
       });
+    },
+    async listPendingNotificationEventIds() {
+      const deliveredEventIds = new Set([...deliveries.values()].map((row) => row.flight_event_id));
+      const cutoff = Date.now() - 48 * 60 * 60_000;
+      return [...events.values()]
+        .filter((event) =>
+          event.notification_required === true &&
+          !deliveredEventIds.has(event.id) &&
+          Date.parse(event.created_at || "") >= cutoff
+        )
+        .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at))
+        .slice(0, 250)
+        .map((event) => event.id);
     },
     async upsertFlightFromNormalized(normalized, params, freshUntil) {
       const row = { ...mapNormalizedToDb(normalized, params), fresh_until: freshUntil };
@@ -307,13 +331,14 @@ function createMemorySharedFlightRepository() {
       const flight = [...flights.values()].find((row) => row.id === event.flight_instance_id);
       return { event, flight };
     },
-    async listNotificationTargets(flightInstanceId, severity, _eventType) {
+    async listNotificationTargets(flightInstanceId, severity, eventType) {
       return [...userFlights.values()]
         .filter((row) =>
           row.flight_instance_id === flightInstanceId &&
           row.notification_enabled !== false &&
           row.alert_preferences?.[severity] !== false &&
-          (_eventType !== "TRIP_STARTING" || row.source_type !== "tracked")
+          (eventType !== "TRIP_STARTING" || row.source_type !== "tracked") &&
+          (!String(eventType || "").startsWith("INBOUND_") || row.alert_settings_json?.takeoffLanding !== false)
         )
         .map((userFlight) => ({
           userFlight,
@@ -322,6 +347,17 @@ function createMemorySharedFlightRepository() {
           ownerDisplayName: null,
           tokens: [...deviceTokens.values()].filter((token) => token.user_id === userFlight.user_id && token.is_active),
         }));
+    },
+    async arrivalVisitOrdinalForUser(userId, destinationIata, currentUserFlightId = null) {
+      const visits = [...userFlights.values()].filter((row) =>
+        row.user_id === userId &&
+        row.id !== currentUserFlightId &&
+        String(row.destination_iata || "").toUpperCase() === String(destinationIata || "").toUpperCase() &&
+        row.source_type === "travelled_archive" &&
+        !row.deleted_at &&
+        (row.lifecycle_state === "landed" || row.lifecycle_state === "archived" || row.actual_arrival)
+      ).length;
+      return visits + 1;
     },
     async isUserFlightNotificationActive(ownerUserId, userFlightId) {
       const row = [...userFlights.values()].find((item) =>
@@ -453,6 +489,24 @@ function createPostgresSharedFlightRepository(pool) {
       );
       return result.rows;
     },
+    async listInboundUpdateTargets({ providerFlightId, flightNumber }) {
+      const normalizedFlightNumber = String(flightNumber || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+      const result = await pool.query(
+        `select *
+         from public.flight_instances
+         where (
+           $1::text is not null
+           and normalized_data #>> '{inboundFlight,providerFlightId}' = $1
+         ) or (
+           $2::text <> ''
+           and regexp_replace(upper(coalesce(normalized_data #>> '{inboundFlight,flightNumber}', '')), '[^A-Z0-9]', '', 'g') = $2
+         )
+         order by updated_at desc
+         limit 20`,
+        [providerFlightId || null, normalizedFlightNumber]
+      );
+      return result.rows;
+    },
     async listLifecycleRecoveryCandidates() {
       const result = await pool.query(
         `select distinct fi.*
@@ -471,6 +525,22 @@ function createPostgresSharedFlightRepository(pool) {
          limit 1000`
       );
       return result.rows;
+    },
+    async listPendingNotificationEventIds() {
+      const result = await pool.query(
+        `select fe.id
+         from public.flight_events fe
+         where fe.notification_required = true
+           and fe.created_at >= now() - interval '48 hours'
+           and not exists (
+             select 1
+             from public.notification_deliveries nd
+             where nd.flight_event_id = fe.id
+           )
+         order by fe.created_at asc
+         limit 250`
+      );
+      return result.rows.map((row) => row.id);
     },
     async upsertFlightFromNormalized(normalized, params, freshUntil) {
       const row = { ...mapNormalizedToDb(normalized, params), fresh_until: freshUntil };
@@ -907,39 +977,51 @@ function createPostgresSharedFlightRepository(pool) {
     },
     async getEventWithFlight(eventId) {
       const row = one(await pool.query(
-        `select fe as event, fi as flight from public.flight_events fe join public.flight_instances fi on fi.id = fe.flight_instance_id where fe.id = $1`,
+        `select to_jsonb(fe) as event, to_jsonb(fi) as flight
+         from public.flight_events fe
+         join public.flight_instances fi on fi.id = fe.flight_instance_id
+         where fe.id = $1`,
         [eventId]
       ));
       return row;
     },
     async listNotificationTargets(flightInstanceId, severity, eventType) {
       const circleCondition = circleNotificationPreferenceConditionForEventType(eventType);
+      const ownerCondition = String(eventType || "").startsWith("INBOUND_")
+        ? "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true"
+        : "true";
       const tripStartingCondition = eventType === "TRIP_STARTING"
         ? "and coalesce(uf.source_type, 'tracked') <> 'tracked'"
         : "";
       const result = await pool.query(
         `with owner_targets as (
            select
-             uf as user_flight,
+             to_jsonb(uf) as user_flight,
              uf.user_id as recipient_user_id,
              false as is_circle,
              p.display_name as owner_display_name,
+             p.display_name as recipient_display_name,
+             coalesce(us.temperature_unit, 'celsius') as temperature_unit,
              coalesce(uf.source_type, 'tracked') <> 'tracked' as is_traveler
            from public.user_flights uf
            left join public.profiles p on p.user_id = uf.user_id
+           left join public.user_settings us on us.user_id = uf.user_id
            where uf.flight_instance_id = $1
              and uf.notification_enabled = true
              and uf.deleted_at is null
              and coalesce(uf.lifecycle_state, '') <> 'deleted'
              and coalesce((uf.alert_preferences ->> $2)::boolean, false) = true
+             and ${ownerCondition}
              ${tripStartingCondition}
          ),
          circle_targets as (
            select
-             uf as user_flight,
+             to_jsonb(uf) as user_flight,
              fp.viewer_user_id as recipient_user_id,
              true as is_circle,
              p.display_name as owner_display_name,
+             rp.display_name as recipient_display_name,
+             coalesce(rus.temperature_unit, 'celsius') as temperature_unit,
              false as is_traveler
            from public.user_flights uf
            left join public.profiles p on p.user_id = uf.user_id
@@ -947,6 +1029,8 @@ function createPostgresSharedFlightRepository(pool) {
              on fp.owner_user_id = uf.user_id
            join public.friend_relationships fr
              on fr.id = fp.relationship_id
+           left join public.profiles rp on rp.user_id = fp.viewer_user_id
+           left join public.user_settings rus on rus.user_id = fp.viewer_user_id
            where uf.flight_instance_id = $1
              and uf.deleted_at is null
              and coalesce(uf.lifecycle_state, '') <> 'deleted'
@@ -970,13 +1054,15 @@ function createPostgresSharedFlightRepository(pool) {
            recipient_user_id,
            is_circle,
            owner_display_name,
+           recipient_display_name,
+           temperature_unit,
            is_traveler,
            coalesce(jsonb_agg(dt) filter (where dt.id is not null), '[]'::jsonb) as tokens
          from targets
          left join public.device_tokens dt
            on dt.user_id = targets.recipient_user_id
           and dt.is_active = true
-         group by user_flight, recipient_user_id, is_circle, owner_display_name, is_traveler`,
+         group by user_flight, recipient_user_id, is_circle, owner_display_name, recipient_display_name, temperature_unit, is_traveler`,
         [flightInstanceId, severity]
       );
       return result.rows.map((row) => ({
@@ -988,8 +1074,27 @@ function createPostgresSharedFlightRepository(pool) {
         isCircle: row.is_circle === true,
         isTraveler: row.is_traveler === true,
         ownerDisplayName: row.owner_display_name || null,
+        recipientDisplayName: row.recipient_display_name || null,
+        temperatureUnit: row.temperature_unit || "celsius",
         tokens: row.tokens || [],
       }));
+    },
+    async arrivalVisitOrdinalForUser(userId, destinationIata, currentUserFlightId = null) {
+      const result = await pool.query(
+        `select count(distinct uf.id)::int as visits
+         from public.user_flights uf
+         where uf.user_id = $1::uuid
+           and upper(coalesce(uf.destination_iata, '')) = upper($2)
+           and uf.source_type = 'travelled_archive'
+           and uf.deleted_at is null
+           and ($3::uuid is null or uf.id is distinct from $3::uuid)
+           and (
+             uf.lifecycle_state in ('landed', 'archived')
+             or uf.actual_arrival is not null
+           )`,
+        [userId, destinationIata, currentUserFlightId]
+      );
+      return Number(result.rows[0]?.visits || 0) + 1;
     },
     async isUserFlightNotificationActive(ownerUserId, userFlightId) {
       const result = await pool.query(
@@ -1009,7 +1114,14 @@ function createPostgresSharedFlightRepository(pool) {
       const row = one(await pool.query(
         `insert into public.notification_deliveries (user_id, user_flight_id, flight_instance_id, flight_event_id, channel)
          values ($1, $2, $3, $4, $5)
-         on conflict (user_id, flight_event_id, channel) do nothing
+         on conflict (user_id, flight_event_id, channel) do update set
+           user_flight_id = excluded.user_flight_id,
+           flight_instance_id = excluded.flight_instance_id,
+           status = 'pending',
+           sent_at = null,
+           error = null,
+           created_at = now()
+         where notification_deliveries.status = 'failed'
          returning *`,
         [userId, userFlightId, flightInstanceId, eventId, channel]
       ));
@@ -1122,6 +1234,9 @@ function circleNotificationPreferenceConditionForEventType(eventType) {
     case "TAKEOFF_ROLL":
     case "TRIP_STARTING":
     case "INBOUND_ARRIVED":
+    case "INBOUND_DEPARTED":
+    case "INBOUND_CANCELLED":
+    case "INBOUND_DIVERTED":
       return "fp.notify_departure = true";
     case "LANDED":
     case "ARRIVED":

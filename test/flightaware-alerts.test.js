@@ -9,6 +9,7 @@ const { createSharedFlightService } = require("../src/shared-flight/service");
 const {
   generateFlightAwareAlertDedupeKey,
   normalizeFlightAwareAlert,
+  targetMatchesAlert,
 } = require("../src/flightaware-alerts");
 
 function normalizedFlight(overrides = {}) {
@@ -86,6 +87,70 @@ test("normalizes terse FlightAware ON and IN arrival event codes", () => {
 
     assert.equal(normalized.event_type, "flight_arrived");
   }
+});
+
+test("normalizes production AeroAPI ON callbacks using IATA route and touchdown time", () => {
+  const normalized = normalizeFlightAwareAlert({
+    event_code: "on",
+    summary: "ABY496 arrived at BLR from SHJ",
+    flight: {
+      ident: "ABY496",
+      ident_iata: "G9496",
+      fa_flight_id: "ABY496-instance",
+      origin: "OMSJ",
+      origin_iata: "SHJ",
+      destination: "VOBL",
+      destination_iata: "BLR",
+      actual_out: "2026-08-29T18:16:00Z",
+      actual_on: "2026-08-29T22:24:55Z",
+      scheduled_out: "2026-08-29T18:10:00Z",
+    },
+  });
+
+  assert.equal(normalized.event_type, "flight_arrived");
+  assert.equal(normalized.origin, "SHJ");
+  assert.equal(normalized.destination, "BLR");
+  assert.equal(normalized.airlineCode, "G9");
+  assert.equal(normalized.actual_in, "2026-08-29T22:24:55.000Z");
+  assert.equal(normalized.event_time, "2026-08-29T22:24:55.000Z");
+});
+
+test("minutes-out callbacks do not mark a flight landed", () => {
+  const normalized = normalizeFlightAwareAlert({
+    event_code: "minutes_out",
+    summary: "ABY496 is expected to arrive at BLR in 5 min",
+    flight: {
+      ident_iata: "G9496",
+      fa_flight_id: "ABY496-instance",
+      origin_iata: "SHJ",
+      destination_iata: "BLR",
+      estimated_on: "2026-08-29T22:25:52Z",
+    },
+  });
+
+  assert.equal(normalized.event_type, "flight_arrival_soon");
+});
+
+test("arrival callbacks without actual ON or IN time require verification", async () => {
+  const { repository, service, row } = await makeAlertService();
+  const result = await service.processFlightAwareAlertWebhook({
+    event_code: "arrival",
+    ident: "AI2814",
+    fa_flight_id: "AI2814-2026-05-09",
+    origin: "BLR",
+    destination: "DEL",
+    event_time: "2026-05-09T19:25:00Z",
+  });
+  const updated = await repository.findFlightById(row.id);
+  const verification = service.queue.jobs.find((job) =>
+    job.name === "refreshFlightJob" && job.data.trigger === "unconfirmed_arrival_alert"
+  );
+
+  assert.equal(result.matchedFlights, 1);
+  assert.equal(result.appliedEvents, 0);
+  assert.equal(updated.status, "scheduled");
+  assert.ok(verification);
+  assert.equal([...repository.__memory.events.values()].some((event) => event.event_type === "LANDED"), false);
 });
 
 test("normalizes a FlightAware OUT event as taxiing", () => {
@@ -286,4 +351,24 @@ test("FlightAware alert matching requires the exact flight instance date and rou
     actual_out: "2026-05-10T16:42:00Z",
   });
   assert.equal(wrongDate.matchedFlights, 0);
+});
+
+test("exact FlightAware instance ids survive UTC date-boundary mismatches", () => {
+  const alert = normalizeFlightAwareAlert({
+    event: "on",
+    ident: "ABY496",
+    fa_flight_id: "ABY496-instance",
+    origin: "SHJ",
+    destination: "BLR",
+    scheduled_out: "2026-08-29T19:25:00.000Z",
+    actual_on: "2026-08-29T23:30:00.000Z",
+  });
+
+  assert.equal(alert.actual_in, "2026-08-29T23:30:00.000Z");
+  assert.equal(targetMatchesAlert({
+    provider_flight_id: "ABY496-instance",
+    departure_date: "2026-08-28T18:30:00.000Z",
+    origin_airport: "SHJ",
+    destination_airport: "BLR",
+  }, alert), true);
 });

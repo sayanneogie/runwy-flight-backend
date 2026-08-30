@@ -4,6 +4,8 @@ const FINAL_STATUSES = new Set(["landed", "arrived", "arrived_at_gate", "cancell
 const AIRBORNE_STATUSES = new Set(["airborne", "enroute", "departed"]);
 const TAXI_STATUSES = new Set(["taxiing", "taxi_out", "takeoff_roll", "taxi_in"]);
 const APPROACH_WINDOW_MINUTES = 45;
+const LIVE_POSITION_CONTRADICTION_WINDOW_MS = 5 * 60_000;
+const ACTUAL_EVENT_CLOCK_SKEW_MS = 2 * 60_000;
 
 function normalizeAirline(input) {
   return String(input || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -81,6 +83,35 @@ function bestTime(record, names) {
   return null;
 }
 
+function freshAirborneTelemetry(flight, nowMs = Date.now()) {
+  const normalized = flight?.normalized_data || flight?.normalizedData || {};
+  const position = normalized?.position || normalized?.livePosition || flight?.position || flight?.livePosition || {};
+  const recordedAt = timestampMs(
+    position?.recordedAt ||
+    position?.recorded_at ||
+    normalized?.lastUpdated ||
+    flight?.position_recorded_at ||
+    flight?.positionRecordedAt
+  );
+  if (recordedAt == null || Math.abs(nowMs - recordedAt) > LIVE_POSITION_CONTRADICTION_WINDOW_MS) {
+    return false;
+  }
+
+  const hasPosition =
+    flight?.position_lat != null ||
+    position?.lat != null ||
+    position?.latitude != null;
+  if (!hasPosition) return false;
+
+  const altitudeFeet = Number(flight?.altitude ?? position?.altitudeFeet ?? position?.altitude);
+  const groundSpeedKnots = Number(flight?.ground_speed ?? position?.groundSpeedKnots ?? position?.groundSpeed);
+  const airGround = String(position?.airGround || position?.air_ground || "").toUpperCase();
+  return airGround === "A" ||
+    (Number.isFinite(altitudeFeet) && altitudeFeet > 300) ||
+    (Number.isFinite(altitudeFeet) && altitudeFeet > 150 &&
+      Number.isFinite(groundSpeedKnots) && groundSpeedKnots > 80);
+}
+
 function phaseFromProviderStatus(status) {
   const value = String(status || "").toLowerCase();
   if (["cancelled", "canceled"].includes(value)) return "cancelled";
@@ -126,6 +157,7 @@ function deriveFlightLifecyclePhase(flight, nowMs = Date.now()) {
     flight?.actualTakeoffAt
   );
   const actualArrival = bestTime(flight, ["actual_arrival_at", "actualArrivalAt"]);
+  const credibleActualArrival = actualArrival != null && actualArrival <= nowMs + ACTUAL_EVENT_CLOCK_SKEW_MS;
   const scheduledDeparture = bestTime(flight, ["scheduled_departure_at", "scheduledDepartureAt"]);
   const estimatedDeparture = bestTime(flight, ["estimated_departure_at", "estimatedDepartureAt"]);
   const scheduledArrival = bestTime(flight, ["scheduled_arrival_at", "scheduledArrivalAt"]);
@@ -138,11 +170,46 @@ function deriveFlightLifecyclePhase(flight, nowMs = Date.now()) {
     flight?.normalized_data?.position?.lat != null ||
     flight?.normalizedData?.position?.lat != null ||
     flight?.livePosition?.latitude != null;
+  const liveAltitudeFeet = Number(
+    flight?.altitude ??
+    flight?.position?.altitude ??
+    flight?.normalized_data?.livePosition?.altitudeFeet ??
+    flight?.normalizedData?.livePosition?.altitudeFeet ??
+    flight?.livePosition?.altitudeFeet
+  );
+  const liveGroundSpeedKnots = Number(
+    flight?.ground_speed ??
+    flight?.position?.groundSpeed ??
+    flight?.normalized_data?.livePosition?.groundSpeedKnots ??
+    flight?.normalizedData?.livePosition?.groundSpeedKnots ??
+    flight?.livePosition?.groundSpeedKnots
+  );
+  const hasGroundTelemetry = hasLivePosition &&
+    Number.isFinite(liveAltitudeFeet) &&
+    Number.isFinite(liveGroundSpeedKnots) &&
+    liveAltitudeFeet <= 150 &&
+    liveGroundSpeedKnots <= 60;
+  const hasAirbornePosition = hasLivePosition && (
+    (Number.isFinite(liveAltitudeFeet) && liveAltitudeFeet > 300) ||
+    (Number.isFinite(liveAltitudeFeet) && liveAltitudeFeet > 150 &&
+      Number.isFinite(liveGroundSpeedKnots) && liveGroundSpeedKnots > 80)
+  );
 
   if (providerPhase === "cancelled" || providerPhase === "diverted") {
     return { phase: providerPhase, confidence: "provider_confirmed", reason: `provider_status_${providerPhase}` };
   }
-  if (actualArrival) {
+  if (freshAirborneTelemetry(flight, nowMs) && (
+    credibleActualArrival ||
+    ["landed", "arrived", "arrived_at_gate", "taxi_in"].includes(providerPhase)
+  )) {
+    const minutesUntilArrival = arrival != null ? (arrival - nowMs) / 60000 : null;
+    return {
+      phase: minutesUntilArrival != null && minutesUntilArrival <= APPROACH_WINDOW_MINUTES && minutesUntilArrival >= -10 ? "approaching" : "airborne",
+      confidence: "position_confirmed",
+      reason: "fresh_airborne_position_vetoed_terminal_state",
+    };
+  }
+  if (credibleActualArrival) {
     return { phase: providerPhase === "arrived_at_gate" ? "arrived_at_gate" : "landed", confidence: "timestamp_confirmed", reason: "actual_arrival_present" };
   }
   if (["landed", "arrived", "arrived_at_gate"].includes(providerPhase)) {
@@ -154,37 +221,21 @@ function deriveFlightLifecyclePhase(flight, nowMs = Date.now()) {
   if (["takeoff_roll", "taxi_out", "taxiing", "boarding"].includes(providerPhase)) {
     return { phase: providerPhase === "taxiing" ? "taxi_out" : providerPhase, confidence: "provider_confirmed", reason: `provider_status_${providerPhase}` };
   }
-  if (["airborne", "enroute", "departed"].includes(String(flight?.status || "").toLowerCase()) || actualTakeoff || hasLivePosition) {
+  if (hasGroundTelemetry) {
+    return { phase: "taxi_out", confidence: "position_confirmed", reason: "ground_telemetry_present" };
+  }
+  if (["airborne", "enroute"].includes(String(flight?.status || "").toLowerCase()) || actualTakeoff || hasAirbornePosition) {
     const minutesUntilArrival = arrival != null ? (arrival - nowMs) / 60000 : null;
     return {
       phase: minutesUntilArrival != null && minutesUntilArrival <= APPROACH_WINDOW_MINUTES && minutesUntilArrival >= -10 ? "approaching" : "airborne",
-      confidence: hasLivePosition ? "position_confirmed" : actualTakeoff ? "timestamp_confirmed" : "provider_confirmed",
-      reason: hasLivePosition ? "live_position_present" : actualTakeoff ? "actual_takeoff_present" : "provider_airborne_status",
+      confidence: hasAirbornePosition ? "position_confirmed" : actualTakeoff ? "timestamp_confirmed" : "provider_confirmed",
+      reason: hasAirbornePosition ? "airborne_position_present" : actualTakeoff ? "actual_takeoff_present" : "provider_airborne_status",
     };
   }
   // FlightAware's actual OUT timestamp means the aircraft left the gate. It is
   // not the OFF timestamp and must never, by itself, be shown as airborne.
   if (actualDeparture) {
     return { phase: "taxi_out", confidence: "timestamp_confirmed", reason: "actual_gate_departure_present" };
-  }
-
-  if (departure != null && arrival != null && arrival > departure) {
-    const routeMs = arrival - departure;
-    const taxiOutMs = Math.min(25 * 60000, Math.max(10 * 60000, Math.round(routeMs * 0.12)));
-    if (nowMs >= departure + taxiOutMs && nowMs < arrival + 10 * 60000) {
-      const minutesUntilArrival = (arrival - nowMs) / 60000;
-      return {
-        phase: minutesUntilArrival <= APPROACH_WINDOW_MINUTES ? "approaching" : "airborne",
-        confidence: "time_inferred",
-        reason: "now_between_departure_and_arrival_window",
-      };
-    }
-    if (nowMs >= departure && nowMs < departure + taxiOutMs) {
-      return { phase: "taxi_out", confidence: "time_inferred", reason: "now_inside_departure_taxi_window" };
-    }
-    if (nowMs >= arrival + 10 * 60000) {
-      return { phase: "landed", confidence: "time_inferred", reason: "now_after_arrival_window" };
-    }
   }
 
   if (providerPhase === "delayed") {
@@ -339,7 +390,11 @@ function mapNormalizedToDb(normalized, params = {}) {
 
 function statusReconciledWithActualTimes(normalized) {
   const status = String(normalized?.status || "unknown").toLowerCase();
-  if (normalized?.actualArrivalAt) {
+  if (freshAirborneTelemetry(normalized)) {
+    return "enroute";
+  }
+  const actualArrivalMs = timestampMs(normalized?.actualArrivalAt);
+  if (actualArrivalMs != null && actualArrivalMs <= Date.now() + ACTUAL_EVENT_CLOCK_SKEW_MS) {
     return status === "landed" ? "landed" : "arrived_at_gate";
   }
   if (
@@ -394,6 +449,7 @@ function rowToFlightResponse(row, { source = "postgres", freshness = "fresh", is
     arrivalGate: normalized.arrivalGate || null,
     arrivalTerminal: normalized.arrivalTerminal || null,
     arrivalTimezone: normalized.arrivalTimezone || null,
+    inboundFlight: normalized.inboundFlight || null,
     baggageBelt: row.baggage_belt,
     position: {
       lat: row.position_lat,
@@ -478,6 +534,7 @@ function compareFlightState(oldState, newState, nowMs = Date.now()) {
     return events;
   }
 
+  let emittedAirborneEvent = false;
   if (newStatus !== oldStatus) {
     if (newStatus === "cancelled") push("CANCELLED", "critical", { status: oldStatus }, { status: newStatus }, "Flight has been cancelled", true);
     else if (newStatus === "diverted") push("DIVERTED", "critical", { status: oldStatus }, { status: newStatus }, "Flight has been diverted", true);
@@ -486,9 +543,26 @@ function compareFlightState(oldState, newState, nowMs = Date.now()) {
     else if (newStatus === "taxi_in") push("TAXI_IN", "low", { status: oldStatus }, { status: newStatus }, "Flight is taxiing to the gate", true);
     else if (newStatus === "arrived_at_gate") push("ARRIVED_AT_GATE", "medium", { status: oldStatus }, { status: newStatus }, "Flight has arrived at the gate", true);
     else if (newStatus === "departed") push("DEPARTED", "medium", { status: oldStatus }, { status: newStatus }, "Flight has departed", true);
-    else if (["airborne", "enroute"].includes(newStatus)) push("AIRBORNE", "medium", { status: oldStatus }, { status: newStatus }, "Flight is airborne", true);
+    else if (["airborne", "enroute"].includes(newStatus)) {
+      push("AIRBORNE", "medium", { status: oldStatus }, { status: newStatus }, "Flight is airborne", true);
+      emittedAirborneEvent = true;
+    }
     else if (newStatus === "landed") push("LANDED", "medium", { status: oldStatus }, { status: newStatus }, "Flight has landed", true);
     else if (newStatus === "arrived") push("ARRIVED", "medium", { status: oldStatus }, { status: newStatus }, "Flight has arrived", true);
+  }
+
+  // A stale/time-inferred row may already say `enroute` before the aircraft
+  // actually takes off. Emit the real takeoff event when positive telemetry or
+  // the actual OFF timestamp first appears, even if the status string is unchanged.
+  if (!emittedAirborneEvent && !hasPositiveTakeoffEvidence(oldState) && hasPositiveTakeoffEvidence(newState)) {
+    push(
+      "AIRBORNE",
+      "medium",
+      { status: oldStatus, takeoffConfirmed: false },
+      { status: newStatus, takeoffConfirmed: true },
+      "Flight is airborne",
+      true
+    );
   }
 
   const delayMinutes = minutesBetween(oldState.estimated_departure_at || oldState.scheduled_departure_at, newState.estimated_departure_at || newState.scheduled_departure_at);
@@ -536,22 +610,29 @@ function compareFlightState(oldState, newState, nowMs = Date.now()) {
   return events;
 }
 
-function isReliableBaggageNotificationWindow(flight, nowMs = Date.now()) {
-  const status = String(flight?.status || "").trim().toLowerCase();
-  if (["taxi_in", "landed", "arrived", "arrived_at_gate"].includes(status)) {
-    return true;
-  }
+function hasPositiveTakeoffEvidence(state) {
+  const normalized = state?.normalized_data || state?.normalizedData || state || {};
+  const actualTakeoff =
+    normalized?.takeoffTimes?.actual ||
+    state?.takeoffTimes?.actual ||
+    state?.actual_takeoff_at ||
+    state?.actualTakeoffAt;
+  if (actualTakeoff) return true;
 
-  const arrivalAt =
-    flight?.actual_arrival_at ||
-    flight?.actualArrivalAt ||
-    flight?.estimated_arrival_at ||
-    flight?.estimatedArrivalAt ||
-    flight?.scheduled_arrival_at ||
-    flight?.scheduledArrivalAt ||
-    null;
-  const arrivalMs = arrivalAt ? new Date(arrivalAt).getTime() : NaN;
-  return Number.isFinite(arrivalMs) && arrivalMs - nowMs <= 60 * 60_000;
+  const position = normalized?.livePosition || state?.livePosition || state?.position || {};
+  const altitudeFeet = Number(state?.altitude ?? position?.altitudeFeet ?? position?.altitude);
+  const groundSpeedKnots = Number(state?.ground_speed ?? position?.groundSpeedKnots ?? position?.groundSpeed);
+  const airGround = String(position?.airGround || position?.air_ground || "").toUpperCase();
+
+  if (airGround === "A") return true;
+  if (Number.isFinite(altitudeFeet) && altitudeFeet > 300) return true;
+  return Number.isFinite(altitudeFeet) && altitudeFeet > 150 &&
+    Number.isFinite(groundSpeedKnots) && groundSpeedKnots > 80;
+}
+
+function isReliableBaggageNotificationWindow(flight) {
+  const status = String(flight?.status || "").trim().toLowerCase();
+  return ["taxi_in", "landed", "arrived", "arrived_at_gate"].includes(status);
 }
 
 module.exports = {

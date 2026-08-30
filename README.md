@@ -25,6 +25,8 @@ Optional live-tracking transport:
 - At least one provider key:
   - `AVIATIONSTACK_KEY` when `FLIGHT_DATA_PROVIDER=aviationstack`
   - `FLIGHTAWARE_API_KEY` when `FLIGHT_DATA_PROVIDER=flightaware`
+  - `FLIGHTAWARE_DAILY_FLIGHT_CALL_LIMIT` (default `500`)
+  - `FLIGHTAWARE_DAILY_SEARCH_RESERVE` (default `100`; only flight-number search can use this reserve)
 - Optional but recommended:
   - `DATABASE_URL` for durable tracked-flight + device storage
   - APNs key configuration for true background push alerts
@@ -183,12 +185,13 @@ Response (shape):
 Returns refreshed `normalized` data with updated `alerts` flags (useful for delay/cancellation notification logic).
 
 ### GET `/v1/search?flightNumber=AI203&date=2026-02-22&dep=DEL`
-Returns normalized candidate list.
+Returns a normalized candidate list. Future flight-number searches use
+FlightAware's schedules endpoint and request one result page by default. A page
+can contain multiple same-day occurrences of the same flight number while keeping
+provider usage bounded.
 
-### GET `/v1/search/route?dep=DEL&arr=BLR&date=2026-08-10&preferSchedules=true`
-Returns the direct flights published for the route and departure date. Upcoming
-route searches use FlightAware's schedules endpoint and request multiple bounded
-result pages so busy routes are not limited to the first page.
+### GET `/v1/search/route?dep=DEL&arr=BLR&date=2026-08-10`
+Retired. Returns `410 Gone`; search by airline and flight number instead.
 
 ### POST `/v1/devices/push-token`
 Registers/updates a device APNs token for background alerts.

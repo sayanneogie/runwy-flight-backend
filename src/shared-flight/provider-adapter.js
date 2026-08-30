@@ -1,6 +1,6 @@
 "use strict";
 
-function createProviderAdapter({ providerName, fetchFlights, fetchByProviderId, normalizeRecord, normalizeSelected, enrichNormalized, selectRecord, ensureFlightAlert, ensureFlightStream, alertConfigurationChangedAt }) {
+function createProviderAdapter({ providerName, fetchFlights, fetchByProviderId, normalizeRecord, normalizeSelected, enrichNormalized, selectRecord, ensureFlightAlert, ensureInboundFlightAlert, ensureFlightStream, alertConfigurationChangedAt }) {
   const adapter = {
     name: providerName,
     supportsProviderId: Boolean(fetchByProviderId),
@@ -30,6 +30,7 @@ function createProviderAdapter({ providerName, fetchFlights, fetchByProviderId, 
     },
   };
   if (typeof ensureFlightAlert === "function") adapter.ensureFlightAlert = ensureFlightAlert;
+  if (typeof ensureInboundFlightAlert === "function") adapter.ensureInboundFlightAlert = ensureInboundFlightAlert;
   if (alertConfigurationChangedAt) adapter.alertConfigurationChangedAt = alertConfigurationChangedAt;
   if (typeof ensureFlightStream === "function") adapter.ensureFlightStream = ensureFlightStream;
   return adapter;
@@ -69,12 +70,15 @@ function normalizeProviderRecord(record, normalizeRecord, providerName, params) 
     arrivalGate: normalized.arrivalGate || null,
     arrivalTerminal: normalized.arrivalTerminal || null,
     baggageBelt: normalized.baggageBelt || normalized.baggageClaim || null,
+    inboundFlight: normalized.inboundFlight || null,
     position: {
       lat: normalized.livePosition?.latitude ?? normalized.position?.lat ?? null,
       lon: normalized.livePosition?.longitude ?? normalized.position?.lon ?? null,
       altitude: normalized.livePosition?.altitudeFeet ?? normalized.position?.altitude ?? null,
       groundSpeed: normalized.livePosition?.groundSpeedKnots ?? normalized.livePosition?.groundspeedKnots ?? normalized.position?.groundSpeed ?? null,
       heading: normalized.livePosition?.headingDegrees ?? normalized.livePosition?.heading ?? normalized.position?.heading ?? null,
+      airGround: normalized.livePosition?.airGround ?? normalized.livePosition?.air_ground ?? normalized.position?.airGround ?? null,
+      recordedAt: normalized.livePosition?.recordedAt ?? normalized.position?.recordedAt ?? normalized.lastUpdated ?? null,
     },
     provider: providerName,
     dataConfidence: normalized.dataConfidence || "medium",

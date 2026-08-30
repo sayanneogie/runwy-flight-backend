@@ -28,18 +28,33 @@ function normalizeFlightAwareAlert(rawPayload) {
     )
   );
   const parsed = parseIdent(ident);
-  const origin = airportCode(firstPresent(event.origin, event.departure, event.origin_airport, event.departure_airport, event.origin_iata, event.departure_iata));
-  const destination = airportCode(firstPresent(event.destination, event.arrival, event.destination_airport, event.arrival_airport, event.destination_iata, event.arrival_iata));
+  // AeroAPI callbacks commonly include both ICAO (`OMSJ`) and IATA (`SHJ`).
+  // Prefer the explicit IATA value; truncating an ICAO code produces `OMS`
+  // and prevents an otherwise exact flight instance from matching its route.
+  const origin = airportCode(firstPresent(event.origin_iata, event.departure_iata, event.origin, event.departure, event.origin_airport, event.departure_airport));
+  const destination = airportCode(firstPresent(event.destination_iata, event.arrival_iata, event.destination, event.arrival, event.destination_airport, event.arrival_airport));
   const scheduledOut = iso(firstPresent(event.scheduled_out, event.scheduledOff, event.scheduled_off, event.scheduled_departure_at));
   const estimatedOut = iso(firstPresent(event.estimated_out, event.estimatedOff, event.estimated_off, event.estimated_departure_at));
   const actualOut = iso(firstPresent(event.actual_out, event.actualOff, event.actual_off, event.actual_departure_at));
-  const scheduledIn = iso(firstPresent(event.scheduled_in, event.scheduledOn, event.scheduled_in, event.scheduled_arrival_at));
-  const estimatedIn = iso(firstPresent(event.estimated_in, event.estimatedOn, event.estimated_in, event.estimated_arrival_at));
-  const actualIn = iso(firstPresent(event.actual_in, event.actualOn, event.actual_in, event.actual_arrival_at));
-  const eventTime = iso(firstPresent(event.event_time, event.eventTime, event.timestamp, event.occurred_at, event.occurredAt, actualOut, actualIn, estimatedOut, estimatedIn));
-  const departureDate = dateOnly(firstPresent(event.departure_date, event.flight_date, event.date, scheduledOut, estimatedOut, actualOut, eventTime));
-  const rawType = String(firstPresent(event.event, event.type, event.alert_type, event.alertType, event.status, event.event_status, event.eventStatus) || "").toLowerCase();
+  const scheduledIn = iso(firstPresent(event.scheduled_in, event.scheduled_on, event.scheduledOn, event.scheduled_arrival_at));
+  const estimatedIn = iso(firstPresent(event.estimated_in, event.estimated_on, event.estimatedOn, event.estimated_arrival_at));
+  const actualIn = iso(firstPresent(event.actual_in, event.actual_on, event.actualOn, event.actual_arrival_at));
+  const rawType = String(firstPresent(event.event_code, event.event, event.type, event.alert_type, event.alertType, event.status, event.event_status, event.eventStatus) || "").toLowerCase();
   const eventType = normalizeEventType(rawType, event);
+  const eventTime = iso(firstPresent(
+    event.event_time,
+    event.eventTime,
+    event.timestamp,
+    event.occurred_at,
+    event.occurredAt,
+    eventType === "flight_arrived" ? actualIn : null,
+    eventType === "flight_departed" ? actualOut : null,
+    actualIn,
+    actualOut,
+    estimatedIn,
+    estimatedOut
+  ));
+  const departureDate = dateOnly(firstPresent(event.departure_date, event.flight_date, event.date, scheduledOut, estimatedOut, actualOut, eventTime));
   const flightKey = parsed.airlineCode && parsed.flightNumber && departureDate
     ? `${parsed.airlineCode}-${parsed.flightNumber}-${departureDate}-${origin || "UNKNOWN"}-${destination || "UNKNOWN"}`
     : null;
@@ -137,7 +152,14 @@ function generateFlightAwareAlertDedupeKey(alert, rawPayload) {
 
 function targetMatchesAlert(row, alert) {
   if (!row || !alert) return false;
-  if (alert.departureDate && String(row.departure_date || "").slice(0, 10) !== alert.departureDate) return false;
+  const exactProviderFlight = Boolean(
+    alert.fa_flight_id &&
+    row.provider_flight_id &&
+    String(alert.fa_flight_id) === String(row.provider_flight_id)
+  );
+  // An exact fa_flight_id identifies one concrete occurrence. Do not reject
+  // it because a local-midnight database date serialized to the prior UTC day.
+  if (!exactProviderFlight && alert.departureDate && String(row.departure_date || "").slice(0, 10) !== alert.departureDate) return false;
   if (alert.origin && row.origin_airport && row.origin_airport !== alert.origin) return false;
   if (alert.destination && row.destination_airport && row.destination_airport !== alert.destination) return false;
   return true;
@@ -145,6 +167,8 @@ function targetMatchesAlert(row, alert) {
 
 function normalizeEventType(rawType, event) {
   const exactType = String(rawType || "").trim().toLowerCase();
+
+  if (["minutes_out", "impending_arrival"].includes(exactType)) return "flight_arrival_soon";
 
   // AeroAPI alert callbacks use the terse OUT/OFF/ON/IN lifecycle codes in
   // addition to descriptive names. Substring matching cannot recognize ON or
@@ -214,7 +238,9 @@ function impendingDepartureMinutes(event, eventType, eventTime, departureTime) {
 
 function parseIdent(ident) {
   const value = cleanIdent(ident);
-  const match = value.match(/^([A-Z]{2,3})(\d+[A-Z]?)$/);
+  const match =
+    value.match(/^([A-Z0-9]{2})(\d+[A-Z]?)$/) ||
+    value.match(/^([A-Z]{3})(\d+[A-Z]?)$/);
   return {
     airlineCode: match?.[1] || null,
     flightNumber: match?.[2] || null,

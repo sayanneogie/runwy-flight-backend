@@ -61,6 +61,14 @@ const pushTokenSchema = z
   })
   .transform((value) => value.toLowerCase());
 
+const pushEnvironmentSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .refine((value) => value === "sandbox" || value === "production", {
+    message: "Invalid APNs environment",
+  });
+
 const trackPayloadSchema = z.object({
   flightNumber: flightNumberSchema,
   date: dateSchema,
@@ -82,6 +90,7 @@ const searchQuerySchema = z.object({
 const pushTokenBodySchema = z.object({
   token: pushTokenSchema,
   platform: pushPlatformSchema.default("ios"),
+  environment: pushEnvironmentSchema.optional(),
   userId: z.any().optional(),
 });
 
@@ -125,6 +134,7 @@ function validatePushTokenPayload(body) {
     value: {
       token: parsed.value.token,
       platform: parsed.value.platform,
+      environment: parsed.value.environment,
     },
   };
 }

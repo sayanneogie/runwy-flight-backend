@@ -119,11 +119,19 @@ const DATABASE_SSL_REJECT_UNAUTHORIZED =
 const CACHE_TTL_MS = toPositiveNumber(process.env.CACHE_TTL_MS, 5 * 60_000);
 const FLIGHTAWARE_SCHEDULE_MAX_PAGES = Math.min(
   10,
-  Math.max(1, Math.round(toPositiveNumber(process.env.FLIGHTAWARE_SCHEDULE_MAX_PAGES, 5)))
+  Math.max(1, Math.round(toPositiveNumber(process.env.FLIGHTAWARE_SCHEDULE_MAX_PAGES, 1)))
 );
 const FLIGHTAWARE_POSITION_CACHE_TTL_MS = toPositiveNumber(
   process.env.FLIGHTAWARE_POSITION_CACHE_TTL_MS,
   5 * 60_000
+);
+const FLIGHTAWARE_DAILY_FLIGHT_CALL_LIMIT = toPositiveNumber(
+  process.env.FLIGHTAWARE_DAILY_FLIGHT_CALL_LIMIT,
+  500
+);
+const FLIGHTAWARE_DAILY_SEARCH_RESERVE = toPositiveNumber(
+  process.env.FLIGHTAWARE_DAILY_SEARCH_RESERVE,
+  100
 );
 const FLIGHTAWARE_SCHEDULE_WINDOW_MS = 48 * 60 * 60_000;
 // This bucket covers every authenticated /v1 request, including background
@@ -367,6 +375,66 @@ const pool = DATABASE_URL
       ssl: postgresSSLConfig(),
     })
   : null;
+
+function flightAwareDailyBudgetLimitForEndpoint(endpoint) {
+  const isSearchRequest = ["operational", "schedules", "historical"].includes(String(endpoint || ""));
+  return FLIGHTAWARE_DAILY_FLIGHT_CALL_LIMIT +
+    (isSearchRequest ? FLIGHTAWARE_DAILY_SEARCH_RESERVE : 0);
+}
+
+async function flightAwareFlightFetch(url, options, { endpoint, units = 1 } = {}) {
+  const usageEndpoint = `aeroapi:flight:${String(endpoint || "unknown")}`;
+  const estimatedUnits = Math.max(1, Math.round(Number(units) || 1));
+  const isSearchRequest = ["operational", "schedules", "historical"].includes(String(endpoint || ""));
+  const effectiveLimit = flightAwareDailyBudgetLimitForEndpoint(endpoint);
+
+  if (pool) {
+    const usage = await pool.query(
+      `select coalesce(sum(coalesce(cost_estimate, 1)), 0)::int as units
+       from public.api_usage_logs
+       where provider = 'flightaware'
+         and endpoint like 'aeroapi:flight:%'
+         and created_at >= date_trunc('day', now() at time zone 'UTC') at time zone 'UTC'`
+    );
+    const usedUnits = Number(usage.rows[0]?.units || 0);
+    if (usedUnits + estimatedUnits > effectiveLimit) {
+      const error = new Error(
+        `FlightAware daily ${isSearchRequest ? "search reserve" : "Flight-call"} budget exhausted (${usedUnits}/${effectiveLimit})`
+      );
+      error.code = "FLIGHTAWARE_DAILY_BUDGET_EXHAUSTED";
+      error.statusCode = 429;
+      throw error;
+    }
+  }
+
+  const startedAt = Date.now();
+  let response = null;
+  let requestError = null;
+  try {
+    response = await fetch(url, options);
+    return response;
+  } catch (error) {
+    requestError = error;
+    throw error;
+  } finally {
+    if (pool) {
+      pool.query(
+        `insert into public.api_usage_logs
+           (provider, endpoint, status_code, response_time_ms, cache_status, cost_estimate, error)
+         values ('flightaware', $1, $2, $3, 'outbound', $4, $5)`,
+        [
+          usageEndpoint,
+          response?.status || null,
+          Date.now() - startedAt,
+          estimatedUnits,
+          requestError?.message || null,
+        ]
+      ).catch((error) => {
+        console.warn("Failed to record FlightAware outbound usage", error?.message || String(error));
+      });
+    }
+  }
+}
 
 if (pool) {
   pool.on("error", (error) => {
@@ -784,7 +852,33 @@ function reconcileOperationalStatus(normalized) {
     return normalized;
   }
 
-  if (normalized.arrivalTimes?.actual) {
+  const liveAltitudeFeet = Number(normalized.livePosition?.altitudeFeet);
+  const liveGroundSpeedKnots = Number(normalized.livePosition?.groundSpeedKnots);
+  const airGround = String(
+    normalized.livePosition?.airGround || normalized.livePosition?.air_ground || ""
+  ).toUpperCase();
+  const groundTelemetry = normalized.livePosition && (
+    airGround === "G" ||
+    (Number.isFinite(liveAltitudeFeet) && liveAltitudeFeet <= 150 &&
+      Number.isFinite(liveGroundSpeedKnots) && liveGroundSpeedKnots <= 60)
+  );
+  const airborneTelemetry = normalized.livePosition && (
+    airGround === "A" ||
+    (Number.isFinite(liveAltitudeFeet) && liveAltitudeFeet > 300) ||
+    (Number.isFinite(liveAltitudeFeet) && liveAltitudeFeet > 150 &&
+      Number.isFinite(liveGroundSpeedKnots) && liveGroundSpeedKnots > 80)
+  );
+  const livePositionRecordedAtMs = new Date(
+    normalized.livePosition?.recordedAt || normalized.lastUpdated || 0
+  ).getTime();
+  const freshAirborneTelemetry = airborneTelemetry &&
+    Number.isFinite(livePositionRecordedAtMs) &&
+    Math.abs(Date.now() - livePositionRecordedAtMs) <= 5 * 60_000;
+
+  const actualArrivalValue = normalized.arrivalTimes?.actual;
+  const actualArrivalMs = new Date(actualArrivalValue || 0).getTime();
+  const credibleActualArrival = Boolean(actualArrivalValue) && Number.isFinite(actualArrivalMs) && actualArrivalMs <= Date.now() + 2 * 60_000;
+  if (!freshAirborneTelemetry && credibleActualArrival) {
     return {
       ...normalized,
       status: "arrived_at_gate",
@@ -792,23 +886,27 @@ function reconcileOperationalStatus(normalized) {
   }
 
   const landingActual = normalized.landingTimes?.actual;
-  if (landingActual) {
+  const actualLandingMs = new Date(landingActual || 0).getTime();
+  const credibleActualLanding = Boolean(landingActual) && Number.isFinite(actualLandingMs) && actualLandingMs <= Date.now() + 2 * 60_000;
+  if (!freshAirborneTelemetry && credibleActualLanding) {
     return {
       ...normalized,
       status: "landed",
     };
   }
 
-  const airborneSignal =
-    normalized.livePosition ||
-    normalized.takeoffTimes?.actual ||
-    (Number.isFinite(Number(normalized.progressPercent)) && Number(normalized.progressPercent) > 0);
+  if (groundTelemetry) {
+    return {
+      ...normalized,
+      status: ["boarding", "taxiing", "taxi_out", "takeoff_roll", "taxi_in"].includes(normalized.status)
+        ? normalized.status
+        : "taxiing",
+    };
+  }
+
+  const airborneSignal = airborneTelemetry || normalized.takeoffTimes?.actual;
 
   if (airborneSignal) {
-    const onGround = String(normalized.livePosition?.airGround || normalized.livePosition?.air_ground || "").toUpperCase() === "G";
-    if (onGround && normalized.status === "taxi_in") {
-      return normalized;
-    }
     return {
       ...normalized,
       status: "enroute",
@@ -1228,8 +1326,9 @@ function normalizeRecordFromFlightAware(record) {
   };
 
   const inboundFlightNumber = normalizeFlightCode(
-    record?.inbound_ident_iata || record?.inbound_ident || record?.inbound_fa_flight_id
+    record?.inbound_ident_iata || record?.inbound_ident
   );
+  const inboundProviderFlightId = String(record?.inbound_fa_flight_id || "").trim() || null;
   const inboundOrigin = normalizeAirportCode(
     record?.inbound_origin_iata ||
       record?.inbound_origin?.code_iata ||
@@ -1237,15 +1336,23 @@ function normalizeRecordFromFlightAware(record) {
       record?.inbound_origin_airport
   );
 
-  const inboundFlight = inboundFlightNumber || inboundOrigin
+  const inboundFlight = inboundFlightNumber || inboundOrigin || inboundProviderFlightId
     ? {
         flightNumber: inboundFlightNumber || null,
+        providerFlightId: inboundProviderFlightId,
         originAirportIata: inboundOrigin || null,
+        destinationAirportIata: originIata || null,
         estimatedArrival: isoOrNull(
           record?.inbound_estimated_in ||
             record?.inbound_estimated_arrival_time ||
             record?.inbound_scheduled_in
         ),
+        estimatedDeparture: isoOrNull(
+          record?.inbound_estimated_out ||
+            record?.inbound_estimated_off ||
+            record?.inbound_scheduled_out
+        ),
+        actualDeparture: isoOrNull(record?.inbound_actual_out || record?.inbound_actual_off),
         status: record?.inbound_status ? normalizeStatus(record?.inbound_status) : null,
       }
     : null;
@@ -1738,6 +1845,8 @@ function flightAwareMatchableFlightCodes(record, normalizer) {
     record?.ident,
     record?.actual_ident,
     record?.flight_number,
+    ...(Array.isArray(record?.codeshares_iata) ? record.codeshares_iata : []),
+    ...(Array.isArray(record?.codeshares) ? record.codeshares : []),
   ];
 
   return Array.from(
@@ -1747,6 +1856,32 @@ function flightAwareMatchableFlightCodes(record, normalizer) {
         .filter(Boolean)
     )
   );
+}
+
+function flightAwareRecordMatchesRequestedFlight(record, query) {
+  const wantedFlight = normalizeFlightCode(query?.flightNumber);
+  if (!wantedFlight) {
+    return false;
+  }
+
+  return flightAwareMatchableFlightCodes(record, normalizeRecordFromFlightAware)
+    .includes(wantedFlight);
+}
+
+function applyRequestedFlightIdentity(normalized, record, query) {
+  const wantedFlight = normalizeFlightCode(query?.flightNumber);
+  if (
+    !wantedFlight ||
+    !flightAwareRecordMatchesRequestedFlight(record, query)
+  ) {
+    return normalized;
+  }
+
+  return {
+    ...normalized,
+    airlineCode: parseAirlineCode(wantedFlight) || normalized?.airlineCode || null,
+    flightNumber: wantedFlight,
+  };
 }
 
 function normalizedQueryDateString(queryDate) {
@@ -1917,10 +2052,10 @@ function flightAwareScheduleBounds(queryDate, timezoneOffsetMinutes = 0) {
   return flightAwareOperationalBounds(queryDate, timezoneOffsetMinutes);
 }
 
-function flightAwareScheduleQueryItems(query) {
-  // AeroAPI's schedule response is paginated. Asking FlightAware to aggregate a
-  // bounded number of result sets keeps busy routes from silently returning only
-  // their first page while still putting a predictable ceiling on provider cost.
+function flightAwareScheduleQueryItems(query, { includeAirline = true } = {}) {
+  // AeroAPI's schedule response is paginated at up to 15 records per result set.
+  // Runwy searches by a specific airline and flight number, so one page normally
+  // preserves multiple same-day occurrences without reserving unnecessary cost.
   const params = new URLSearchParams({
     max_pages: String(FLIGHTAWARE_SCHEDULE_MAX_PAGES),
   });
@@ -1929,7 +2064,9 @@ function flightAwareScheduleQueryItems(query) {
     const normalizedFlightNumber = normalizeFlightCode(query.flightNumber);
     const parts = normalizedFlightNumber.match(/^([A-Z0-9]{2,3}?)([0-9]{1,4}[A-Z]?)$/);
     if (parts) {
-      params.set("airline", parts[1]);
+      if (includeAirline) {
+        params.set("airline", parts[1]);
+      }
       params.set("flight_number", parts[2]);
     }
   }
@@ -1961,13 +2098,13 @@ async function fetchFlightAwareOperationalFlights(query) {
 
   const url = `${FLIGHTAWARE_BASE_URL}/flights/${encodeURIComponent(ident)}?${params.toString()}`;
 
-  const response = await fetch(url, {
+  const response = await flightAwareFlightFetch(url, {
     method: "GET",
     headers: {
       "x-apikey": FLIGHTAWARE_API_KEY,
       Accept: "application/json",
     },
-  });
+  }, { endpoint: "operational" });
 
   if (response.status === 400 || response.status === 404) {
     return [];
@@ -1987,30 +2124,45 @@ async function fetchFlightAwareScheduleFlights(query) {
     return [];
   }
 
-  const params = flightAwareScheduleQueryItems(query);
-  const queryString = params.toString();
-  const url =
-    `${FLIGHTAWARE_BASE_URL}/schedules/${encodeURIComponent(bounds.start)}` +
-    `/${encodeURIComponent(bounds.end)}${queryString ? `?${queryString}` : ""}`;
+  const fetchSchedulePage = async (includeAirline) => {
+    const params = flightAwareScheduleQueryItems(query, { includeAirline });
+    const queryString = params.toString();
+    const url =
+      `${FLIGHTAWARE_BASE_URL}/schedules/${encodeURIComponent(bounds.start)}` +
+      `/${encodeURIComponent(bounds.end)}${queryString ? `?${queryString}` : ""}`;
 
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      "x-apikey": FLIGHTAWARE_API_KEY,
-      Accept: "application/json",
-    },
-  });
+    const response = await flightAwareFlightFetch(url, {
+      method: "GET",
+      headers: {
+        "x-apikey": FLIGHTAWARE_API_KEY,
+        Accept: "application/json",
+      },
+    }, { endpoint: "schedules", units: FLIGHTAWARE_SCHEDULE_MAX_PAGES });
 
-  if (response.status === 400 || response.status === 404) {
-    return [];
+    if (response.status === 400 || response.status === 404) {
+      return [];
+    }
+
+    if (!response.ok) {
+      throw new Error(`Provider error (${response.status})`);
+    }
+
+    const payload = await response.json();
+    return extractFlightAwareSearchRows(payload).filter((record) =>
+      flightAwareRecordMatchesRequestedFlight(record, query)
+    );
+  };
+
+  const directMatches = await fetchSchedulePage(true);
+  if (directMatches.length > 0) {
+    return directMatches;
   }
 
-  if (!response.ok) {
-    throw new Error(`Provider error (${response.status})`);
-  }
-
-  const payload = await response.json();
-  return extractFlightAwareSearchRows(payload);
+  // Regional services can be indexed only under the operating carrier. A
+  // second, still single-page lookup by flight number exposes codeshare fields
+  // such as AA5091 on JIA5091. Strict matching discards unrelated airlines that
+  // happen to reuse the same numeric flight number.
+  return fetchSchedulePage(false);
 }
 
 async function fetchFlightAwareHistoricalFlights(query) {
@@ -2031,13 +2183,13 @@ async function fetchFlightAwareHistoricalFlights(query) {
     `${FLIGHTAWARE_BASE_URL}/history/flights/${encodeURIComponent(ident)}` +
     `?${params.toString()}`;
 
-  const response = await fetch(url, {
+  const response = await flightAwareFlightFetch(url, {
     method: "GET",
     headers: {
       "x-apikey": FLIGHTAWARE_API_KEY,
       Accept: "application/json",
     },
-  });
+  }, { endpoint: "history" });
 
   if (response.status === 400 || response.status === 404) {
     return [];
@@ -2451,7 +2603,7 @@ async function fetchFlightAwareTrackTrail(providerFlightId, options = {}) {
   }
 
   return withProviderRequestDedup(cacheKey, async () => {
-    const response = await fetch(
+    const response = await flightAwareFlightFetch(
       `${FLIGHTAWARE_BASE_URL}/flights/${encodeURIComponent(normalizedFlightId)}/track`,
       {
         method: "GET",
@@ -2459,7 +2611,8 @@ async function fetchFlightAwareTrackTrail(providerFlightId, options = {}) {
           "x-apikey": FLIGHTAWARE_API_KEY,
           Accept: "application/json",
         },
-      }
+      },
+      { endpoint: "track" }
     );
 
     if ([400, 401, 403, 404].includes(response.status)) {
@@ -2610,13 +2763,13 @@ async function fetchFlightAwareLivePosition(providerFlightId, options = {}) {
     }
 
     for (const path of endpointPaths) {
-      const response = await fetch(`${FLIGHTAWARE_BASE_URL}${path}`, {
+      const response = await flightAwareFlightFetch(`${FLIGHTAWARE_BASE_URL}${path}`, {
         method: "GET",
         headers: {
           "x-apikey": FLIGHTAWARE_API_KEY,
           Accept: "application/json",
         },
-      });
+      }, { endpoint: path.endsWith("/track") ? "track_fallback" : path.endsWith("/map") ? "map_fallback" : "position" });
 
       if ([400, 401, 403, 404].includes(response.status)) {
         continue;
@@ -3095,7 +3248,7 @@ async function fetchFlightAwareFlightByProviderId(providerFlightId, options = {}
   }
 
   return withProviderRequestDedup(cacheKey, async () => {
-    const response = await fetch(
+    const response = await flightAwareFlightFetch(
       `${FLIGHTAWARE_BASE_URL}/flights/${encodeURIComponent(normalizedFlightId)}`,
       {
         method: "GET",
@@ -3103,7 +3256,8 @@ async function fetchFlightAwareFlightByProviderId(providerFlightId, options = {}
           "x-apikey": FLIGHTAWARE_API_KEY,
           Accept: "application/json",
         },
-      }
+      },
+      { endpoint: "flight_instance" }
     );
 
     if (response.status === 404) {
@@ -3147,7 +3301,10 @@ function providerAdapter(preferredProvider = FLIGHT_DATA_PROVIDER) {
 }
 
 function normalizeWithContext(record, records, query, normalizer, previousNormalized = null) {
-  const normalized = reconcileOperationalStatus(normalizer(record));
+  let normalized = reconcileOperationalStatus(normalizer(record));
+  if (normalizer === normalizeRecordFromFlightAware) {
+    normalized = applyRequestedFlightIdentity(normalized, record, query);
+  }
   const recentHistory = deriveRecentHistory(records, record, normalizer);
   const alerts = deriveAlertFlags(previousNormalized, normalized);
 
@@ -3166,6 +3323,9 @@ const sharedFlightRepository = pool
 const sharedFlightService = createSharedFlightService({
   repository: sharedFlightRepository,
   streamingEnabled: SHARED_FLIGHT_STREAMING_ENABLED,
+  liveActivities: {
+    sendFlightState: (flight) => sendLiveActivityStateForFlight(flight),
+  },
   apns: createSharedApnsSender({
     send: async ({ token, payload, environment }) => sendApnsNotification(token, payload, environment),
   }),
@@ -3185,6 +3345,9 @@ const sharedFlightService = createSharedFlightService({
     selectRecord: (records, query, normalizer) => bestMatch(records, query, normalizer),
     ensureFlightAlert: FLIGHT_DATA_PROVIDER === "flightaware"
       ? (flight, options) => ensureFlightAwareAlertForSharedFlight(flight, options)
+      : null,
+    ensureInboundFlightAlert: FLIGHT_DATA_PROVIDER === "flightaware"
+      ? (flight, inboundFlight, options) => ensureFlightAwareAlertForInboundFlight(flight, inboundFlight, options)
       : null,
     alertConfigurationChangedAt: FLIGHTAWARE_ALERT_CONFIGURATION_CHANGED_AT,
   }),
@@ -3279,6 +3442,16 @@ function addDaysToISODate(dateString, dayOffset) {
   return date.toISOString().slice(0, 10);
 }
 
+function isoDateOnly(value) {
+  if (!value) return null;
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(normalized)) return normalized.slice(0, 10);
+  }
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : null;
+}
+
 function flightAwareAlertContextForTrackedRecord(trackedRecord) {
   if (!trackedRecord || String(trackedRecord.provider || "").toLowerCase() !== "flightaware") {
     return null;
@@ -3338,12 +3511,14 @@ function flightAwareAlertContextForSharedFlight(flight) {
   if (!flight || String(flight.provider || "").toLowerCase() !== "flightaware") return null;
   const status = String(flight.status || "").toLowerCase();
   if (["landed", "arrived", "arrived_at_gate", "cancelled", "diverted"].includes(status)) return null;
-  const startDate = String(
-    flight.departure_date ||
+  // PostgreSQL timestamp columns are Date objects at runtime. Prefer the
+  // provider timestamp and normalize it without String(Date), which produces
+  // values such as "Fri Aug 28" and silently prevents alert registration.
+  const startDate = isoDateOnly(
     flight.scheduled_departure_at ||
     flight.estimated_departure_at ||
-    ""
-  ).slice(0, 10) || null;
+    flight.departure_date
+  );
   const endDate = addDaysToISODate(startDate, 2);
   const flightNumber = normalizeFlightCode(`${flight.airline_code || ""}${flight.flight_number || ""}`);
   if (!flightNumber || !startDate || !endDate) return null;
@@ -3379,6 +3554,45 @@ async function ensureFlightAwareAlertForSharedFlight(flight) {
     createdAt: new Date().toISOString(),
     expiresAt: `${context.endDate}T23:59:59.999Z`,
     refreshPriority: "minimal",
+  };
+}
+
+async function ensureFlightAwareAlertForInboundFlight(_flight, inboundFlight) {
+  const targetUrl = flightAwareWebhookTargetURL(null);
+  if (!targetUrl) {
+    throw new Error("FlightAware webhook URL is unavailable; configure WEBHOOK_SHARED_SECRET and WEBHOOK_PUBLIC_BASE_URL");
+  }
+  const providerFlightId = String(inboundFlight?.providerFlightId || "").trim();
+  if (!providerFlightId) return null;
+  const context = {
+    providerFlightId,
+    flightNumber: inboundFlight.flightNumber || providerFlightId.split("-")[0],
+    departureIata: normalizeAirportCode(inboundFlight.originAirportIata) || null,
+    arrivalIata: normalizeAirportCode(inboundFlight.destinationAirportIata) || null,
+    windowStrategy: "open",
+    impendingDepartureMinutes: [],
+    impendingArrivalMinutes: [],
+    events: {
+      arrival: false,
+      cancelled: true,
+      departure: false,
+      diverted: true,
+      filed: false,
+      out: false,
+      off: true,
+      on: false,
+      in: false,
+      hold_start: false,
+      hold_end: false,
+    },
+  };
+  const created = inboundFlight.providerAlertId
+    ? await updateFlightAwareAlert({ alertId: inboundFlight.providerAlertId, targetUrl, context })
+    : await createFlightAwareAlert({ targetUrl, context });
+  return {
+    providerAlertId: created.alertId,
+    status: "active",
+    createdAt: new Date().toISOString(),
   };
 }
 
@@ -3503,14 +3717,22 @@ function flightAwareAlertIDFromPayload(payload) {
   return null;
 }
 
+function flightAwareAlertIDFromLocation(location) {
+  const value = String(location || "").trim();
+  if (!value) return null;
+
+  const match = value.match(/(?:^|\/)alerts\/([^/?#]+)(?:[?#].*)?$/i);
+  return match ? decodeURIComponent(match[1]).trim() || null : null;
+}
+
 function buildFlightAwareAlertPayload({ targetUrl, context }) {
   const payload = {
     // A fa_flight_id identifies one concrete flight instance and prevents an
     // open alert from following the same recurring flight number tomorrow.
     ident: context.providerFlightId || context.flightNumber,
-    impending_departure: [...FLIGHTAWARE_AUTO_ALERT_IMPENDING_DEPARTURE_MINUTES],
-    impending_arrival: [...FLIGHTAWARE_AUTO_ALERT_IMPENDING_ARRIVAL_MINUTES],
-    events: FLIGHTAWARE_AUTO_ALERT_EVENTS,
+    impending_departure: [...(context.impendingDepartureMinutes ?? FLIGHTAWARE_AUTO_ALERT_IMPENDING_DEPARTURE_MINUTES)],
+    impending_arrival: [...(context.impendingArrivalMinutes ?? FLIGHTAWARE_AUTO_ALERT_IMPENDING_ARRIVAL_MINUTES)],
+    events: context.events || FLIGHTAWARE_AUTO_ALERT_EVENTS,
     target_url: targetUrl,
   };
 
@@ -3625,7 +3847,12 @@ async function createFlightAwareAlert({ targetUrl, context }) {
     responsePayload = null;
   }
 
-  const responseAlertId = flightAwareAlertIDFromPayload(responsePayload);
+  // AeroAPI returns 201 with an empty body and exposes the new alert ID in
+  // `Location: /alerts/{id}`. Capture it before falling back to the eventually
+  // consistent alert list; otherwise a successful alert is recorded as failed.
+  const responseAlertId =
+    flightAwareAlertIDFromPayload(responsePayload) ||
+    flightAwareAlertIDFromLocation(response.headers.get("location"));
   const alertId =
     responseAlertId ||
     await verifyFlightAwareAlert({ targetUrl, context });
@@ -3756,21 +3983,38 @@ async function ensureFlightAwareAlertForTrackedSession(req, trackedRecord) {
 }
 
 function apnsPrivateKeyMaterial() {
-  if (APNS_PRIVATE_KEY_BASE64) {
-    return Buffer.from(APNS_PRIVATE_KEY_BASE64, "base64").toString("utf8");
-  }
-
   if (APNS_PRIVATE_KEY) {
     return APNS_PRIVATE_KEY.replace(/\\n/g, "\n");
+  }
+
+  if (APNS_PRIVATE_KEY_BASE64) {
+    return Buffer.from(APNS_PRIVATE_KEY_BASE64, "base64").toString("utf8");
   }
 
   return "";
 }
 
 function apnsPrivateKeySource() {
-  if (APNS_PRIVATE_KEY_BASE64) return "base64";
   if (APNS_PRIVATE_KEY) return "inline";
+  if (APNS_PRIVATE_KEY_BASE64) return "base64";
   return null;
+}
+
+function apnsPrivateKeysConflict() {
+  if (!APNS_PRIVATE_KEY || !APNS_PRIVATE_KEY_BASE64) return false;
+  try {
+    const inlineKey = crypto.createPublicKey(crypto.createPrivateKey(APNS_PRIVATE_KEY.replace(/\\n/g, "\n")))
+      .export({ type: "spki", format: "der" });
+    const base64Key = crypto.createPublicKey(
+      crypto.createPrivateKey(Buffer.from(APNS_PRIVATE_KEY_BASE64, "base64").toString("utf8"))
+    ).export({ type: "spki", format: "der" });
+    return !crypto.timingSafeEqual(
+      crypto.createHash("sha256").update(inlineKey).digest(),
+      crypto.createHash("sha256").update(base64Key).digest()
+    );
+  } catch (_error) {
+    return true;
+  }
 }
 
 function apnsConfigStatus() {
@@ -3785,6 +4029,9 @@ function apnsConfigStatus() {
     missingEnv.push("APNS_PRIVATE_KEY or APNS_PRIVATE_KEY_BASE64");
   } else if (!privateKeyMaterial) {
     missingEnv.push(`${privateKeySource} private key material`);
+  }
+  if (apnsPrivateKeysConflict()) {
+    missingEnv.push("APNS_PRIVATE_KEY conflicts with APNS_PRIVATE_KEY_BASE64");
   }
 
   return {
@@ -3814,6 +4061,16 @@ function base64UrlEncode(input) {
     .replace(/\//g, "_");
 }
 
+function signApnsJwtInput(signingInput, privateKey) {
+  // ES256 JWT signatures are the fixed-width 64-byte r || s representation.
+  // Node defaults to ASN.1/DER for ECDSA, which APNs rejects as an invalid
+  // provider token even though the underlying .p8 key is valid.
+  return crypto.sign("sha256", Buffer.from(signingInput), {
+    key: privateKey,
+    dsaEncoding: "ieee-p1363",
+  });
+}
+
 function apnsAuthToken() {
   const now = Math.floor(Date.now() / 1000);
   if (apnsTokenCache.token && apnsTokenCache.expiresAt > now + 60) {
@@ -3835,7 +4092,7 @@ function apnsAuthToken() {
   );
 
   const signingInput = `${header}.${payload}`;
-  const signature = crypto.sign("sha256", Buffer.from(signingInput), apnsPrivateKeyMaterial());
+  const signature = signApnsJwtInput(signingInput, apnsPrivateKeyMaterial());
   const jwt = `${signingInput}.${base64UrlEncode(signature)}`;
 
   apnsTokenCache.token = jwt;
@@ -4336,34 +4593,15 @@ function notificationEventsFor(normalized, flightId, context = {}) {
     .filter(Boolean);
 }
 
-const BAGGAGE_NOTIFICATION_WINDOW_MS = 60 * 60_000;
-
 function baggageBeltForNotification(normalized) {
   return `${normalized?.baggageClaim || normalized?.baggageBelt || ""}`.trim();
 }
 
-function shouldOfferReliableBaggageNotification(normalized, nowMs = Date.now()) {
+function shouldOfferReliableBaggageNotification(normalized) {
   if (!baggageBeltForNotification(normalized)) return false;
 
   const status = String(normalized?.status || "").trim().toLowerCase();
-  if (["taxi_in", "landed", "arrived", "arrived_at_gate"].includes(status)) {
-    return true;
-  }
-
-  const arrivalCandidates = [
-    normalized?.arrivalTimes?.actual,
-    normalized?.landingTimes?.actual,
-    normalized?.arrivalTimes?.estimated,
-    normalized?.landingTimes?.estimated,
-    normalized?.arrivalTimes?.scheduled,
-    normalized?.landingTimes?.scheduled,
-  ];
-
-  const arrivalMs = arrivalCandidates
-    .map((value) => value ? new Date(value).getTime() : NaN)
-    .find(Number.isFinite);
-
-  return Number.isFinite(arrivalMs) && arrivalMs - nowMs <= BAGGAGE_NOTIFICATION_WINDOW_MS;
+  return ["taxi_in", "landed", "arrived", "arrived_at_gate"].includes(status);
 }
 
 function ownerNotificationPreferenceConditionForEventType(eventType) {
@@ -4377,6 +4615,9 @@ function ownerNotificationPreferenceConditionForEventType(eventType) {
     case "flight_takeoff_roll":
     case "flight_taxiing":
     case "flight_inbound_arrived":
+    case "flight_inbound_departed":
+    case "flight_inbound_cancelled":
+    case "flight_inbound_diverted":
       return "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true";
     case "flight_baggage_claim":
       return "coalesce((uf.alert_settings_json ->> 'baggageClaim')::boolean, true) = true";
@@ -4395,6 +4636,9 @@ function circleNotificationPreferenceConditionForEventType(eventType) {
     case "flight_takeoff_roll":
     case "flight_taxiing":
     case "flight_inbound_arrived":
+    case "flight_inbound_departed":
+    case "flight_inbound_cancelled":
+    case "flight_inbound_diverted":
       return "fp.notify_departure = true";
     case "flight_arrived":
       return "fp.notify_arrival = true";
@@ -4609,7 +4853,7 @@ async function deliverTestPushJob(job) {
 
 sharedFlightService.queue.process("testPushJob", deliverTestPushJob);
 
-function sendApnsHttp2Request(apnsToken, payload, environment = null) {
+function sendApnsHttp2Request(apnsToken, payload, environment = null, options = {}) {
   return new Promise((resolve, reject) => {
     const client = http2.connect(`https://${apnsHost(environment)}`);
     let settled = false;
@@ -4632,9 +4876,9 @@ function sendApnsHttp2Request(apnsToken, payload, environment = null) {
       ":method": "POST",
       ":path": `/3/device/${apnsToken}`,
       authorization: `bearer ${apnsAuthToken()}`,
-      "apns-topic": APNS_BUNDLE_ID,
-      "apns-push-type": "alert",
-      "apns-priority": "10",
+      "apns-topic": options.topic || APNS_BUNDLE_ID,
+      "apns-push-type": options.pushType || "alert",
+      "apns-priority": String(options.priority || 10),
       "content-type": "application/json",
     });
 
@@ -4670,6 +4914,127 @@ function sendApnsHttp2Request(apnsToken, payload, environment = null) {
 
     request.end(JSON.stringify(payload));
   });
+}
+
+function liveActivityDate(value) {
+  const unixSeconds = new Date(value || 0).getTime() / 1000;
+  // ActivityKit uses Codable's default Date representation for content-state.
+  return Number.isFinite(unixSeconds) ? unixSeconds - 978307200 : null;
+}
+
+function liveActivityPhase(flight) {
+  const canonical = deriveFlightLifecyclePhase(flight).phase;
+  const mapping = {
+    scheduled: "scheduled",
+    delayed: "delayed",
+    boarding: "boarding",
+    taxiing: "taxiOut",
+    taxi_out: "taxiOut",
+    takeoff_roll: "taxiOut",
+    departed: "departed",
+    airborne: "cruise",
+    enroute: "cruise",
+    approaching: "descent",
+    landed: "landed",
+    taxi_in: "taxiIn",
+    arrived: "arrivedAtGate",
+    arrived_at_gate: "arrivedAtGate",
+    cancelled: "cancelled",
+    diverted: "diverted",
+  };
+  return mapping[String(canonical || flight.status || "scheduled").toLowerCase()] || "scheduled";
+}
+
+function liveActivityContentState(flight) {
+  const normalized = flight.normalized_data || {};
+  const phase = liveActivityPhase(flight);
+  const departureScheduled = flight.scheduled_departure_at;
+  const departureEstimated = flight.actual_departure_at || flight.estimated_departure_at || departureScheduled;
+  const arrivalScheduled = flight.scheduled_arrival_at;
+  const arrivalEstimated = flight.actual_arrival_at || flight.estimated_arrival_at || arrivalScheduled;
+  const delayMinutes = (actualOrEstimate, scheduled) => {
+    const difference = new Date(actualOrEstimate || 0).getTime() - new Date(scheduled || 0).getTime();
+    return Number.isFinite(difference) ? Math.round(difference / 60_000) : null;
+  };
+  const departureDelay = delayMinutes(departureEstimated, departureScheduled);
+  const arrivalDelay = delayMinutes(arrivalEstimated, arrivalScheduled);
+  const semantic = (minutes) => Number(minutes) > 0 ? "negative" : Number(minutes) < 0 ? "positive" : "neutral";
+  const progressByPhase = {
+    scheduled: 0.02, delayed: 0.02, boarding: 0.12, taxiOut: 0.20,
+    departed: 0.20, climb: 0.30, cruise: 0.50, descent: 0.75,
+    landed: 0.80, taxiIn: 0.90, arrivedAtGate: 1, completed: 1,
+    cancelled: 0.02, diverted: 0.50,
+  };
+  const delayText = (minutes) => Number(minutes) > 0 ? `${minutes}m late` : Number(minutes) < 0 ? `${Math.abs(minutes)}m early` : "On time";
+  const baggage = normalized.baggageBelt || flight.baggage_belt || null;
+
+  return {
+    departureScheduled: liveActivityDate(departureScheduled),
+    departureEstimated: liveActivityDate(departureEstimated),
+    arrivalScheduled: liveActivityDate(arrivalScheduled),
+    arrivalEstimated: liveActivityDate(arrivalEstimated),
+    gateArrivalEstimated: ["arrivedAtGate", "cancelled", "diverted"].includes(phase) ? null : liveActivityDate(arrivalEstimated),
+    departureTerminal: normalized.departureTerminal || flight.terminal || null,
+    departureGate: normalized.departureGate || flight.gate || null,
+    arrivalTerminal: normalized.arrivalTerminal || null,
+    arrivalGate: normalized.arrivalGate || null,
+    baggageClaim: baggage,
+    departureDelayMinutes: departureDelay,
+    arrivalDelayMinutes: arrivalDelay,
+    lastUpdated: liveActivityDate(flight.last_fetched_at || flight.updated_at || new Date()),
+    progress: progressByPhase[phase] ?? 0.02,
+    phase,
+    leftStatusText: delayText(departureDelay),
+    rightStatusText: delayText(arrivalDelay),
+    bannerTitle: phase === "arrivedAtGate" ? "Arrived" : phase === "landed" ? "Landed" : null,
+    bannerSubtitle: baggage ? `Baggage belt ${baggage}` : null,
+    bannerStyle: ["cancelled", "diverted"].includes(phase) ? "critical" : phase === "arrivedAtGate" ? "success" : null,
+    showBottomBanner: ["arrivedAtGate", "cancelled", "diverted"].includes(phase),
+    statusAccentLeft: semantic(departureDelay),
+    statusAccentRight: semantic(arrivalDelay),
+    baggageAvailable: Boolean(baggage),
+    boardingCodeAvailable: false,
+  };
+}
+
+async function sendLiveActivityStateForFlight(flight) {
+  if (!usesDatabase() || !flight?.id || !isApnsConfigured()) return { sent: 0, skipped: true };
+  const tokenResult = await pool.query(
+    `select id, push_token, environment
+     from public.live_activity_tokens
+     where flight_instance_id = $1::uuid and is_active = true`,
+    [flight.id]
+  );
+  const phase = liveActivityPhase(flight);
+  const shouldEnd = ["arrivedAtGate", "cancelled", "diverted"].includes(phase);
+  const payload = {
+    aps: {
+      timestamp: Math.floor(Date.now() / 1000),
+      event: shouldEnd ? "end" : "update",
+      "content-state": liveActivityContentState(flight),
+      ...(shouldEnd ? { "dismissal-date": Math.floor(Date.now() / 1000) + 45 * 60 } : {}),
+    },
+  };
+  let sent = 0;
+  for (const token of tokenResult.rows) {
+    const response = await sendApnsHttp2Request(token.push_token, payload, token.environment, {
+      topic: `${APNS_BUNDLE_ID}.push-type.liveactivity`,
+      pushType: "liveactivity",
+      priority: 10,
+    });
+    const ok = response.status === 200;
+    if (ok) sent += 1;
+    await pool.query(
+      `update public.live_activity_tokens
+       set is_active = case when $2 then is_active else false end,
+           last_sent_at = case when $2 then now() else last_sent_at end,
+           last_error = $3,
+           updated_at = now()
+       where id = $1`,
+      [token.id, ok, ok ? null : (response.reason || `HTTP_${response.status}`)]
+    );
+  }
+  return { sent, attempted: tokenResult.rowCount, phase };
 }
 
 function notificationDedupeKey(flightId, event) {
@@ -4977,23 +5342,24 @@ async function findReusableTrackedRecordForUser({
   return candidates.find((candidate) => String(candidate?.ownerUserId || "").trim() === normalizedUserId) || null;
 }
 
+function trackedProviderRefreshOptions(options = {}) {
+  return { forceRefresh: options.forceProviderRefresh === true };
+}
+
 async function refreshTrackedFlightRecord(trackedRecord, options = {}) {
   if (!PROVIDER_CALLS_ENABLED) {
     return trackedRecord;
   }
 
-  const { includeLivePosition = false } = options;
+  const { includeLivePosition = false, forceProviderRefresh = false } = options;
+  const providerRefreshOptions = trackedProviderRefreshOptions({ forceProviderRefresh });
   const provider = providerAdapter(trackedRecord.provider || FLIGHT_DATA_PROVIDER);
   const exactProviderRecord = trackedRecord.providerFlightId && provider.fetchFlightByProviderId
-    ? await provider.fetchFlightByProviderId(trackedRecord.providerFlightId, {
-        forceRefresh: includeLivePosition,
-      })
+    ? await provider.fetchFlightByProviderId(trackedRecord.providerFlightId, providerRefreshOptions)
     : null;
   const records = exactProviderRecord
     ? [exactProviderRecord]
-    : await provider.fetchFlights(trackedRecord.query, {
-        forceRefresh: includeLivePosition,
-      });
+    : await provider.fetchFlights(trackedRecord.query, providerRefreshOptions);
   const selected = exactProviderRecord || bestMatch(records, trackedRecord.query, provider.normalizeRecord);
 
   if (!selected) {
@@ -5027,7 +5393,7 @@ async function refreshTrackedFlightRecord(trackedRecord, options = {}) {
     )
   ) {
     normalized = await enrichNormalizedWithLivePosition(normalized, provider.name, selected, {
-      forceRefresh: includeLivePosition,
+      ...providerRefreshOptions,
     });
   }
   normalized.lastUpdated = normalized.livePosition?.recordedAt || normalized.lastUpdated || new Date().toISOString();
@@ -5057,16 +5423,19 @@ async function refreshTrackedFlightRecord(trackedRecord, options = {}) {
   }
 
   if (
-    normalized.alerts?.cancelledNow ||
-    normalized.alerts?.departedNow ||
-    normalized.alerts?.arrivedNow ||
-    normalized.alerts?.taxiingNow ||
-    normalized.alerts?.takeoffNow ||
-    normalized.alerts?.delayedNow ||
-    normalized.alerts?.gateChangedNow ||
-    normalized.alerts?.baggageBeltAssignedNow ||
-    normalized.alerts?.inboundArrivedNow ||
-    shouldOfferReliableBaggageNotification(normalized)
+    trackedRecord.metadata?.providerRefreshOwner !== "shared_flight_instance" &&
+    (
+      normalized.alerts?.cancelledNow ||
+      normalized.alerts?.departedNow ||
+      normalized.alerts?.arrivedNow ||
+      normalized.alerts?.taxiingNow ||
+      normalized.alerts?.takeoffNow ||
+      normalized.alerts?.delayedNow ||
+      normalized.alerts?.gateChangedNow ||
+      normalized.alerts?.baggageBeltAssignedNow ||
+      normalized.alerts?.inboundArrivedNow ||
+      shouldOfferReliableBaggageNotification(normalized)
+    )
   ) {
     await dispatchFlightStatusNotifications(trackedRecord.flightId, normalized);
   }
@@ -5495,15 +5864,18 @@ async function applyFirehoseMessageToTrackedRecord(trackedRecord, message) {
   });
 
   if (
-    normalized.alerts?.cancelledNow ||
-    normalized.alerts?.departedNow ||
-    normalized.alerts?.arrivedNow ||
-    normalized.alerts?.taxiingNow ||
-    normalized.alerts?.takeoffNow ||
-    normalized.alerts?.delayedNow ||
-    normalized.alerts?.gateChangedNow ||
-    normalized.alerts?.baggageBeltAssignedNow ||
-    shouldOfferReliableBaggageNotification(normalized)
+    trackedRecord.metadata?.providerRefreshOwner !== "shared_flight_instance" &&
+    (
+      normalized.alerts?.cancelledNow ||
+      normalized.alerts?.departedNow ||
+      normalized.alerts?.arrivedNow ||
+      normalized.alerts?.taxiingNow ||
+      normalized.alerts?.takeoffNow ||
+      normalized.alerts?.delayedNow ||
+      normalized.alerts?.gateChangedNow ||
+      normalized.alerts?.baggageBeltAssignedNow ||
+      shouldOfferReliableBaggageNotification(normalized)
+    )
   ) {
     await dispatchFlightStatusNotifications(trackedRecord.flightId, normalized);
   }
@@ -5973,13 +6345,73 @@ app.post("/v1/devices/push-token", async (req, res) => {
       await sharedFlightService.upsertDeviceToken(userId, {
         deviceToken: validated.value.token,
         platform: validated.value.platform,
-        environment: APNS_USE_SANDBOX ? "sandbox" : "production",
+        environment: validated.value.environment || (APNS_USE_SANDBOX ? "sandbox" : "production"),
       });
     }
 
     return res.json({ ok: true });
   } catch (_error) {
     return res.status(500).json({ error: "Unable to store push token" });
+  }
+});
+
+app.post("/v1/live-activities/token", async (req, res) => {
+  const userId = String(req.auth?.userId || "").trim();
+  const token = String(req.body?.token || "").trim().toLowerCase();
+  const activityId = String(req.body?.activityId || "").trim().slice(0, 256);
+  const localFlightId = String(req.body?.localFlightId || "").trim().slice(0, 128) || null;
+  const trackingId = String(req.body?.trackingId || "").trim();
+  const environment = String(req.body?.environment || "").trim().toLowerCase();
+
+  if (!userId) return res.status(401).json({ error: "Sign in is required" });
+  if (!usesDatabase()) return res.status(503).json({ error: "Live Activity persistence is not configured" });
+  if (!/^[a-f0-9]{32,512}$/.test(token) || !activityId || !isUUID(trackingId)) {
+    return res.status(400).json({ error: "Invalid Live Activity token payload" });
+  }
+  if (!["sandbox", "production"].includes(environment)) {
+    return res.status(400).json({ error: "Invalid APNs environment" });
+  }
+
+  try {
+    const link = await pool.query(
+      `select uf.flight_instance_id
+       from public.user_flights uf
+       where uf.user_id = $1::uuid
+         and uf.tracking_session_id = $2::uuid
+         and uf.flight_instance_id is not null
+         and uf.deleted_at is null
+         and coalesce(uf.lifecycle_state, '') <> 'deleted'
+       order by uf.updated_at desc
+       limit 1`,
+      [userId, trackingId]
+    );
+    const flightInstanceId = link.rows[0]?.flight_instance_id;
+    if (!flightInstanceId) {
+      return res.status(404).json({ error: "No active shared flight is linked to this activity" });
+    }
+
+    await pool.query(
+      `insert into public.live_activity_tokens (
+         user_id, flight_instance_id, tracking_session_id, activity_id,
+         local_flight_id, push_token, environment, is_active
+       ) values ($1,$2,$3,$4,$5,$6,$7,true)
+       on conflict (user_id, activity_id) do update set
+         flight_instance_id = excluded.flight_instance_id,
+         tracking_session_id = excluded.tracking_session_id,
+         local_flight_id = excluded.local_flight_id,
+         push_token = excluded.push_token,
+         environment = excluded.environment,
+         is_active = true,
+         last_error = null,
+         updated_at = now()`,
+      [userId, flightInstanceId, trackingId, activityId, localFlightId, token, environment]
+    );
+    const flight = await sharedFlightRepository.findFlightById(flightInstanceId);
+    if (flight) await sendLiveActivityStateForFlight(flight);
+    return res.json({ ok: true, flightInstanceId });
+  } catch (error) {
+    console.error("Unable to store Live Activity token", error?.message || String(error));
+    return res.status(500).json({ error: "Unable to store Live Activity token" });
   }
 });
 
@@ -6560,7 +6992,14 @@ app.get("/v1/search", async (req, res) => {
       timezoneOffsetMinutes,
       error: error?.message || String(error),
     });
-    return res.status(502).json({ error: "Failed to fetch provider data" });
+    const statusCode = error?.code === "FLIGHTAWARE_DAILY_BUDGET_EXHAUSTED"
+      ? 429
+      : error?.statusCode || 502;
+    return res.status(statusCode).json({
+      error: statusCode === 429
+        ? "Live search capacity reached. Please retry shortly."
+        : "Failed to fetch provider data",
+    });
   }
 });
 
@@ -6581,7 +7020,10 @@ app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req,
   }
 
   try {
-    const forceDetailRefresh = String(req.query?.refresh || "").toLowerCase() === "detail";
+    // Old clients used `refresh=detail` every two minutes. Honoring that as a
+    // cache bypass multiplied one open map into thousands of paid AeroAPI calls.
+    // Only an internal explicit `refresh=force` may bypass the shared cache.
+    const forceDetailRefresh = String(req.query?.refresh || "").toLowerCase() === "force";
     const trackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId, {
       forceRefresh: forceDetailRefresh,
     });
@@ -6703,6 +7145,9 @@ app.post("/v1/webhooks/flightaware/alerts", handleUnifiedFlightAwareWebhook);
 app.post("/v1/webhooks/flightaware", handleUnifiedFlightAwareWebhook);
 
 async function startApiServer() {
+  if (apnsPrivateKeysConflict()) {
+    throw new Error("Conflicting APNs private keys are configured; remove or synchronize the duplicate credential");
+  }
   if (usesDatabase()) {
     await ensureDatabaseSchema();
   }
@@ -6721,7 +7166,7 @@ async function startApiServer() {
     lifecycleRecoveryRunning = true;
     try {
       const recovered = await sharedFlightService.recoverLifecycleCatchups(reason);
-      console.log(`Lifecycle recovery checked=${recovered.checked} scheduled=${recovered.scheduled}`);
+      console.log(`Lifecycle recovery checked=${recovered.checked} scheduled=${recovered.scheduled} fanoutRecovered=${recovered.recoveredFanout || 0}`);
     } catch (error) {
       console.warn(`Lifecycle recovery failed: ${error?.message || String(error)}`);
     } finally {
@@ -6761,17 +7206,25 @@ module.exports = {
     extractFlightAwareSearchRows,
     fetchFlightAwareFlights,
     fetchFlightAwareOperationalFlights,
+    fetchFlightAwareScheduleFlights,
     flightAwareAlertCreationDisposition,
     flightAwareAlertIDFromPayload,
+    flightAwareAlertIDFromLocation,
+    flightAwareAlertContextForSharedFlight,
     flightAwareWebhookTargetURL,
     flightAwareOccurrenceBounds,
     flightAwareOperationalBounds,
     flightAwareHistoryBounds,
+    flightAwareDailyBudgetLimitForEndpoint,
     flightAwareScheduleQueryItems,
+    flightAwareRecordMatchesRequestedFlight,
     fetchFlightAwareSearchSources,
     healthBuildInfo,
     isFutureFlightAwareQueryDate,
+    liveActivityContentState,
+    liveActivityPhase,
     normalizeRecordFromFlightAware,
+    normalizeWithContext,
     normalizeRecordFromAviationstack,
     normalizedTimezoneOffsetMinutes,
     notificationDedupeKey,
@@ -6780,11 +7233,13 @@ module.exports = {
     ordinalNumber,
     shouldRefreshTrackedRecordFromWebhook,
     testPushNotificationPayload,
+    trackedProviderRefreshOptions,
     updateFlightAwareAlert,
     webhookStatusFromEvent,
     ownerNotificationPreferenceConditionForEventType,
     reconcileOperationalStatus,
     scoreCandidate,
+    signApnsJwtInput,
     sharedFlightService,
     shouldPreferFlightAwareSchedules,
   },

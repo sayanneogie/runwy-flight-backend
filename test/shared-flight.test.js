@@ -14,6 +14,7 @@ const {
   deriveFlightLifecyclePhase,
   displayStatusForPhase,
   getFlightFreshnessTTL,
+  mapNormalizedToDb,
 } = require("../src/shared-flight/state");
 const { buildWeatherInsight } = require("../src/shared-flight/weather");
 
@@ -57,6 +58,7 @@ function makeService(providerFlight = normalizedFlight(), options = {}) {
       return typeof providerFlight === "function" ? providerFlight(calls) : providerFlight;
     },
     ensureFlightAlert: options.ensureFlightAlert,
+    ensureInboundFlightAlert: options.ensureInboundFlightAlert,
     ensureFlightStream: options.ensureFlightStream,
   };
   const service = createSharedFlightService({
@@ -117,6 +119,24 @@ test("production provider adapter exposes shared alert registration callbacks", 
   const result = await adapter.ensureFlightAlert({ id: "shared-flight" });
   assert.equal(calls, 1);
   assert.equal(result.providerAlertId, "alert-shared-flight");
+});
+
+test("provider adapter exposes inbound alert registration callbacks", async () => {
+  const adapter = createProviderAdapter({
+    providerName: "flightaware",
+    fetchFlights: async () => [],
+    normalizeRecord: (record) => record,
+    ensureInboundFlightAlert: async (_flight, inbound) => ({
+      providerAlertId: `inbound-${inbound.providerFlightId}`,
+      status: "active",
+    }),
+  });
+
+  const result = await adapter.ensureInboundFlightAlert(
+    { id: "parent-flight" },
+    { providerFlightId: "AI202-instance" }
+  );
+  assert.equal(result.providerAlertId, "inbound-AI202-instance");
 });
 
 test("provider adapter forwards forced refresh options for an exact flight instance", async () => {
@@ -282,7 +302,7 @@ test("delayed flight creates an event, updates shared row, and queues fanout", a
 test("cancelled flight creates critical event and no duplicate notification deliveries", async () => {
   const sent = [];
   const { service, repository } = makeService(() => normalizedFlight({ status: "cancelled" }), {
-    apns: { sendFlightEvent: async ({ token }) => sent.push(token.device_token) },
+    apns: { sendFlightEvent: async ({ token }) => { sent.push(token.device_token); return { ok: true }; } },
   });
   const row = await repository.upsertFlightFromNormalized(normalizedFlight(), { airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN", flightKey: "SQ-509-2026-05-27-BLR-SIN" }, "2026-05-01T00:00:00.000Z");
   for (const userId of ["u1", "u2"]) {
@@ -325,7 +345,7 @@ test("gate change only emits on real change and respects alert preferences", asy
 test("newly saved user flights receive low severity travel notifications by default", async () => {
   const sent = [];
   const { service, repository } = makeService(normalizedFlight(), {
-    apns: { sendFlightEvent: async ({ token }) => sent.push(token.device_token) },
+    apns: { sendFlightEvent: async ({ token }) => { sent.push(token.device_token); return { ok: true }; } },
   });
 
   const saved = await service.saveUserFlight("u1", {
@@ -397,10 +417,36 @@ test("taxi, takeoff, and baggage belt shared events are meaningful and notify", 
   );
 });
 
+test("positive takeoff evidence emits AIRBORNE when stale status was already enroute", () => {
+  const oldState = {
+    status: "enroute",
+    altitude: 0,
+    ground_speed: 1,
+    normalized_data: {
+      takeoffTimes: { actual: null },
+      livePosition: { altitudeFeet: 0, groundSpeedKnots: 1 },
+    },
+  };
+  const newState = {
+    ...oldState,
+    altitude: 12_000,
+    ground_speed: 245,
+    normalized_data: {
+      takeoffTimes: { actual: "2026-08-29T17:52:00.000Z" },
+      livePosition: { altitudeFeet: 12_000, groundSpeedKnots: 245 },
+    },
+  };
+
+  const events = compareFlightState(oldState, newState);
+  const airborne = events.filter((event) => event.event_type === "AIRBORNE");
+  assert.equal(airborne.length, 1);
+  assert.equal(airborne[0].notification_required, true);
+});
+
 test("shared fanout mirrors takeoff landing and baggage events into app notifications", async () => {
   const sent = [];
   const { service, repository } = makeService(normalizedFlight(), {
-    apns: { sendFlightEvent: async ({ token }) => sent.push(token.device_token) },
+    apns: { sendFlightEvent: async ({ token }) => { sent.push(token.device_token); return { ok: true }; } },
   });
   const row = await repository.upsertFlightFromNormalized(normalizedFlight(), {
     airline: "SQ",
@@ -619,7 +665,7 @@ test("final states receive long freshness TTLs and are not refreshed aggressivel
   assert.equal(ttl, 12 * 60 * 60);
 });
 
-test("shared lifecycle phase infers airborne near arrival when provider status is stale", () => {
+test("shared lifecycle phase never infers airborne from the schedule", () => {
   const now = Date.parse("2026-05-10T11:32:00.000Z");
   const lifecycle = deriveFlightLifecyclePhase(
     {
@@ -632,9 +678,9 @@ test("shared lifecycle phase infers airborne near arrival when provider status i
     now
   );
 
-  assert.equal(lifecycle.phase, "approaching");
-  assert.equal(lifecycle.confidence, "time_inferred");
-  assert.equal(displayStatusForPhase(lifecycle.phase, "scheduled"), "enroute");
+  assert.equal(lifecycle.phase, "scheduled");
+  assert.equal(lifecycle.confidence, "schedule_only");
+  assert.equal(displayStatusForPhase(lifecycle.phase, "scheduled"), "scheduled");
 });
 
 test("gate-out timestamp does not masquerade as takeoff while provider says taxiing", () => {
@@ -665,6 +711,74 @@ test("actual OFF timestamp confirms airborne lifecycle", () => {
 
   assert.equal(lifecycle.phase, "airborne");
   assert.equal(lifecycle.reason, "actual_takeoff_present");
+});
+
+test("fresh zero-altitude low-speed telemetry vetoes schedule-based airborne inference", () => {
+  const lifecycle = deriveFlightLifecyclePhase({
+    status: "enroute",
+    actual_departure_at: "2026-08-28T17:29:00.000Z",
+    estimated_arrival_at: "2026-08-29T01:00:00.000Z",
+    position_lat: 28.5562,
+    position_lon: 77.1,
+    altitude: 0,
+    ground_speed: 1,
+  }, Date.parse("2026-08-28T17:32:00.000Z"));
+
+  assert.equal(lifecycle.phase, "taxi_out");
+  assert.equal(lifecycle.confidence, "position_confirmed");
+  assert.equal(lifecycle.reason, "ground_telemetry_present");
+});
+
+test("fresh airborne telemetry vetoes a contradictory premature landing", () => {
+  const now = Date.now();
+  const landingAt = new Date(now - 30_000).toISOString();
+  const recordedAt = new Date(now - 15_000).toISOString();
+  const normalized = normalizedFlight({
+    status: "landed",
+    actualArrivalAt: landingAt,
+    estimatedArrivalAt: new Date(now + 10 * 60_000).toISOString(),
+    position: {
+      lat: 29.75,
+      lon: -98.25,
+      altitude: 10_708,
+      groundSpeed: 380,
+      heading: 250,
+      airGround: "A",
+      recordedAt,
+    },
+  });
+
+  const db = mapNormalizedToDb(normalized, {
+    airline: "SQ",
+    number: "509",
+    date: "2026-05-27",
+    origin: "BLR",
+    destination: "SIN",
+  });
+  const lifecycle = deriveFlightLifecyclePhase(db, now);
+
+  assert.equal(db.status, "enroute");
+  assert.equal(db.is_final, false);
+  assert.equal(lifecycle.phase, "approaching");
+  assert.equal(lifecycle.reason, "fresh_airborne_position_vetoed_terminal_state");
+});
+
+test("stale airborne telemetry does not block a confirmed landing", () => {
+  const now = Date.now();
+  const lifecycle = deriveFlightLifecyclePhase({
+    status: "landed",
+    actual_arrival_at: new Date(now - 30_000).toISOString(),
+    position_lat: 29.75,
+    position_lon: -98.25,
+    altitude: 10_708,
+    ground_speed: 380,
+    normalized_data: {
+      position: { recordedAt: new Date(now - 10 * 60_000).toISOString() },
+    },
+  }, now);
+
+  assert.equal(lifecycle.phase, "landed");
+  assert.equal(lifecycle.reason, "actual_arrival_present");
 });
 
 test("webhook-backed flights avoid scheduled polling unless actively viewed or unsafe", () => {
@@ -783,6 +897,85 @@ test("saving a flight creates one shared provider alert when the adapter support
   assert.equal(alertCalls, 1);
   assert.equal(row.provider_alert_status, "active");
   assert.equal(row.provider_alert_id, "alert-sq509");
+});
+
+test("a flight inside three hours registers one exact inbound aircraft alert", async () => {
+  const departure = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 10 * 60 * 60_000).toISOString();
+  let inboundAlertCalls = 0;
+  const { service, repository } = makeService(normalizedFlight({
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    inboundFlight: {
+      providerFlightId: "AI202-instance",
+      flightNumber: "AI202",
+      originAirportIata: "DEL",
+      destinationAirportIata: "BLR",
+      estimatedArrival: new Date(Date.now() + 75 * 60_000).toISOString(),
+      status: "scheduled",
+    },
+  }), {
+    ensureInboundFlightAlert: async (_flight, inbound) => {
+      inboundAlertCalls += 1;
+      assert.equal(inbound.providerFlightId, "AI202-instance");
+      return { providerAlertId: "alert-inbound-ai202", status: "active" };
+    },
+  });
+
+  const saved = await service.saveUserFlight("u1", {
+    airline: "SQ", number: "509", date: departure.slice(0, 10), origin: "BLR", destination: "SIN",
+  });
+  const row = await repository.findFlightById(saved.flight.flightInstanceId);
+
+  assert.equal(inboundAlertCalls, 1);
+  assert.equal(row.normalized_data.inboundFlight.providerAlertId, "alert-inbound-ai202");
+  assert.equal(row.normalized_data.inboundFlight.providerAlertStatus, "active");
+});
+
+test("an inbound wheels-off callback creates one deduplicated parent-flight APNs event", async () => {
+  const departure = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 10 * 60 * 60_000).toISOString();
+  const inboundArrival = new Date(Date.now() + 70 * 60_000).toISOString();
+  const { service, repository } = makeService(normalizedFlight({
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    inboundFlight: {
+      providerFlightId: "AI202-instance",
+      flightNumber: "AI202",
+      originAirportIata: "DEL",
+      destinationAirportIata: "BLR",
+      estimatedArrival: inboundArrival,
+      status: "scheduled",
+    },
+  }), {
+    ensureInboundFlightAlert: async () => ({ providerAlertId: "alert-inbound-ai202", status: "active" }),
+  });
+  const saved = await service.saveUserFlight("u1", {
+    airline: "SQ", number: "509", date: departure.slice(0, 10), origin: "BLR", destination: "SIN",
+  });
+  const callback = {
+    event: "off",
+    fa_flight_id: "AI202-instance",
+    ident_iata: "AI202",
+    origin_iata: "DEL",
+    destination_iata: "BLR",
+    actual_out: new Date().toISOString(),
+    estimated_in: inboundArrival,
+  };
+
+  await service.processFlightAwareAlertWebhook(callback);
+  await service.processFlightAwareAlertWebhook(callback);
+
+  const events = [...repository.__memory.events.values()].filter((event) =>
+    event.flight_instance_id === saved.flight.flightInstanceId && event.event_type === "INBOUND_DEPARTED"
+  );
+  const row = await repository.findFlightById(saved.flight.flightInstanceId);
+  assert.equal(events.length, 1);
+  assert.equal(row.normalized_data.inboundFlight.status, "airborne");
 });
 
 test("lifecycle recovery upgrades an older active provider alert only once", async () => {
@@ -1534,12 +1727,28 @@ test("weather insights are cached by airport hour and can create one advisory ev
 test("five-hour reminder is durable and excludes tracking-only followers", async () => {
   const departure = new Date(Date.now() + 5 * 60 * 60_000 + 5 * 60_000).toISOString();
   const arrival = new Date(Date.now() + 8 * 60 * 60_000).toISOString();
+  const weather = {
+    async insightForFlight(row) {
+      return {
+        available: true,
+        provider: "weatherkit",
+        airportCode: row.origin_airport,
+        airportRole: "departure",
+        forecastTime: departure,
+        generatedAt: new Date().toISOString(),
+        severity: "low",
+        notificationRequired: true,
+        conditionCode: "Clear",
+        temperatureC: 28,
+      };
+    },
+  };
   const { service, repository } = makeService(normalizedFlight({
     scheduledDepartureAt: departure,
     estimatedDepartureAt: departure,
     scheduledArrivalAt: arrival,
     estimatedArrivalAt: arrival,
-  }));
+  }), { weather });
 
   const traveler = await service.saveUserFlight("traveler", {
     airline: "SQ",
@@ -1562,6 +1771,15 @@ test("five-hour reminder is durable and excludes tracking-only followers", async
     data: { flight_instance_id: traveler.flight.flightInstanceId },
   });
   assert.equal(event.event_type, "TRIP_STARTING");
+  assert.equal(event.new_value.weatherInsight.temperatureC, 28);
+
+  await service.weatherInsightJob({
+    data: { flight_instance_id: traveler.flight.flightInstanceId, reason: "test" },
+  });
+  assert.equal(
+    [...repository.__memory.events.values()].filter((item) => item.event_type === "WEATHER_ADVISORY").length,
+    0
+  );
 
   const targets = await repository.listNotificationTargets(
     traveler.flight.flightInstanceId,

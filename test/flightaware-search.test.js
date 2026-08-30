@@ -9,6 +9,24 @@ process.env.FLIGHTAWARE_API_KEY = "test-flightaware-key";
 
 const { __test__ } = require("../src/server.js");
 
+test("FlightAware reserves bounded capacity for user searches", () => {
+  assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("flight_instance"), 500);
+  assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("position"), 500);
+  assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("operational"), 600);
+  assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("schedules"), 600);
+});
+
+test("opening flight details does not bypass FlightAware caches", () => {
+  assert.deepEqual(
+    __test__.trackedProviderRefreshOptions({ includeLivePosition: true }),
+    { forceRefresh: false }
+  );
+  assert.deepEqual(
+    __test__.trackedProviderRefreshOptions({ forceProviderRefresh: true }),
+    { forceRefresh: true }
+  );
+});
+
 test("FlightAware search keeps schedule results when the operational source fails", async () => {
   const scheduled = {
     ident_iata: "AI101",
@@ -90,7 +108,7 @@ test("extractFlightAwareSearchRows returns scheduled payload rows", () => {
   assert.equal(rows[1].ident_iata, "6E6993");
 });
 
-test("flightAwareScheduleQueryItems scopes a known flight to its resolved airports", () => {
+test("flightAwareScheduleQueryItems scopes the primary lookup and can open a codeshare fallback", () => {
   const params = __test__.flightAwareScheduleQueryItems({
     flightNumber: "AI101",
     departureIata: "del",
@@ -101,7 +119,81 @@ test("flightAwareScheduleQueryItems scopes a known flight to its resolved airpor
   assert.equal(params.get("flight_number"), "101");
   assert.equal(params.get("origin"), "DEL");
   assert.equal(params.get("destination"), "BLR");
-  assert.equal(params.get("max_pages"), "5");
+  assert.equal(params.get("max_pages"), "1");
+
+  const fallbackParams = __test__.flightAwareScheduleQueryItems(
+    { flightNumber: "AA5091" },
+    { includeAirline: false }
+  );
+  assert.equal(fallbackParams.get("airline"), null);
+  assert.equal(fallbackParams.get("flight_number"), "5091");
+});
+
+test("FlightAware schedule search resolves a marketing flight filed under its regional operator", async () => {
+  const originalFetch = global.fetch;
+  const requestedURLs = [];
+  global.fetch = async (url) => {
+    const requestedURL = new URL(url);
+    requestedURLs.push(requestedURL);
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          scheduled: requestedURL.searchParams.has("airline") ? [] : [
+            {
+              fa_flight_id: "JIA5091-20260830-schedule",
+              ident: "JIA5091",
+              ident_iata: "OH5091",
+              codeshares: ["AAL5091"],
+              codeshares_iata: ["AA5091"],
+              origin_iata: "DCA",
+              destination_iata: "CLE",
+              scheduled_out: "2026-08-30T21:48:00Z",
+            },
+            {
+              fa_flight_id: "OTHER5091-20260830-schedule",
+              ident: "OTHER5091",
+              ident_iata: "ZZ5091",
+              origin_iata: "AAA",
+              destination_iata: "BBB",
+              scheduled_out: "2026-08-30T12:00:00Z",
+            },
+          ],
+        };
+      },
+    };
+  };
+
+  const query = {
+    flightNumber: "AA5091",
+    date: "2026-08-30",
+    timezoneOffsetMinutes: -240,
+  };
+
+  try {
+    const rows = await __test__.fetchFlightAwareScheduleFlights(query);
+    assert.equal(requestedURLs.length, 2);
+    assert.equal(requestedURLs[0].searchParams.get("airline"), "AA");
+    assert.equal(requestedURLs[1].searchParams.get("airline"), null);
+    assert.equal(requestedURLs[1].searchParams.get("flight_number"), "5091");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].fa_flight_id, "JIA5091-20260830-schedule");
+
+    const normalized = __test__.normalizeWithContext(
+      rows[0],
+      rows,
+      query,
+      __test__.normalizeRecordFromFlightAware,
+      null
+    );
+    assert.equal(normalized.flightNumber, "AA5091");
+    assert.equal(normalized.airlineCode, "AA");
+    assert.equal(normalized.departureAirportIata, "DCA");
+    assert.equal(normalized.arrivalAirportIata, "CLE");
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test("airport-pair searches never call FlightAware", async () => {
@@ -176,7 +268,9 @@ test("forced FlightAware detail refresh bypasses a cached blank gate", async () 
     assert.equal(first[0].gate_origin, null);
     assert.equal(cached[0].gate_origin, null);
     assert.equal(refreshed[0].gate_origin, "24");
-    assert.equal(providerCalls, 2);
+    // A forced refresh reruns both the operational and schedule sources; the
+    // middle read must remain cache-only.
+    assert.equal(providerCalls, 4);
   } finally {
     global.fetch = originalFetch;
   }
@@ -344,6 +438,28 @@ test("normalizeRecordFromFlightAware reads nested airport operational fields", (
   assert.equal(normalized.arrivalTerminal, "2");
 });
 
+test("normalizeRecordFromFlightAware preserves the exact inbound aircraft identity and ETA", () => {
+  const normalized = __test__.normalizeRecordFromFlightAware({
+    fa_flight_id: "SQ509-instance",
+    ident_iata: "SQ509",
+    origin: { code_iata: "BLR" },
+    destination: { code_iata: "SIN" },
+    scheduled_out: "2026-08-31T10:00:00.000Z",
+    scheduled_in: "2026-08-31T14:00:00.000Z",
+    inbound_fa_flight_id: "AI202-instance",
+    inbound_ident_iata: "AI202",
+    inbound_origin_iata: "DEL",
+    inbound_estimated_in: "2026-08-31T09:05:00.000Z",
+    inbound_status: "Scheduled",
+  });
+
+  assert.equal(normalized.inboundFlight.providerFlightId, "AI202-instance");
+  assert.equal(normalized.inboundFlight.flightNumber, "AI202");
+  assert.equal(normalized.inboundFlight.originAirportIata, "DEL");
+  assert.equal(normalized.inboundFlight.destinationAirportIata, "BLR");
+  assert.equal(normalized.inboundFlight.estimatedArrival, "2026-08-31T09:05:00.000Z");
+});
+
 test("normalizeRecordFromFlightAware converts AeroAPI altitude hundreds to feet", () => {
   const normalized = __test__.normalizeRecordFromFlightAware({
     ident_iata: "AI2418",
@@ -396,6 +512,48 @@ test("reconcileOperationalStatus does not depart future scheduled flights with e
   assert.equal(reconciled.status, "scheduled");
   assert.equal(reconciled.departureTimes.scheduled, "2026-05-07T11:00:00.000Z");
   assert.equal(reconciled.takeoffTimes.estimated, "2026-05-07T11:10:00.000Z");
+});
+
+test("reconcileOperationalStatus keeps a live ground position in taxiing state", () => {
+  const reconciled = __test__.reconcileOperationalStatus({
+    status: "enroute",
+    departureTimes: { actual: "2026-08-28T17:29:00.000Z" },
+    takeoffTimes: { actual: null },
+    livePosition: {
+      latitude: 28.5562,
+      longitude: 77.1,
+      altitudeFeet: 0,
+      groundSpeedKnots: 1,
+    },
+  });
+
+  assert.equal(reconciled.status, "taxiing");
+});
+
+test("reconcileOperationalStatus rejects a premature landing while fresh telemetry is airborne", () => {
+  const reconciled = __test__.reconcileOperationalStatus({
+    status: "landed",
+    landingTimes: { actual: new Date(Date.now() - 30_000).toISOString() },
+    livePosition: {
+      latitude: 29.75,
+      longitude: -98.25,
+      altitudeFeet: 10_708,
+      groundSpeedKnots: 380,
+      airGround: "A",
+      recordedAt: new Date(Date.now() - 15_000).toISOString(),
+    },
+  });
+
+  assert.equal(reconciled.status, "enroute");
+});
+
+test("reconcileOperationalStatus does not accept a future actual-arrival timestamp", () => {
+  const reconciled = __test__.reconcileOperationalStatus({
+    status: "enroute",
+    landingTimes: { actual: new Date(Date.now() + 15 * 60_000).toISOString() },
+  });
+
+  assert.equal(reconciled.status, "enroute");
 });
 
 test("scoreCandidate matches schedule codeshares through actual_ident_iata", () => {

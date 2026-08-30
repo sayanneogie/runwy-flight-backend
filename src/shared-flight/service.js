@@ -32,9 +32,14 @@ const MISSED_DEPARTURE_RECOVERY_MIN_STALE_MS = 10 * 60_000;
 const MISSED_DEPARTURE_RECOVERY_WINDOW_MS = 2 * 60 * 60_000;
 const ARRIVAL_CATCHUP_AFTER_MS = 6 * 60_000;
 const PREFLIGHT_REMINDER_BEFORE_MS = 5 * 60 * 60_000;
+const INBOUND_MONITOR_WINDOW_MS = 3 * 60 * 60_000;
 const DEPARTURE_DETAIL_CHECKPOINTS = [
   { stage: "t-2h", offsetMs: -2 * 60 * 60_000 },
   { stage: "t-30m", offsetMs: -30 * 60_000 },
+];
+const INBOUND_MONITOR_CHECKPOINTS = [
+  { stage: "t-3h", offsetMs: -3 * 60 * 60_000 },
+  { stage: "t-60m", offsetMs: -60 * 60_000 },
 ];
 const ARRIVAL_DETAIL_CHECKPOINTS = [
   { stage: "t-60m", offsetMs: -60 * 60_000 },
@@ -71,13 +76,21 @@ function preserveKnownOperationalFields(normalized, row) {
       normalized?.baggageBelt,
       row?.baggage_belt ?? previous.baggageBelt
     ),
+    inboundFlight: normalized?.inboundFlight
+      ? {
+          ...(previous.inboundFlight || {}),
+          ...normalized.inboundFlight,
+          providerAlertId: previous.inboundFlight?.providerAlertId || null,
+          providerAlertStatus: previous.inboundFlight?.providerAlertStatus || null,
+        }
+      : previous.inboundFlight || null,
   };
 }
 
 // Shared flight-state design: client requests only touch Runwy-owned state.
 // Provider calls are guarded by Redis-compatible locks, normalized, validated,
 // snapshotted, diffed into shared events, then fanned out to private user links.
-function createSharedFlightService({ repository, provider, cache = createFlightCache(), queue = createSharedFlightQueue(), apns = createApnsSender(), weather = null, streamingEnabled = false, wait = sleep } = {}) {
+function createSharedFlightService({ repository, provider, cache = createFlightCache(), queue = createSharedFlightQueue(), apns = createApnsSender(), liveActivities = null, weather = null, streamingEnabled = false, wait = sleep } = {}) {
   const weatherService = weather || createFlightWeatherService({ cache, repository });
 
   async function acquireProviderCallLock(lockKey, ttlMs) {
@@ -202,7 +215,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     try {
       const params = { airline: row.airline_code, number: row.flight_number, date: dateOnly(row.departure_date), origin: row.origin_airport || "UNKNOWN", destination: row.destination_airport || "UNKNOWN", flightKey: row.flight_key };
       const providerOptions = {
-        forceRefresh: ["detail_open", "forced"].includes(String(job.data.reason || "")),
+        forceRefresh: String(job.data.reason || "") === "forced",
         skipLivePosition: isOperationalDetailsRefreshReason(job.data.reason),
       };
       const providerNormalized = row.provider_flight_id && provider.supportsProviderId && provider.fetchFlightByProviderId
@@ -247,6 +260,13 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
       for (const event of savedEvents.filter((item) => item.notification_required)) {
         await queue.add("fanoutNotificationJob", { flight_event_id: event.id }, { dedupe: true, dedupeKey: `fanout:${event.id}` });
       }
+      if (savedEvents.length > 0 && liveActivities?.sendFlightState) {
+        await queue.add("liveActivityUpdateJob", { flight_instance_id: saved.id }, {
+          dedupe: true,
+          dedupeKey: `live-activity:${saved.id}:${saved.updated_at || Date.now()}`,
+        });
+      }
+      await ensureInboundFlightMonitoring(saved.id, job.data.reason || "refresh");
       await repository.logApiUsage({ provider: provider.name, endpoint: "refreshFlightJob", flight_key: saved.flight_key, response_time_ms: Date.now() - startedAt, status_code: 200 });
       return saved;
     } catch (error) {
@@ -261,6 +281,10 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     const data = await repository.getEventWithFlight(job.data.flight_event_id);
     if (!data?.event || !data?.flight) return { sent: 0 };
     const targets = await repository.listNotificationTargets(data.flight.id, data.event.event_severity, data.event.event_type);
+    const isArrival = ["LANDED", "ARRIVED"].includes(data.event.event_type);
+    const weatherInsight = isArrival
+      ? await weatherService.insightForFlight(data.flight, { cacheStatus: "arrival_notification" })
+      : null;
     let sent = 0;
     for (const target of targets) {
       const ownerUserId = target.userFlight.owner_user_id || target.userFlight.user_id;
@@ -280,6 +304,16 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
         isCircle: target.isCircle === true,
         isTraveler: target.isTraveler !== false,
         ownerDisplayName: target.ownerDisplayName || null,
+        recipientDisplayName: target.recipientDisplayName || null,
+        temperatureUnit: target.temperatureUnit || "celsius",
+        weatherInsight: weatherInsight?.available ? weatherInsight : null,
+        visitOrdinal: isArrival && target.isCircle !== true && target.isTraveler !== false && repository.arrivalVisitOrdinalForUser
+          ? await repository.arrivalVisitOrdinalForUser(
+            ownerUserId,
+            data.flight.destination_airport,
+            target.userFlight.id || null
+          )
+          : null,
       };
       try {
         if (repository.createAppNotification) {
@@ -320,7 +354,14 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
             await repository.disableDeviceToken(token.device_token || token.apnsToken);
           }
         }
-        if (results.some(({ result }) => result?.ok === false)) {
+        if (results.length === 0) {
+          throw new Error("no_active_push_tokens");
+        }
+        // One account can retain tokens from both Xcode (sandbox) and
+        // TestFlight/App Store (production). A stale or misconfigured token in
+        // one environment must not turn a successful delivery to another
+        // active device into a total failure.
+        if (!results.some(({ result }) => result?.ok === true)) {
           throw new Error(results.find(({ result }) => result?.reason || result?.error)?.result?.reason || "APNs delivery failed");
         }
         if (repository.updateAppNotificationDeliveryStatus) {
@@ -438,7 +479,86 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     // delivered. Keep one provider alert per shared flight as the inexpensive
     // delivery safety net; downstream event dedupe prevents double pushes.
     const alert = await ensureProviderAlert(flightInstanceId, reason);
+    await ensureInboundFlightMonitoring(flightInstanceId, reason);
     return alert || stream;
+  }
+
+  async function ensureInboundFlightMonitoring(flightInstanceId, reason) {
+    if (typeof provider.ensureInboundFlightAlert !== "function") return null;
+    let flight = await repository.findFlightById(flightInstanceId);
+    let inbound = flight?.normalized_data?.inboundFlight;
+    const departureMs = new Date(flight?.estimated_departure_at || flight?.scheduled_departure_at || 0).getTime();
+    const untilDepartureMs = departureMs - Date.now();
+    if (
+      !flight ||
+      isFinalStatus(flight.status) ||
+      !inbound?.providerFlightId ||
+      inbound.providerAlertStatus === "active" ||
+      !Number.isFinite(departureMs) ||
+      untilDepartureMs > INBOUND_MONITOR_WINDOW_MS ||
+      untilDepartureMs < -30 * 60_000
+    ) {
+      return flight;
+    }
+
+    try {
+      const lastLookupMs = new Date(inbound.detailsLookupAttemptedAt || 0).getTime();
+      const needsDetails = !inbound.originAirportIata || !inbound.estimatedArrival;
+      const mayRetryDetails = !Number.isFinite(lastLookupMs) || Date.now() - lastLookupMs >= 45 * 60_000;
+      if (needsDetails && mayRetryDetails && provider.supportsProviderId && provider.fetchFlightByProviderId) {
+        const resolved = await provider.fetchFlightByProviderId(inbound.providerFlightId, { skipLivePosition: true });
+        inbound = {
+          ...inbound,
+          flightNumber: resolved?.airlineCode && resolved?.flightNumber
+            ? `${resolved.airlineCode}${resolved.flightNumber}`
+            : inbound.flightNumber,
+          originAirportIata: resolved?.origin || inbound.originAirportIata || null,
+          destinationAirportIata: resolved?.destination || inbound.destinationAirportIata || flight.origin_airport || null,
+          estimatedArrival: resolved?.estimatedArrivalAt || resolved?.scheduledArrivalAt || inbound.estimatedArrival || null,
+          estimatedDeparture: resolved?.estimatedDepartureAt || resolved?.scheduledDepartureAt || inbound.estimatedDeparture || null,
+          actualDeparture: resolved?.actualDepartureAt || inbound.actualDeparture || null,
+          status: resolved?.status || inbound.status || null,
+          detailsLookupAttemptedAt: new Date().toISOString(),
+        };
+        flight = await repository.updateFlight({
+          ...flight,
+          normalized_data: { ...(flight.normalized_data || {}), inboundFlight: inbound },
+        });
+        await repository.logApiUsage({
+          provider: provider.name,
+          endpoint: "fetchInboundFlightByProviderId",
+          flight_key: flight.flight_key,
+          cache_status: resolved ? "miss" : "no_match",
+          status_code: resolved ? 200 : null,
+        });
+      }
+      const alert = await provider.ensureInboundFlightAlert(flight, inbound, { reason });
+      if (!alert) return flight;
+      const updated = {
+        ...flight,
+        normalized_data: {
+          ...(flight.normalized_data || {}),
+          inboundFlight: {
+            ...inbound,
+            providerAlertId: alert.providerAlertId || alert.id || null,
+            providerAlertStatus: alert.status || "active",
+            providerAlertCreatedAt: alert.createdAt || new Date().toISOString(),
+          },
+        },
+      };
+      const saved = await repository.updateFlight(updated);
+      await cache.setJSON(`flight:${saved.flight_key}`, rowToFlightResponse(saved, { source: "redis", freshness: "fresh" }), await freshnessTTL(saved));
+      return saved;
+    } catch (error) {
+      await repository.logApiUsage({
+        provider: provider.name,
+        endpoint: "ensureInboundFlightAlert",
+        flight_key: flight.flight_key,
+        cache_status: "inbound_alert_failed",
+        error: error?.message || String(error),
+      });
+      return flight;
+    }
   }
 
   async function ensureStreamingRegistration(flightInstanceId, reason) {
@@ -555,7 +675,20 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     for (const event of savedEvents.filter((item) => item.notification_required)) {
       await queue.add("fanoutNotificationJob", { flight_event_id: event.id }, { dedupe: true, dedupeKey: `fanout:${event.id}` });
     }
+    if (savedEvents.length > 0 && liveActivities?.sendFlightState) {
+      await queue.add("liveActivityUpdateJob", { flight_instance_id: saved.id }, {
+        dedupe: true,
+        dedupeKey: `live-activity:${saved.id}:${saved.updated_at || Date.now()}`,
+      });
+    }
     return saved;
+  }
+
+  async function liveActivityUpdateJob(job) {
+    if (!liveActivities?.sendFlightState) return { sent: 0, skipped: true };
+    const flight = await repository.findFlightById(job.data.flight_instance_id);
+    if (!flight) return { sent: 0, skipped: true };
+    return liveActivities.sendFlightState(flight);
   }
 
   async function processFlightAwareAlertWebhook(payload) {
@@ -631,6 +764,18 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
           appliedEvents += 1;
           continue;
         }
+        if (alert.event_type === "flight_arrived" && !alert.actual_in) {
+          await queue.add("refreshFlightJob", {
+            flight_instance_id: target.id,
+            reason: "forced",
+            trigger: "unconfirmed_arrival_alert",
+          }, {
+            dedupe: true,
+            dedupeKey: `arrival-verify:${target.id}:${alert.event_time || "unknown"}`,
+            runImmediately: true,
+          });
+          continue;
+        }
         const update = flightUpdateFromAlert(target, alert);
         const saved = await applyStreamedFlightUpdate(target.id, update, {
           eventTime: alert.event_time || new Date().toISOString(),
@@ -641,6 +786,58 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
           appliedEvents += 1;
           await scheduleArrivalDetailRefreshes(saved.id, "provider_alert");
         }
+      }
+
+      const inboundTargets = repository.listInboundUpdateTargets
+        ? await repository.listInboundUpdateTargets({
+          providerFlightId: alert.fa_flight_id,
+          flightNumber: alert.ident,
+        })
+        : [];
+      matchedFlights += inboundTargets.length;
+      for (const parent of inboundTargets) {
+        const inbound = parent.normalized_data?.inboundFlight || {};
+        if (alert.fa_flight_id && inbound.providerFlightId && String(alert.fa_flight_id) !== String(inbound.providerFlightId)) {
+          continue;
+        }
+        const eventType = alert.event_type === "flight_departed"
+          ? "INBOUND_DEPARTED"
+          : alert.event_type === "flight_cancelled"
+            ? "INBOUND_CANCELLED"
+            : alert.event_type === "flight_diverted"
+              ? "INBOUND_DIVERTED"
+              : null;
+        if (!eventType) continue;
+        const recent = await repository.findRecentEventByType?.(parent.id, eventType, 12 * 60 * 60_000);
+        if (recent) continue;
+
+        const nextInbound = {
+          ...inbound,
+          status: alert.event_type === "flight_departed"
+            ? "airborne"
+            : alert.event_type === "flight_cancelled" ? "cancelled" : "diverted",
+          actualDeparture: alert.actual_out || inbound.actualDeparture || null,
+          estimatedArrival: alert.estimated_in || inbound.estimatedArrival || null,
+        };
+        const updatedParent = await repository.updateFlight({
+          ...parent,
+          normalized_data: { ...(parent.normalized_data || {}), inboundFlight: nextInbound },
+        });
+        const [event] = await repository.insertEvents(parent.id, [{
+          event_type: eventType,
+          event_severity: eventType === "INBOUND_DEPARTED" ? "medium" : "high",
+          old_value: { inboundFlight: inbound },
+          new_value: { inboundFlight: nextInbound },
+          summary: alert.human_readable_summary,
+          notification_required: true,
+          confidence: "high",
+          provider_event_time: alert.event_time,
+        }], "flightaware");
+        await cache.setJSON(`flight:${updatedParent.flight_key}`, rowToFlightResponse(updatedParent, { source: "redis", freshness: "fresh" }), await freshnessTTL(updatedParent));
+        if (event?.notification_required) {
+          await queue.add("fanoutNotificationJob", { flight_event_id: event.id }, { dedupe: true, dedupeKey: `fanout:${event.id}` });
+        }
+        appliedEvents += 1;
       }
     }
 
@@ -771,6 +968,19 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
           delayMs: departureMs + DEPARTURE_CATCHUP_FINAL_AFTER_MS - nowMs,
         }));
       }
+      for (const checkpoint of INBOUND_MONITOR_CHECKPOINTS) {
+        const scheduledAtMs = departureMs + checkpoint.offsetMs;
+        if (scheduledAtMs <= nowMs) continue;
+        scheduled.push(await queue.add("inboundMonitoringJob", {
+          flight_instance_id: flightInstanceId,
+          reason,
+          stage: checkpoint.stage,
+        }, {
+          dedupe: true,
+          dedupeKey: `inbound-monitor:${checkpoint.stage}:${flightInstanceId}`,
+          delayMs: scheduledAtMs - nowMs,
+        }));
+      }
       scheduled.push(...await scheduleDepartureDetailRefreshes(flightInstanceId, reason, row));
     }
 
@@ -800,6 +1010,14 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     const recent = await repository.findRecentEventByType?.(row.id, "TRIP_STARTING", 24 * 60 * 60_000);
     if (recent) return recent;
 
+    const weatherInsight = await getFlightWeatherInsight(row.id, { cacheStatus: "preflight_reminder" });
+    const embeddedWeather = weatherInsight?.available ? {
+      airportCode: weatherInsight.airportCode || row.origin_airport || null,
+      conditionCode: weatherInsight.conditionCode || null,
+      temperatureC: weatherInsight.temperatureC ?? null,
+      forecastTime: weatherInsight.forecastTime || departureAt,
+    } : null;
+
     const [event] = await repository.insertEvents(row.id, [{
       event_type: "TRIP_STARTING",
       event_severity: "low",
@@ -808,6 +1026,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
         minutesUntilDeparture,
         scheduledDepartureAt: row.scheduled_departure_at || departureAt,
         estimatedDepartureAt: row.estimated_departure_at || null,
+        weatherInsight: embeddedWeather,
       },
       summary: "Flight scheduled to depart in about five hours",
       notification_required: true,
@@ -852,7 +1071,19 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
         await ensureLiveSource(row.id, `${reason}_alert_repair`);
       }
     }
-    return { checked: rows.length, scheduled };
+    const recoveredFanout = await recoverPendingNotificationFanout();
+    return { checked: rows.length, scheduled, recoveredFanout };
+  }
+
+  async function recoverPendingNotificationFanout() {
+    if (typeof repository.listPendingNotificationEventIds !== "function") return 0;
+    const eventIds = await repository.listPendingNotificationEventIds();
+    let recovered = 0;
+    for (const flightEventId of eventIds) {
+      const result = await fanoutNotificationJob({ data: { flight_event_id: flightEventId } });
+      if (result?.sent > 0) recovered += result.sent;
+    }
+    return recovered;
   }
 
   async function scheduleArrivalDetailRefreshes(flightInstanceId, reason, existingRow = null) {
@@ -922,6 +1153,18 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     });
   }
 
+  async function inboundMonitoringJob(job) {
+    const row = await repository.findFlightById(job.data.flight_instance_id);
+    if (!row || isFinalStatus(row.status) || row.normalized_data?.inboundFlight?.providerAlertStatus === "active") return row;
+    return refreshFlightJob({
+      data: {
+        flight_key: row.flight_key,
+        flight_instance_id: row.id,
+        reason: `inbound_monitoring_${job.data.stage || "scheduled"}`,
+      },
+    });
+  }
+
   async function departureDetailRefreshJob(job) {
     const row = await repository.findFlightById(job.data.flight_instance_id);
     if (!row || !shouldRefreshDepartureDetails(row)) return row;
@@ -970,6 +1213,8 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     const insight = await getFlightWeatherInsight(row.id, { cacheStatus: "scheduled" });
     const event = weatherEventFromInsight(insight);
     if (!event) return insight;
+    const recentPreflight = await repository.findRecentEventByType?.(row.id, "TRIP_STARTING", 6 * 60 * 60_000);
+    if (recentPreflight?.new_value?.weatherInsight) return insight;
     const recent = await repository.findRecentEventByType?.(row.id, "WEATHER_ADVISORY", 6 * 60 * 60_000);
     if (recent) return insight;
     const [savedEvent] = await repository.insertEvents(row.id, [event], insight.provider || "weatherkit");
@@ -981,10 +1226,12 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
 
   queue.process("refreshFlightJob", refreshFlightJob);
   queue.process("fanoutNotificationJob", fanoutNotificationJob);
+  queue.process("liveActivityUpdateJob", liveActivityUpdateJob);
   queue.process("revalidateSuspiciousFlightJob", revalidateSuspiciousFlightJob);
   queue.process("weatherInsightJob", weatherInsightJob);
   queue.process("departureDetailRefreshJob", departureDetailRefreshJob);
   queue.process("departureCatchupJob", departureCatchupJob);
+  queue.process("inboundMonitoringJob", inboundMonitoringJob);
   queue.process("arrivalCatchupJob", arrivalCatchupJob);
   queue.process("arrivalDetailRefreshJob", arrivalDetailRefreshJob);
   queue.process("preflightReminderJob", preflightReminderJob);
@@ -1004,7 +1251,9 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     scheduleLifecycleCatchups,
     preflightReminderJob,
     recoverLifecycleCatchups,
+    recoverPendingNotificationFanout,
     ensureLiveSource,
+    ensureInboundFlightMonitoring,
     ensureStreamingRegistration,
     ensureProviderAlert,
     applyStreamedFlightUpdate,
@@ -1016,6 +1265,7 @@ function createSharedFlightService({ repository, provider, cache = createFlightC
     weatherInsightJob,
     departureDetailRefreshJob,
     departureCatchupJob,
+    inboundMonitoringJob,
     arrivalCatchupJob,
     arrivalDetailRefreshJob,
     scheduleDepartureDetailRefreshes,
@@ -1073,7 +1323,10 @@ function shouldRecoverMissedDeparture(row, nowMs = Date.now()) {
 }
 
 function isEffectivelyFinal(row) {
-  return isFinalStatus(row?.status) || Boolean(row?.actual_arrival_at);
+  // Status reconciliation already validates actual-arrival evidence against
+  // contradictory live telemetry. An isolated timestamp must not suppress the
+  // recovery jobs that can correct a premature provider update.
+  return isFinalStatus(row?.status);
 }
 
 function isOperationallyPastArrivalWithoutFinalState(row, nowMs = Date.now()) {
@@ -1154,7 +1407,7 @@ function needsProviderAlertConfigurationUpgrade(row, provider) {
 
 function isOperationalDetailsRefreshReason(reason) {
   const value = String(reason || "");
-  return value.startsWith("arrival_details_") || value.startsWith("departure_details_");
+  return value.startsWith("arrival_details_") || value.startsWith("departure_details_") || value.startsWith("inbound_monitoring_");
 }
 
 function sleep(ms) {
@@ -1182,6 +1435,12 @@ function sharedNotificationType(eventType) {
       return "flight_takeoff_roll";
     case "TRIP_STARTING":
       return "flight_trip_starting";
+    case "INBOUND_DEPARTED":
+      return "flight_inbound_departed";
+    case "INBOUND_CANCELLED":
+      return "flight_inbound_cancelled";
+    case "INBOUND_DIVERTED":
+      return "flight_inbound_diverted";
     case "DEPARTED":
     case "AIRBORNE":
       return "flight_departed";
