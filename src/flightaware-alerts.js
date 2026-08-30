@@ -35,7 +35,10 @@ function normalizeFlightAwareAlert(rawPayload) {
   const destination = airportCode(firstPresent(event.destination_iata, event.arrival_iata, event.destination, event.arrival, event.destination_airport, event.arrival_airport));
   const scheduledOut = iso(firstPresent(event.scheduled_out, event.scheduledOff, event.scheduled_off, event.scheduled_departure_at));
   const estimatedOut = iso(firstPresent(event.estimated_out, event.estimatedOff, event.estimated_off, event.estimated_departure_at));
-  const actualOut = iso(firstPresent(event.actual_out, event.actualOff, event.actual_off, event.actual_departure_at));
+  const actualOut = iso(firstPresent(event.actual_out, event.actual_departure_at));
+  const scheduledOff = iso(firstPresent(event.scheduled_off, event.scheduled_takeoff_at));
+  const estimatedOff = iso(firstPresent(event.estimated_off, event.predicted_off, event.estimated_takeoff_at));
+  const actualOff = iso(firstPresent(event.actual_off, event.actualOff, event.actual_takeoff_at));
   const scheduledIn = iso(firstPresent(event.scheduled_in, event.scheduled_on, event.scheduledOn, event.scheduled_arrival_at));
   const estimatedIn = iso(firstPresent(event.estimated_in, event.estimated_on, event.estimatedOn, event.estimated_arrival_at));
   const actualIn = iso(firstPresent(event.actual_in, event.actual_on, event.actualOn, event.actual_arrival_at));
@@ -48,13 +51,13 @@ function normalizeFlightAwareAlert(rawPayload) {
     event.occurred_at,
     event.occurredAt,
     eventType === "flight_arrived" ? actualIn : null,
-    eventType === "flight_departed" ? actualOut : null,
+    eventType === "flight_departed" ? actualOff || actualOut : null,
     actualIn,
     actualOut,
     estimatedIn,
     estimatedOut
   ));
-  const departureDate = dateOnly(firstPresent(event.departure_date, event.flight_date, event.date, scheduledOut, estimatedOut, actualOut, eventTime));
+  const departureDate = dateOnly(firstPresent(event.departure_date, event.flight_date, event.date, scheduledOut, estimatedOut, actualOut, scheduledOff, estimatedOff, actualOff, eventTime));
   const flightKey = parsed.airlineCode && parsed.flightNumber && departureDate
     ? `${parsed.airlineCode}-${parsed.flightNumber}-${departureDate}-${origin || "UNKNOWN"}-${destination || "UNKNOWN"}`
     : null;
@@ -79,6 +82,9 @@ function normalizeFlightAwareAlert(rawPayload) {
     scheduled_out: scheduledOut,
     estimated_out: estimatedOut,
     actual_out: actualOut,
+    scheduled_off: scheduledOff,
+    estimated_off: estimatedOff,
+    actual_off: actualOff,
     scheduled_in: scheduledIn,
     estimated_in: estimatedIn,
     actual_in: actualIn,
@@ -117,6 +123,16 @@ function flightUpdateFromAlert(row, alert) {
     gate: alert.gate_origin || row.gate,
     terminal: alert.terminal_origin || row.terminal,
     baggageBelt: alert.baggage_belt || row.baggage_belt,
+    departureTimes: {
+      scheduled: alert.scheduled_out || row.normalized_data?.departureTimes?.scheduled || row.scheduled_departure_at,
+      estimated: alert.estimated_out || row.normalized_data?.departureTimes?.estimated || row.estimated_departure_at,
+      actual: alert.actual_out || row.normalized_data?.departureTimes?.actual || row.actual_departure_at,
+    },
+    takeoffTimes: {
+      scheduled: alert.scheduled_off || row.normalized_data?.takeoffTimes?.scheduled || null,
+      estimated: alert.estimated_off || row.normalized_data?.takeoffTimes?.estimated || null,
+      actual: alert.actual_off || row.normalized_data?.takeoffTimes?.actual || null,
+    },
     position: {
       lat: row.position_lat,
       lon: row.position_lon,
@@ -132,11 +148,12 @@ function flightUpdateFromAlert(row, alert) {
 
 function generateFlightAwareAlertDedupeKey(alert, rawPayload) {
   const identity = alert.fa_flight_id || alert.flight_key || alert.ident || "unknown-flight";
-  const eventTime = alert.event_time || alert.actual_out || alert.actual_in || alert.estimated_out || alert.estimated_in || "unknown-time";
+  const eventTime = alert.event_time || alert.actual_off || alert.actual_out || alert.actual_in || alert.estimated_off || alert.estimated_out || alert.estimated_in || "unknown-time";
   const importantFields = {
     event_type: alert.event_type,
     event_status: alert.event_status,
     actual_out: alert.actual_out,
+    actual_off: alert.actual_off,
     actual_in: alert.actual_in,
     estimated_out: alert.estimated_out,
     estimated_in: alert.estimated_in,

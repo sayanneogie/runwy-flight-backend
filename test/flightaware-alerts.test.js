@@ -165,6 +165,44 @@ test("normalizes a FlightAware OUT event as taxiing", () => {
 
   assert.equal(normalized.event_type, "flight_taxiing");
   assert.equal(normalized.actual_out, "2026-08-28T10:53:00.000Z");
+  assert.equal(normalized.actual_off, null);
+});
+
+test("keeps FlightAware gate-out and wheels-off timestamps separate", async () => {
+  const { repository, service, row } = await makeAlertService();
+  const actualOut = "2026-05-09T16:42:00Z";
+  const actualOff = "2026-05-09T16:55:00Z";
+
+  const taxi = await service.processFlightAwareAlertWebhook({
+    event: "OUT",
+    ident: "AI2814",
+    fa_flight_id: "AI2814-2026-05-09",
+    origin: "BLR",
+    destination: "DEL",
+    actual_out: actualOut,
+  });
+  const taxiRow = await repository.findFlightById(row.id);
+
+  assert.equal(taxi.appliedEvents, 1);
+  assert.equal(taxiRow.status, "taxiing");
+  assert.equal(taxiRow.normalized_data.departureTimes.actual, "2026-05-09T16:42:00.000Z");
+  assert.equal(taxiRow.normalized_data.takeoffTimes.actual, null);
+
+  const takeoff = await service.processFlightAwareAlertWebhook({
+    event: "OFF",
+    ident: "AI2814",
+    fa_flight_id: "AI2814-2026-05-09",
+    origin: "BLR",
+    destination: "DEL",
+    actual_out: actualOut,
+    actual_off: actualOff,
+  });
+  const airborneRow = await repository.findFlightById(row.id);
+
+  assert.equal(takeoff.appliedEvents, 1);
+  assert.equal(airborneRow.status, "airborne");
+  assert.equal(airborneRow.normalized_data.departureTimes.actual, "2026-05-09T16:42:00.000Z");
+  assert.equal(airborneRow.normalized_data.takeoffTimes.actual, "2026-05-09T16:55:00.000Z");
 });
 
 test("impending departure remains preflight and does not masquerade as takeoff", () => {

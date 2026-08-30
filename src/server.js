@@ -234,7 +234,10 @@ const APNS_USE_SANDBOX = String(process.env.APNS_USE_SANDBOX || "true").toLowerC
 const FLIGHTAWARE_AUTO_ALERT_EVENTS = Object.freeze({
   arrival: true,
   cancelled: true,
-  departure: true,
+  // OUT and OFF are unambiguous. The generic departure event can arrive with
+  // only a gate-out timestamp, which must not make Runwy show an aircraft as
+  // airborne while it is still taxiing.
+  departure: false,
   diverted: true,
   filed: true,
   out: true,
@@ -246,7 +249,7 @@ const FLIGHTAWARE_AUTO_ALERT_EVENTS = Object.freeze({
 });
 const FLIGHTAWARE_AUTO_ALERT_IMPENDING_DEPARTURE_MINUTES = Object.freeze([120, 60, 15]);
 const FLIGHTAWARE_AUTO_ALERT_IMPENDING_ARRIVAL_MINUTES = Object.freeze([30]);
-const FLIGHTAWARE_ALERT_CONFIGURATION_CHANGED_AT = "2026-08-28T11:07:22.000Z";
+const FLIGHTAWARE_ALERT_CONFIGURATION_CHANGED_AT = "2026-08-30T23:20:00.000Z";
 let flightAwareAlertEndpointReadyURL = null;
 let flightAwareAlertEndpointPromise = null;
 
