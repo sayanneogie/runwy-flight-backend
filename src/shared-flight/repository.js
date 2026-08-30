@@ -10,6 +10,25 @@ const DEFAULT_ALERT_PREFERENCES = Object.freeze({
   critical: true,
 });
 
+function normalizedFlightNumber(value) {
+  return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function hasNewerDeletedOccurrence(rows, candidate) {
+  const candidateDeparture = Date.parse(candidate.scheduled_departure || "");
+  const candidateCreatedAt = Date.parse(candidate.created_at || candidate.added_at || "");
+  return rows.some((row) => {
+    if (row.user_id !== candidate.user_id || !row.deleted_at) return false;
+    if (normalizedFlightNumber(row.display_flight_number) !== normalizedFlightNumber(candidate.display_flight_number)) return false;
+    if (String(row.origin_iata || "").toUpperCase() !== String(candidate.origin_iata || "").toUpperCase()) return false;
+    if (String(row.destination_iata || "").toUpperCase() !== String(candidate.destination_iata || "").toUpperCase()) return false;
+    const deletedDeparture = Date.parse(row.scheduled_departure || "");
+    if (!Number.isFinite(candidateDeparture) || !Number.isFinite(deletedDeparture) || Math.abs(deletedDeparture - candidateDeparture) > 30 * 60_000) return false;
+    const deletedAt = Date.parse(row.deleted_at);
+    return !Number.isFinite(candidateCreatedAt) || (Number.isFinite(deletedAt) && deletedAt >= candidateCreatedAt);
+  });
+}
+
 function createMemorySharedFlightRepository() {
   const flights = new Map();
   const aliases = new Map();
@@ -209,6 +228,8 @@ function createMemorySharedFlightRepository() {
         notifications_enabled: input.notificationEnabled ?? true,
         alert_settings_json: input.alertPreferences || DEFAULT_ALERT_PREFERENCES,
         added_at: userFlights.get(key)?.added_at || new Date().toISOString(),
+        created_at: userFlights.get(key)?.created_at || new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       };
       userFlights.set(key, saved);
       return saved;
@@ -335,6 +356,9 @@ function createMemorySharedFlightRepository() {
       return [...userFlights.values()]
         .filter((row) =>
           row.flight_instance_id === flightInstanceId &&
+          !row.deleted_at &&
+          row.lifecycle_state !== "deleted" &&
+          !hasNewerDeletedOccurrence([...userFlights.values()], row) &&
           row.notification_enabled !== false &&
           row.alert_preferences?.[severity] !== false &&
           (eventType !== "TRIP_STARTING" || row.source_type !== "tracked") &&
@@ -1010,6 +1034,18 @@ function createPostgresSharedFlightRepository(pool) {
              and uf.notification_enabled = true
              and uf.deleted_at is null
              and coalesce(uf.lifecycle_state, '') <> 'deleted'
+             and not exists (
+               select 1
+               from public.user_flights deleted_uf
+               where deleted_uf.user_id = uf.user_id
+                 and deleted_uf.deleted_at is not null
+                 and deleted_uf.deleted_at >= uf.created_at
+                 and regexp_replace(upper(coalesce(deleted_uf.display_flight_number, '')), '[^A-Z0-9]', '', 'g')
+                   = regexp_replace(upper(coalesce(uf.display_flight_number, '')), '[^A-Z0-9]', '', 'g')
+                 and upper(coalesce(deleted_uf.origin_iata, '')) = upper(coalesce(uf.origin_iata, ''))
+                 and upper(coalesce(deleted_uf.destination_iata, '')) = upper(coalesce(uf.destination_iata, ''))
+                 and abs(extract(epoch from (deleted_uf.scheduled_departure - uf.scheduled_departure))) <= 1800
+             )
              and coalesce((uf.alert_preferences ->> $2)::boolean, false) = true
              and ${ownerCondition}
              ${tripStartingCondition}
@@ -1034,6 +1070,18 @@ function createPostgresSharedFlightRepository(pool) {
            where uf.flight_instance_id = $1
              and uf.deleted_at is null
              and coalesce(uf.lifecycle_state, '') <> 'deleted'
+             and not exists (
+               select 1
+               from public.user_flights deleted_uf
+               where deleted_uf.user_id = uf.user_id
+                 and deleted_uf.deleted_at is not null
+                 and deleted_uf.deleted_at >= uf.created_at
+                 and regexp_replace(upper(coalesce(deleted_uf.display_flight_number, '')), '[^A-Z0-9]', '', 'g')
+                   = regexp_replace(upper(coalesce(uf.display_flight_number, '')), '[^A-Z0-9]', '', 'g')
+                 and upper(coalesce(deleted_uf.origin_iata, '')) = upper(coalesce(uf.origin_iata, ''))
+                 and upper(coalesce(deleted_uf.destination_iata, '')) = upper(coalesce(uf.destination_iata, ''))
+                 and abs(extract(epoch from (deleted_uf.scheduled_departure - uf.scheduled_departure))) <= 1800
+             )
              and fr.relationship_status = 'active'
              and fp.can_view_live = true
              and fp.can_receive_alerts = true

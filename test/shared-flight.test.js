@@ -578,6 +578,40 @@ test("deleting a saved flight removes owner and circle notification artifacts", 
   assert.equal(repository.__memory.deliveries.size, 0);
 });
 
+test("notification fanout rejects an active canonical row when a normalized deleted twin exists", async () => {
+  const { service, repository } = makeService();
+  const saved = await service.saveUserFlight("u1", {
+    airline: "SQ",
+    number: "509",
+    date: "2026-05-27",
+    origin: "BLR",
+    destination: "SIN",
+  });
+  const active = saved.userFlight;
+  const deletedAt = new Date(Date.parse(active.created_at) + 1_000).toISOString();
+
+  repository.__memory.userFlights.set("deleted-local-copy", {
+    ...active,
+    id: "deleted-local-copy",
+    flight_instance_id: null,
+    display_flight_number: "SQ509",
+    lifecycle_state: "deleted",
+    notification_enabled: false,
+    notifications_enabled: false,
+    deleted_at: deletedAt,
+    updated_at: deletedAt,
+  });
+
+  const targets = await repository.listNotificationTargets(
+    saved.flight.flightInstanceId,
+    "low",
+    "TRIP_STARTING"
+  );
+
+  assert.equal(active.display_flight_number, "SQ 509");
+  assert.equal(targets.length, 0);
+});
+
 test("stream update targets can be found by provider id or canonical flight number", async () => {
   const repository = createMemorySharedFlightRepository();
   const row = await repository.upsertFlightFromNormalized(normalizedFlight(), {
