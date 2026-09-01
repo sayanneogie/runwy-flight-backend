@@ -56,6 +56,52 @@ const ARRIVAL_DETAIL_CHECKPOINTS = [
   { stage: "post-30m", offsetMs: 30 * 60_000 },
 ];
 
+function normalizedBreadcrumb(point) {
+  const latitude = Number(point?.latitude ?? point?.lat);
+  const longitude = Number(point?.longitude ?? point?.lon);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  return {
+    latitude,
+    longitude,
+    headingDegrees: point?.headingDegrees ?? point?.heading ?? null,
+    groundSpeedKnots: point?.groundSpeedKnots ?? point?.groundSpeed ?? null,
+    altitudeFeet: point?.altitudeFeet ?? point?.altitude ?? null,
+    recordedAt: point?.recordedAt || null,
+  };
+}
+
+function accumulatedBreadcrumbs(previous, incoming) {
+  const candidates = [
+    ...(Array.isArray(previous?.trackPoints) ? previous.trackPoints : []),
+    previous?.position,
+    previous?.livePosition,
+    ...(Array.isArray(incoming?.trackPoints) ? incoming.trackPoints : []),
+    incoming?.position,
+    incoming?.livePosition,
+  ].map(normalizedBreadcrumb).filter(Boolean);
+
+  candidates.sort((left, right) => {
+    const leftMs = Date.parse(left.recordedAt || "");
+    const rightMs = Date.parse(right.recordedAt || "");
+    return (Number.isFinite(leftMs) ? leftMs : 0) - (Number.isFinite(rightMs) ? rightMs : 0);
+  });
+
+  const result = [];
+  for (const point of candidates) {
+    const last = result[result.length - 1];
+    if (
+      last &&
+      Math.abs(last.latitude - point.latitude) < 0.0001 &&
+      Math.abs(last.longitude - point.longitude) < 0.0001
+    ) {
+      result[result.length - 1] = point;
+    } else {
+      result.push(point);
+    }
+  }
+  return result.slice(-2_000);
+}
+
 function preserveKnownOperationalFields(normalized, row) {
   const previous = row?.normalized_data || {};
   const preferred = (next, fallback) => {
@@ -100,8 +146,10 @@ function preserveKnownOperationalFields(normalized, row) {
     return merged;
   };
 
+  const trackPoints = accumulatedBreadcrumbs(previous, normalized);
   return {
     ...normalized,
+    trackPoints,
     gate: preferred(normalized?.gate, row?.gate ?? previous.gate),
     terminal: preferred(normalized?.terminal, row?.terminal ?? previous.terminal),
     departureGate: preferred(

@@ -29,6 +29,25 @@ test("active tracking reserve propagates to live position and track calls", () =
   assert.equal(__test__.flightAwareTelemetryBudgetEndpoint({}, "track"), "track");
 });
 
+test("FlightAware top-level track arrays produce the complete flown breadcrumb history", () => {
+  const payload = [
+    { timestamp: "2026-09-01T12:00:00Z", lat: 21.68, lon: 39.15, altitude: 120, groundspeed: 260 },
+    { timestamp: "2026-09-01T15:00:00Z", lat: 10.45, lon: 76.24, altitude: 370, groundspeed: 428 },
+  ];
+
+  const points = __test__.flightAwareTrackCandidatesFromPayload(payload)
+    .map(__test__.normalizeFlightAwareTrackPoint);
+
+  assert.equal(points.length, 2);
+  assert.deepEqual(
+    points.map(({ latitude, longitude, altitudeFeet }) => ({ latitude, longitude, altitudeFeet })),
+    [
+      { latitude: 21.68, longitude: 39.15, altitudeFeet: 12_000 },
+      { latitude: 10.45, longitude: 76.24, altitudeFeet: 37_000 },
+    ]
+  );
+});
+
 test("shared-flight tracking projection keeps resolved inbound aircraft details", () => {
   const inboundFlight = {
     providerFlightId: "DAL2521-instance",

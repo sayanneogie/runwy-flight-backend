@@ -223,6 +223,39 @@ test("shared refresh preserves known gates when the provider temporarily omits t
   assert.equal(merged.arrivalTerminal, "1");
 });
 
+test("shared refresh accumulates real provider positions into the flown breadcrumb trail", () => {
+  const merged = preserveKnownOperationalFields(
+    normalizedFlight({
+      status: "enroute",
+      position: {
+        lat: 12.68033,
+        lon: 81.78772,
+        heading: 113,
+        recordedAt: "2026-09-01T19:49:46.000Z",
+      },
+    }),
+    {
+      normalized_data: {
+        status: "enroute",
+        position: {
+          lat: 14.20244,
+          lon: 78.35589,
+          heading: 112,
+          recordedAt: "2026-09-01T19:19:44.000Z",
+        },
+      },
+    }
+  );
+
+  assert.deepEqual(
+    merged.trackPoints.map(({ latitude, longitude }) => ({ latitude, longitude })),
+    [
+      { latitude: 14.20244, longitude: 78.35589 },
+      { latitude: 12.68033, longitude: 81.78772 },
+    ]
+  );
+});
+
 test("shared refresh preserves resolved inbound details when the provider returns only its ID", () => {
   const estimatedArrival = "2026-09-01T08:26:00.000Z";
   const merged = preserveKnownOperationalFields(

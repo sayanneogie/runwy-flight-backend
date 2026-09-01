@@ -2615,6 +2615,10 @@ function normalizeFlightAwareTrackPoint(record) {
 function flightAwareTrackCandidatesFromPayload(payload) {
   if (!payload || typeof payload !== "object") return [];
 
+  // AeroAPI's flight-track response is a top-level array. Other FlightAware
+  // surfaces wrap the same records in `positions`, `track`, or GeoJSON.
+  if (Array.isArray(payload)) return payload;
+
   const candidates = [];
 
   if (Array.isArray(payload.positions)) candidates.push(...payload.positions);
@@ -7534,9 +7538,21 @@ app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req,
     // Only explicit final-route capture (`final`) or an internal repair
     // (`force`) may bypass the shared cache.
     const forceDetailRefresh = shouldForceTrackTrailRefreshMode(req.query?.refresh);
-    const trackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId, {
+    const providerTrackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId, {
       forceRefresh: forceDetailRefresh,
     });
+    const canonicalTrackPoints = typeof sharedFlightRepository?.listTrackPointsForProviderFlightId === "function"
+      ? await sharedFlightRepository.listTrackPointsForProviderFlightId(providerFlightId)
+      : [];
+    const trackPoints = mergeTrackPoints(
+      canonicalTrackPoints,
+      providerTrackTrail.trackPoints,
+      providerTrackTrail.livePosition
+    ) || [];
+    const trackTrail = {
+      trackPoints,
+      livePosition: providerTrackTrail.livePosition || latestTrackPoint(trackPoints),
+    };
     return res.json({
       providerFlightId,
       trackPoints: Array.isArray(trackTrail.trackPoints) ? trackTrail.trackPoints : [],
@@ -7728,6 +7744,8 @@ module.exports = {
     flightAwareHistoryBounds,
     flightAwareDailyBudgetLimitForEndpoint,
     flightAwareTelemetryBudgetEndpoint,
+    flightAwareTrackCandidatesFromPayload,
+    normalizeFlightAwareTrackPoint,
     flightAwareScheduleQueryItems,
     flightAwareRecordMatchesRequestedFlight,
     fetchFlightAwareSearchSources,

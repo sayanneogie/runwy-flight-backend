@@ -84,6 +84,22 @@ function createMemorySharedFlightRepository() {
         );
       });
     },
+    async listTrackPointsForProviderFlightId(providerFlightId) {
+      return [...flights.values()]
+        .filter((row) => row.provider_flight_id === providerFlightId)
+        .flatMap((row) => [
+          ...(Array.isArray(row.normalized_data?.trackPoints) ? row.normalized_data.trackPoints : []),
+          row.position_lat != null && row.position_lon != null ? {
+            latitude: row.position_lat,
+            longitude: row.position_lon,
+            headingDegrees: row.heading,
+            groundSpeedKnots: row.ground_speed,
+            altitudeFeet: row.altitude,
+            recordedAt: row.normalized_data?.position?.recordedAt || row.updated_at,
+          } : null,
+        ])
+        .filter(Boolean);
+    },
     async listInboundUpdateTargets({ providerFlightId, flightNumber }) {
       const normalizedFlightNumber = String(flightNumber || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
       return [...flights.values()].filter((row) => {
@@ -636,6 +652,32 @@ function createPostgresSharedFlightRepository(pool) {
          order by last_stream_event_at desc nulls last, updated_at desc
          limit 20`,
         [providerFlightId || null, normalizedFlightNumber, departureDate || null]
+      );
+      return result.rows;
+    },
+    async listTrackPointsForProviderFlightId(providerFlightId) {
+      if (!providerFlightId) return [];
+      const result = await pool.query(
+        `select latitude, longitude, "headingDegrees", "groundSpeedKnots", "altitudeFeet", "recordedAt"
+         from (
+           select distinct on (round(fs.position_lat::numeric, 4), round(fs.position_lon::numeric, 4))
+             fs.position_lat as latitude,
+             fs.position_lon as longitude,
+             fs.heading as "headingDegrees",
+             fs.ground_speed as "groundSpeedKnots",
+             fs.altitude as "altitudeFeet",
+             coalesce(nullif(fs.normalized_data #>> '{position,recordedAt}', ''), fs.created_at::text) as "recordedAt",
+             fs.created_at
+           from public.flight_snapshots fs
+           join public.flight_instances fi on fi.id = fs.flight_instance_id
+           where fi.provider_flight_id = $1
+             and fs.position_lat is not null
+             and fs.position_lon is not null
+           order by round(fs.position_lat::numeric, 4), round(fs.position_lon::numeric, 4), fs.created_at desc
+         ) points
+         order by created_at asc
+         limit 5000`,
+        [providerFlightId]
       );
       return result.rows;
     },
