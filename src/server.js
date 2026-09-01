@@ -6958,6 +6958,7 @@ function trackedPayloadFromSharedFlight(flight) {
   ]);
 
   return {
+    flightInstanceId: flight.flightInstanceId || flight.id || null,
     stateRevision: Number(flight.stateRevision || flight.state_revision || 0),
     airlineCode: flight.airlineCode || null,
     providerFlightId: flight.providerFlightId || null,
@@ -7021,6 +7022,25 @@ function trackedPayloadFromSharedFlight(flight) {
     dataConfidence: flight.dataConfidence || null,
     lastUpdated: flight.lastUpdatedAt || new Date().toISOString(),
   };
+}
+
+function sharedFlightForDetailID(sharedRows, requestedID) {
+  const rows = Array.isArray(sharedRows) ? sharedRows : [];
+  const exact = rows.find((item) => item?.flight?.flightInstanceId === requestedID);
+  if (exact) return exact;
+
+  // Older iOS builds assigned live search previews synthetic IDs such as
+  // `search-0-QP1824`. Those IDs cannot address /v1/flights/:id, so detail
+  // refresh silently fell back to the device cache. Resolve the compatibility
+  // ID only when it identifies exactly one of this user's saved shared flights.
+  const match = String(requestedID || "").match(/^search-\d+-([A-Z0-9]+)$/i);
+  if (!match) return null;
+  const requestedCode = normalizeFlightCode(match[1]);
+  const matches = rows.filter((item) => {
+    const flight = item?.flight || {};
+    return normalizeFlightCode(`${flight.airlineCode || ""}${flight.flightNumber || ""}`) === requestedCode;
+  });
+  return matches.length === 1 ? matches[0] : null;
 }
 
 async function syncBridgedTrackingStateFromSharedFlight(flight) {
@@ -7315,7 +7335,7 @@ app.get("/v1/flights/:flightId", async (req, res) => {
     const tracked = await fetchAccessibleTrackingRow(flightId, userId);
     if (!tracked) {
       const sharedRows = sharedFlightService ? await sharedFlightService.listUserFlights(userId) : [];
-      const shared = sharedRows.find((item) => item.flight?.flightInstanceId === flightId);
+      const shared = sharedFlightForDetailID(sharedRows, flightId);
       if (!shared?.flight) {
         return res.status(404).json({ error: "Unknown flightId" });
       }
@@ -7735,6 +7755,7 @@ module.exports = {
     shouldRefreshTrackedRecordFromWebhook,
     testPushNotificationPayload,
     trackedPayloadFromSharedFlight,
+    sharedFlightForDetailID,
     trackedProviderRefreshOptions,
     updateFlightAwareAlert,
     webhookStatusFromEvent,

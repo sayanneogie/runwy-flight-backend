@@ -832,6 +832,25 @@ test("scoreCandidate prioritizes a completed occurrence over a stale taxiing mat
   assert.ok(landedScore > staleTaxiingScore);
 });
 
+test("legacy synthetic search IDs resolve one saved shared flight for detail refresh", () => {
+  const shared = {
+    flight: {
+      flightInstanceId: "d522f81d-40b9-467b-9df0-aa12c83d4c8e",
+      airlineCode: "QP",
+      flightNumber: "1824",
+    },
+  };
+
+  assert.equal(
+    __test__.sharedFlightForDetailID([shared], "search-0-QP1824"),
+    shared
+  );
+  assert.equal(
+    __test__.sharedFlightForDetailID([shared, { flight: { ...shared.flight, flightInstanceId: "other" } }], "search-0-QP1824"),
+    null
+  );
+});
+
 test("flightAwareHistoryBounds widens to UTC day coverage for the selected local day", () => {
   assert.deepEqual(__test__.flightAwareHistoryBounds("2026-04-23", 330), {
     start: "2026-04-22",
