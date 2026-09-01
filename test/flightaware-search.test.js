@@ -24,6 +24,11 @@ test("FlightAware reserves bounded capacity for user searches", () => {
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("schedules"), 600);
 });
 
+test("active tracking reserve propagates to live position and track calls", () => {
+  assert.equal(__test__.flightAwareTelemetryBudgetEndpoint({ budgetEndpoint: "tracked_flight" }, "position"), "tracked_flight");
+  assert.equal(__test__.flightAwareTelemetryBudgetEndpoint({}, "track"), "track");
+});
+
 test("shared-flight tracking projection keeps resolved inbound aircraft details", () => {
   const inboundFlight = {
     providerFlightId: "DAL2521-instance",

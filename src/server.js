@@ -2712,6 +2712,10 @@ function mergeFlightAwareTrackTrailIntoNormalized(normalized, { trackPoints, liv
   });
 }
 
+function flightAwareTelemetryBudgetEndpoint(options, fallbackEndpoint) {
+  return String(options?.budgetEndpoint || "").trim() || fallbackEndpoint;
+}
+
 async function fetchFlightAwareTrackTrail(providerFlightId, options = {}) {
   if (!PROVIDER_CALLS_ENABLED) {
     return { trackPoints: [], livePosition: null };
@@ -2740,7 +2744,7 @@ async function fetchFlightAwareTrackTrail(providerFlightId, options = {}) {
           Accept: "application/json",
         },
       },
-      { endpoint: "track" }
+      { endpoint: flightAwareTelemetryBudgetEndpoint(options, "track") }
     );
 
     if ([400, 401, 403, 404].includes(response.status)) {
@@ -2897,7 +2901,15 @@ async function fetchFlightAwareLivePosition(providerFlightId, options = {}) {
           "x-apikey": FLIGHTAWARE_API_KEY,
           Accept: "application/json",
         },
-      }, { endpoint: path.endsWith("/track") ? "track_fallback" : path.endsWith("/map") ? "map_fallback" : "position" });
+      }, {
+        endpoint: flightAwareTelemetryBudgetEndpoint(options, (
+          path.endsWith("/track")
+            ? "track_fallback"
+            : path.endsWith("/map")
+              ? "map_fallback"
+              : "position"
+        )),
+      });
 
       if ([400, 401, 403, 404].includes(response.status)) {
         continue;
@@ -7688,6 +7700,7 @@ module.exports = {
     flightAwareOperationalBounds,
     flightAwareHistoryBounds,
     flightAwareDailyBudgetLimitForEndpoint,
+    flightAwareTelemetryBudgetEndpoint,
     flightAwareScheduleQueryItems,
     flightAwareRecordMatchesRequestedFlight,
     fetchFlightAwareSearchSources,
