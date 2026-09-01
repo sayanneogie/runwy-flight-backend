@@ -1972,6 +1972,72 @@ test("departure catchup performs one live refresh after overdue departure", asyn
   assert.equal(row.actual_departure_at, departure);
 });
 
+test("overdue schedule provider ID rebinds to the live operating occurrence", async () => {
+  const departure = new Date(Date.now() - 30 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 90 * 60_000).toISOString();
+  let exactProviderCalls = 0;
+  const { service, repository, providerCalls } = makeService((calls) => calls === 1
+    ? normalizedFlight({
+        providerFlightId: "IGO481-schedule",
+        airlineCode: "6E",
+        flightNumber: "481",
+        origin: "AMD",
+        destination: "BLR",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+      })
+    : normalizedFlight({
+        providerFlightId: "IGO23EC-operational",
+        airlineCode: "6E",
+        flightNumber: "481",
+        origin: "AMD",
+        destination: "BLR",
+        status: "enroute",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        position: { lat: 18.4, lon: 74.1, altitude: 37_025, groundSpeed: 431, heading: 160 },
+      }), {
+    fetchFlightByProviderId: async () => {
+      exactProviderCalls += 1;
+      return normalizedFlight({
+        providerFlightId: "IGO481-schedule",
+        airlineCode: "6E",
+        flightNumber: "481",
+        origin: "AMD",
+        destination: "BLR",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+      });
+    },
+  });
+
+  const flight = await service.searchFlight({
+    airline: "6E",
+    number: "481",
+    date: departure.slice(0, 10),
+    origin: "AMD",
+    destination: "BLR",
+  });
+  await service.departureCatchupJob({
+    data: { flight_instance_id: flight.flightInstanceId, stage: "restart_recovery" },
+  });
+
+  const row = await repository.findFlightById(flight.flightInstanceId);
+  assert.equal(exactProviderCalls, 1);
+  assert.equal(providerCalls(), 2);
+  assert.equal(row.provider_flight_id, "IGO23EC-operational");
+  assert.equal(row.status, "enroute");
+  assert.equal(row.actual_departure_at, departure);
+  assert.equal(row.altitude, 37_025);
+});
+
 test("departure catchup still refreshes after gate-out while takeoff is unconfirmed", async () => {
   const departure = new Date(Date.now() - 4 * 60_000).toISOString();
   const arrival = new Date(Date.now() + 2 * 60 * 60_000).toISOString();

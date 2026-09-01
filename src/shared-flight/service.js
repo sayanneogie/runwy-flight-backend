@@ -308,9 +308,38 @@ function createSharedFlightService({
         forceRefresh: reason === "forced" || reason.startsWith("provider_alert_position"),
         skipLivePosition: isOperationalDetailsRefreshReason(job.data.reason),
       };
-      const providerNormalized = row.provider_flight_id && provider.supportsProviderId && provider.fetchFlightByProviderId
+      let providerNormalized = row.provider_flight_id && provider.supportsProviderId && provider.fetchFlightByProviderId
         ? await provider.fetchFlightByProviderId(row.provider_flight_id, providerOptions)
-        : await provider.fetchFlightByNumber(params, providerOptions);
+        : null;
+
+      // FlightAware can publish the schedule and the eventual operating flight
+      // under different provider IDs (for example 6E481 later operating with
+      // callsign IGO23EC). Once the saved schedule is overdue, an exact lookup
+      // can remain permanently scheduled even though a number/route lookup has
+      // an airborne occurrence. Re-resolve only in that narrow state, and only
+      // adopt a replacement that has operational departure evidence and still
+      // passes the original flight identity validation below.
+      const shouldResolveOperationalReplacement =
+        !providerNormalized ||
+        (
+          isOperationallyOverdueWithoutTakeoff(row) &&
+          !hasOperationalDepartureEvidence(providerNormalized)
+        );
+      if (shouldResolveOperationalReplacement) {
+        const resolvedByNumber = await provider.fetchFlightByNumber(params, {
+          ...providerOptions,
+          forceRefresh: true,
+        });
+        if (
+          resolvedByNumber &&
+          (
+            !providerNormalized ||
+            hasOperationalDepartureEvidence(resolvedByNumber)
+          )
+        ) {
+          providerNormalized = resolvedByNumber;
+        }
+      }
       if (!providerNormalized) {
         await repository.logApiUsage({ provider: provider.name, endpoint: "refreshFlightJob", flight_key: row.flight_key, response_time_ms: Date.now() - startedAt, error: "no_match" });
         return row;
@@ -1592,6 +1621,37 @@ function isOperationallyOverdueWithoutTakeoff(row, nowMs = Date.now()) {
   if (actualTakeoff || hasAirbornePosition) return false;
   const departureMs = new Date(row?.estimated_departure_at || row?.scheduled_departure_at || "").getTime();
   return Number.isFinite(departureMs) && nowMs - departureMs >= 2 * 60_000;
+}
+
+function hasOperationalDepartureEvidence(normalized) {
+  const status = String(normalized?.status || "").toLowerCase();
+  if ([
+    "taxiing",
+    "taxi_out",
+    "takeoff_roll",
+    "departed",
+    "airborne",
+    "enroute",
+    "climb",
+    "cruise",
+    "descent",
+    "approaching",
+    "taxi_in",
+    "landed",
+    "arrived",
+    "arrived_at_gate",
+  ].includes(status)) {
+    return true;
+  }
+  if (normalized?.actualDepartureAt || normalized?.departureTimes?.actual || normalized?.takeoffTimes?.actual) {
+    return true;
+  }
+
+  const position = normalized?.position || normalized?.livePosition || {};
+  const altitude = Number(position.altitude ?? position.altitudeFeet);
+  const groundSpeed = Number(position.groundSpeed ?? position.groundSpeedKnots);
+  return (Number.isFinite(altitude) && altitude > 300) ||
+    (Number.isFinite(altitude) && altitude > 150 && Number.isFinite(groundSpeed) && groundSpeed > 80);
 }
 
 function shouldRecoverMissedDeparture(row, nowMs = Date.now()) {
