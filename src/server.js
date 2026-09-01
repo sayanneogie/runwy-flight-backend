@@ -7532,7 +7532,12 @@ app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req,
     return res.status(400).json({ error: "Missing provider flight id" });
   }
 
+  let canonicalTrackPoints = [];
   try {
+    canonicalTrackPoints = typeof sharedFlightRepository?.listTrackPointsForProviderFlightId === "function"
+      ? await sharedFlightRepository.listTrackPointsForProviderFlightId(providerFlightId)
+      : [];
+
     // Old clients used `refresh=detail` every two minutes. Honoring that as a
     // cache bypass multiplied one open map into thousands of paid AeroAPI calls.
     // Only explicit final-route capture (`final`) or an internal repair
@@ -7541,9 +7546,6 @@ app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req,
     const providerTrackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId, {
       forceRefresh: forceDetailRefresh,
     });
-    const canonicalTrackPoints = typeof sharedFlightRepository?.listTrackPointsForProviderFlightId === "function"
-      ? await sharedFlightRepository.listTrackPointsForProviderFlightId(providerFlightId)
-      : [];
     const trackPoints = mergeTrackPoints(
       canonicalTrackPoints,
       providerTrackTrail.trackPoints,
@@ -7563,7 +7565,22 @@ app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req,
       providerFlightId,
       error: error?.message || String(error),
     });
-    return res.status(502).json({ error: "Failed to fetch provider track" });
+    // Provider quotas and transient outages must not erase an accumulated
+    // Firehose/canonical trail that Runwy already owns. Returning the saved
+    // breadcrumbs also prevents clients from retrying the paid endpoint in a
+    // tight loop merely because enrichment is temporarily unavailable.
+    if (canonicalTrackPoints.length > 0) {
+      return res.json({
+        providerFlightId,
+        trackPoints: canonicalTrackPoints,
+        livePosition: latestTrackPoint(canonicalTrackPoints),
+        source: "canonical_fallback",
+      });
+    }
+    const statusCode = error?.code === "FLIGHTAWARE_DAILY_BUDGET_EXHAUSTED"
+      ? 429
+      : 502;
+    return res.status(statusCode).json({ error: "Failed to fetch provider track" });
   }
 });
 
