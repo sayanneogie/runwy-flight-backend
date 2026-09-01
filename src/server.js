@@ -5054,8 +5054,12 @@ function liveActivityDate(value) {
   return Number.isFinite(unixSeconds) ? unixSeconds - 978307200 : null;
 }
 
-function liveActivityPhase(flight) {
-  const canonical = deriveFlightLifecyclePhase(flight).phase;
+function liveActivityPhase(flight, now = new Date()) {
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const canonical = deriveFlightLifecyclePhase(
+    flight,
+    Number.isFinite(nowMs) ? nowMs : Date.now()
+  ).phase;
   const normalizedCanonical = String(canonical || flight.status || "scheduled").toLowerCase();
   const reportedProgress = Number(flight.normalized_data?.progressPercent);
   const normalizedProgress = Number.isFinite(reportedProgress)
@@ -5146,7 +5150,7 @@ function liveActivityAirborneProgress(flight, now = new Date()) {
 
 function liveActivityContentState(flight, now = new Date()) {
   const normalized = flight.normalized_data || {};
-  const phase = liveActivityPhase(flight);
+  const phase = liveActivityPhase(flight, now);
   const departureScheduled = flight.scheduled_departure_at;
   const departureEstimated = flight.actual_departure_at || flight.estimated_departure_at || departureScheduled;
   const arrivalScheduled = flight.scheduled_arrival_at;
@@ -5203,7 +5207,7 @@ function liveActivityContentState(flight, now = new Date()) {
 }
 
 function liveActivityStaleDateUnix(flight, now = new Date()) {
-  const phase = liveActivityPhase(flight);
+  const phase = liveActivityPhase(flight, now);
   const normalized = flight.normalized_data || {};
   const departureTarget = flight.actual_departure_at
     || flight.estimated_departure_at
@@ -5229,7 +5233,7 @@ function isPermanentLiveActivityTokenFailure(response) {
 }
 
 function shouldEndLiveActivity(flight, now = new Date()) {
-  const phase = liveActivityPhase(flight);
+  const phase = liveActivityPhase(flight, now);
   if (["cancelled", "diverted"].includes(phase)) return true;
   if (phase !== "arrivedAtGate") return false;
 
@@ -5305,7 +5309,7 @@ async function sendLiveActivityStateForFlight(flight) {
       token.snapshot_baggage,
       token.snapshot_revision
     );
-    const phase = liveActivityPhase(deliveryFlight);
+    const phase = liveActivityPhase(deliveryFlight, now);
     const shouldEnd = shouldEndLiveActivity(deliveryFlight, now);
     if (!shouldSendInitialLiveActivityState(phase, token.last_content_phase)) {
       skippedRegressive += 1;

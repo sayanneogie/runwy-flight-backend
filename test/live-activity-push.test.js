@@ -90,7 +90,10 @@ test("Live Activity delivery overlays a linked tracking snapshot onto a stale sh
     new Date("2026-09-01T12:36:05.000Z")
   );
 
-  assert.equal(__test__.liveActivityPhase(deliveryFlight), "cruise");
+  assert.equal(
+    __test__.liveActivityPhase(deliveryFlight, new Date("2026-09-01T12:36:05.000Z")),
+    "cruise"
+  );
   assert.equal(state.phase, "cruise");
   assert.equal(state.baggageClaim, "6A");
   assert.ok(state.progress > 0.20, `expected airborne progress, received ${state.progress}`);
@@ -115,7 +118,10 @@ test("Live Activity delivery cannot overlay an older projection revision", () =>
     11
   );
   assert.equal(delivery, sharedFlight);
-  assert.equal(__test__.liveActivityPhase(delivery), "cruise");
+  assert.equal(
+    __test__.liveActivityPhase(delivery, new Date("2026-09-01T12:36:05.000Z")),
+    "cruise"
+  );
 });
 
 test("Live Activity progress follows an airborne flight toward arrival", () => {
