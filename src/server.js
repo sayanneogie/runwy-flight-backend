@@ -7,7 +7,7 @@ const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const { Pool } = require("pg");
 const { version: PACKAGE_VERSION = "0.0.0" } = require("../package.json");
-const { getAirportCatalog } = require("./airport-catalog");
+const { airportCodesForCity, getAirportCatalog } = require("./airport-catalog");
 const {
   validatePushTokenPayload,
   validateSearchQuery,
@@ -5366,13 +5366,23 @@ function notificationDedupeKey(flightId, event) {
 async function arrivalVisitOrdinalForUser(userId, flightId, destinationIata) {
   if (!usesDatabase() || !userId || !destinationIata) return null;
 
+  const destinationCodes = airportCodesForCity(destinationIata);
+
   const result = await pool.query(
     `
-    select count(distinct uf.id)::int as visits
+    select count(distinct concat_ws(
+      '|',
+      regexp_replace(upper(coalesce(uf.display_flight_number, '')), '[^A-Z0-9]', '', 'g'),
+      upper(coalesce(uf.origin_iata, '')),
+      coalesce(
+        (coalesce(uf.scheduled_departure, uf.actual_departure) at time zone 'UTC')::date::text,
+        uf.id::text
+      )
+    ))::int as visits
     from public.user_flights uf
     where uf.user_id = $1::uuid
-      and upper(coalesce(uf.destination_iata, '')) = upper($2)
-      and uf.source_type = 'travelled_archive'
+      and upper(coalesce(uf.destination_iata, '')) = any($2::text[])
+      and uf.source_type <> 'tracked'
       and uf.deleted_at is null
       and uf.tracking_session_id is distinct from $3::uuid
       and (
@@ -5380,7 +5390,7 @@ async function arrivalVisitOrdinalForUser(userId, flightId, destinationIata) {
         or uf.actual_arrival is not null
       )
     `,
-    [userId, destinationIata, flightId]
+    [userId, destinationCodes, flightId]
   );
 
   return Number(result.rows[0]?.visits || 0) + 1;

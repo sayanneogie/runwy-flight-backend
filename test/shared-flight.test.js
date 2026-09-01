@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const { createFlightCache, createMemoryRedis } = require("../src/shared-flight/cache");
+const { airportCodesForCity } = require("../src/airport-catalog");
 const { createMemorySharedFlightRepository } = require("../src/shared-flight/repository");
 const { createSharedFlightService, preserveKnownOperationalFields, isOlderStreamEvent } = require("../src/shared-flight/service");
 const { createProviderAdapter } = require("../src/shared-flight/provider-adapter");
@@ -159,6 +160,38 @@ function makeService(providerFlight = normalizedFlight(), options = {}) {
   });
   return { service, repository, providerCalls: () => calls, providerOptions };
 }
+
+test("arrival visit ordinal counts every completed travel source and deduplicates copies", async () => {
+  const repository = createMemorySharedFlightRepository();
+  const rows = repository.__memory.userFlights;
+  const base = {
+    user_id: "traveler",
+    origin_iata: "BOM",
+    destination_iata: "DEL",
+    display_flight_number: "AI 101",
+    scheduled_departure: "2026-01-10T04:00:00.000Z",
+    lifecycle_state: "archived",
+    deleted_at: null,
+  };
+
+  rows.set("recovered", { ...base, id: "recovered", source_type: "manual_recovery" });
+  rows.set("duplicate", { ...base, id: "duplicate", source_type: "history_snapshot" });
+  rows.set("older", {
+    ...base,
+    id: "older",
+    source_type: "calendar_import",
+    scheduled_departure: "2025-06-02T04:00:00.000Z",
+  });
+  rows.set("observer", {
+    ...base,
+    id: "observer",
+    source_type: "tracked",
+    scheduled_departure: "2024-03-01T04:00:00.000Z",
+  });
+
+  assert.deepEqual(airportCodesForCity("DEL"), ["DEL"]);
+  assert.equal(await repository.arrivalVisitOrdinalForUser("traveler", "DEL"), 3);
+});
 
 test("shared refresh preserves known gates when the provider temporarily omits them", () => {
   const merged = preserveKnownOperationalFields(

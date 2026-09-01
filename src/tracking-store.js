@@ -185,6 +185,36 @@ function createTrackingStore({
         throw new Error("Authenticated user is required to register push devices");
       }
 
+      // APNs may rotate a token after reinstall or restore. Retire every older
+      // token tied to this physical Runwy device before activating the new one,
+      // otherwise one arrival event is delivered once per historical token.
+      await pool.query(
+        `
+        update public.device_tokens
+        set is_active = false, updated_at = now()
+        where user_id = $2::uuid
+          and device_token <> $1
+          and device_token in (
+            select apns_token
+            from public.push_devices
+            where user_id = $2::uuid
+              and device_id = $3
+          )
+        `,
+        [apnsToken, userId, deviceId]
+      );
+
+      await pool.query(
+        `
+        update public.push_devices
+        set push_enabled = false, updated_at = now()
+        where user_id = $2::uuid
+          and device_id = $3
+          and apns_token <> $1
+        `,
+        [apnsToken, userId, deviceId]
+      );
+
       await pool.query(
         `
         insert into public.push_devices (apns_token, user_id, device_id, platform, push_enabled, updated_at)

@@ -81,6 +81,27 @@ function makeNormalized(overrides = {}) {
   };
 }
 
+test("push registration retires older APNs tokens for the same device", async () => {
+  const { store, queries } = makeStore();
+
+  await store.upsertPushDevice({
+    apnsToken: "new-token",
+    deviceId: "device-1",
+    userId: "11111111-1111-4111-8111-111111111111",
+    platform: "ios",
+  });
+
+  assert.equal(queries.length, 3);
+  assert.match(queries[0].sql, /update public\.device_tokens/);
+  assert.match(queries[1].sql, /update public\.push_devices/);
+  assert.match(queries[2].sql, /insert into public\.push_devices/);
+  assert.deepEqual(queries[0].params, [
+    "new-token",
+    "11111111-1111-4111-8111-111111111111",
+    "device-1",
+  ]);
+});
+
 function trackingSessionUpdateParams(queries) {
   const update = queries.find(({ sql }) => sql.includes("update public.tracking_sessions"));
   assert.ok(update, "expected tracking session update query");

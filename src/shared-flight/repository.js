@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { airportCodesForCity } = require("../airport-catalog");
 const { mapNormalizedToDb } = require("./state");
 
 const DEFAULT_ALERT_PREFERENCES = Object.freeze({
@@ -402,15 +403,28 @@ function createMemorySharedFlightRepository() {
         }));
     },
     async arrivalVisitOrdinalForUser(userId, destinationIata, currentUserFlightId = null) {
-      const visits = [...userFlights.values()].filter((row) =>
-        row.user_id === userId &&
-        row.id !== currentUserFlightId &&
-        String(row.destination_iata || "").toUpperCase() === String(destinationIata || "").toUpperCase() &&
-        row.source_type === "travelled_archive" &&
-        !row.deleted_at &&
-        (row.lifecycle_state === "landed" || row.lifecycle_state === "archived" || row.actual_arrival)
-      ).length;
-      return visits + 1;
+      const destinationCodes = new Set(airportCodesForCity(destinationIata));
+      const occurrences = new Set(
+        [...userFlights.values()]
+          .filter((row) =>
+            row.user_id === userId &&
+            row.id !== currentUserFlightId &&
+            destinationCodes.has(String(row.destination_iata || "").toUpperCase()) &&
+            row.source_type !== "tracked" &&
+            !row.deleted_at &&
+            (row.lifecycle_state === "landed" || row.lifecycle_state === "archived" || row.actual_arrival)
+          )
+          .map((row) => {
+            const flightNumber = normalizedFlightNumber(row.display_flight_number);
+            const origin = String(row.origin_iata || "").toUpperCase();
+            const departure = new Date(row.scheduled_departure || row.actual_departure || row.created_at || 0);
+            const departureDay = Number.isFinite(departure.getTime())
+              ? departure.toISOString().slice(0, 10)
+              : String(row.id || "");
+            return `${flightNumber}|${origin}|${departureDay}`;
+          })
+      );
+      return occurrences.size + 1;
     },
     async isUserFlightNotificationActive(ownerUserId, userFlightId) {
       const row = [...userFlights.values()].find((item) =>
@@ -1227,19 +1241,28 @@ function createPostgresSharedFlightRepository(pool) {
       }));
     },
     async arrivalVisitOrdinalForUser(userId, destinationIata, currentUserFlightId = null) {
+      const destinationCodes = airportCodesForCity(destinationIata);
       const result = await pool.query(
-        `select count(distinct uf.id)::int as visits
+        `select count(distinct concat_ws(
+           '|',
+           regexp_replace(upper(coalesce(uf.display_flight_number, '')), '[^A-Z0-9]', '', 'g'),
+           upper(coalesce(uf.origin_iata, '')),
+           coalesce(
+             (coalesce(uf.scheduled_departure, uf.actual_departure) at time zone 'UTC')::date::text,
+             uf.id::text
+           )
+         ))::int as visits
          from public.user_flights uf
          where uf.user_id = $1::uuid
-           and upper(coalesce(uf.destination_iata, '')) = upper($2)
-           and uf.source_type = 'travelled_archive'
+           and upper(coalesce(uf.destination_iata, '')) = any($2::text[])
+           and uf.source_type <> 'tracked'
            and uf.deleted_at is null
            and ($3::uuid is null or uf.id is distinct from $3::uuid)
            and (
              uf.lifecycle_state in ('landed', 'archived')
              or uf.actual_arrival is not null
            )`,
-        [userId, destinationIata, currentUserFlightId]
+        [userId, destinationCodes, currentUserFlightId]
       );
       return Number(result.rows[0]?.visits || 0) + 1;
     },
