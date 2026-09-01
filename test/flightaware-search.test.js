@@ -19,6 +19,7 @@ test("FlightAware reserves bounded capacity for user searches", () => {
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("flight_instance"), 500);
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("position"), 500);
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("inbound_flight_instance"), 600);
+  assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("tracked_flight"), 600);
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("operational"), 600);
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("schedules"), 600);
 });

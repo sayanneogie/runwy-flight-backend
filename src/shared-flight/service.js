@@ -304,9 +304,21 @@ function createSharedFlightService({
     try {
       const params = { airline: row.airline_code, number: row.flight_number, date: dateOnly(row.departure_date), origin: row.origin_airport || "UNKNOWN", destination: row.destination_airport || "UNKNOWN", flightKey: row.flight_key };
       const reason = String(job.data.reason || "");
+      const usesTrackedFlightReserve =
+        isOperationallyOverdueWithoutTakeoff(row) ||
+        hasOperationalDepartureEvidence({
+          status: row.status,
+          actualDepartureAt: row.actual_departure_at,
+          position: {
+            lat: row.position_lat,
+            altitude: row.altitude,
+            groundSpeed: row.ground_speed,
+          },
+        });
       const providerOptions = {
         forceRefresh: reason === "forced" || reason.startsWith("provider_alert_position"),
         skipLivePosition: isOperationalDetailsRefreshReason(job.data.reason),
+        ...(usesTrackedFlightReserve ? { budgetEndpoint: "tracked_flight" } : {}),
       };
       let providerNormalized = row.provider_flight_id && provider.supportsProviderId && provider.fetchFlightByProviderId
         ? await provider.fetchFlightByProviderId(row.provider_flight_id, providerOptions)

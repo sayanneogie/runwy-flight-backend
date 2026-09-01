@@ -2038,6 +2038,35 @@ test("overdue schedule provider ID rebinds to the live operating occurrence", as
   assert.equal(row.altitude, 37_025);
 });
 
+test("overdue tracked flight refresh uses reserved FlightAware capacity", async () => {
+  const departure = new Date(Date.now() - 30 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 90 * 60_000).toISOString();
+  const { service, providerOptions } = makeService(normalizedFlight({
+    providerFlightId: "IGO481-schedule",
+    airlineCode: "6E",
+    flightNumber: "481",
+    origin: "AMD",
+    destination: "BLR",
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+  }));
+
+  const flight = await service.searchFlight({
+    airline: "6E",
+    number: "481",
+    date: departure.slice(0, 10),
+    origin: "AMD",
+    destination: "BLR",
+  });
+  await service.departureCatchupJob({
+    data: { flight_instance_id: flight.flightInstanceId, stage: "restart_recovery" },
+  });
+
+  assert.equal(providerOptions.at(-1).budgetEndpoint, "tracked_flight");
+});
+
 test("departure catchup still refreshes after gate-out while takeoff is unconfirmed", async () => {
   const departure = new Date(Date.now() - 4 * 60_000).toISOString();
   const arrival = new Date(Date.now() + 2 * 60 * 60_000).toISOString();

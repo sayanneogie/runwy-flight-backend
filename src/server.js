@@ -403,7 +403,13 @@ const pool = DATABASE_URL
   : null;
 
 function flightAwareDailyBudgetLimitForEndpoint(endpoint) {
-  const isReservedRequest = ["operational", "schedules", "historical", "inbound_flight_instance"].includes(String(endpoint || ""));
+  const isReservedRequest = [
+    "operational",
+    "schedules",
+    "historical",
+    "inbound_flight_instance",
+    "tracked_flight",
+  ].includes(String(endpoint || ""));
   return FLIGHTAWARE_DAILY_FLIGHT_CALL_LIMIT +
     (isReservedRequest ? FLIGHTAWARE_DAILY_SEARCH_RESERVE : 0);
 }
