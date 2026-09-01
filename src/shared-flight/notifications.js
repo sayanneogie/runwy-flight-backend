@@ -247,6 +247,8 @@ function notificationTitle(flight, event, context = {}) {
   const code = `${flight.airline_code || ""}${flight.flight_number || ""}` || "Flight";
   if (event.event_type === "DELAYED") return "Flight Delayed";
   if (event.event_type === "CANCELLED") return "Flight Cancelled";
+  if (event.event_type === "DIVERTED") return "Flight Diverted";
+  if (event.event_type === "AIRCRAFT_CHANGED") return "Aircraft Changed";
   if (event.event_type === "GATE_CHANGED") return "Gate Changed";
   if (event.event_type === "TAXIING") return "Taxiing";
   if (event.event_type === "TAKEOFF_ROLL") return "✈️ Taking Off";
@@ -275,6 +277,14 @@ function notificationBody(flight, event, context = {}) {
   const route = routeDescription(flight);
   if (event.event_type === "DELAYED") return `${code} is delayed.`;
   if (event.event_type === "CANCELLED") return `${code} has been cancelled.`;
+  if (event.event_type === "DIVERTED") {
+    const airport = event.new_value?.diversionAirport || flight?.normalized_data?.diversionAirport;
+    return airport ? `${code} diverted to ${airport}.` : `${code} has been diverted.`;
+  }
+  if (event.event_type === "AIRCRAFT_CHANGED") {
+    const aircraft = event.new_value?.aircraftType || flight?.normalized_data?.aircraftType;
+    return aircraft ? `${code} is now scheduled with ${aircraft}.` : `${code}'s aircraft has changed.`;
+  }
   if (event.event_type === "GATE_CHANGED") return `${code} gate changed from ${event.old_value?.gate || "unknown"} to ${event.new_value?.gate}.`;
   if (event.event_type === "TAXIING") return `${subject} is taxiing.`;
   if (event.event_type === "TAKEOFF_ROLL") return `${subject}${route ? `, ${route},` : ""} is about to take off.`;

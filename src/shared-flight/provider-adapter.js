@@ -50,6 +50,9 @@ function normalizeProviderRecord(record, normalizeRecord, providerName, params) 
     flightNumber,
     origin: normalized.departureAirportIata || normalized.origin || params.origin || null,
     destination: normalized.arrivalAirportIata || normalized.destination || params.destination || null,
+    originalDestination: normalized.originalArrivalAirportIata || normalized.originalDestination || null,
+    diversionAirport: normalized.diversionAirportIata || normalized.diversionAirport || null,
+    isDiverted: normalized.isDiverted === true || Boolean(normalized.diversionAirportIata || normalized.diversionAirport),
     arrivalTimezone: normalized.arrivalTimezone || null,
     status: normalized.status || "unknown",
     statusDetail: normalized.statusDetail || null,
@@ -70,6 +73,8 @@ function normalizeProviderRecord(record, normalizeRecord, providerName, params) 
     arrivalGate: normalized.arrivalGate || null,
     arrivalTerminal: normalized.arrivalTerminal || null,
     baggageBelt: normalized.baggageBelt || normalized.baggageClaim || null,
+    aircraftType: normalized.aircraftType || null,
+    aircraftRegistration: normalized.aircraftRegistration || null,
     inboundFlight: normalized.inboundFlight || null,
     position: {
       lat: normalized.livePosition?.latitude ?? normalized.position?.lat ?? null,

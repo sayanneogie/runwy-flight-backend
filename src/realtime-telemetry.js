@@ -19,7 +19,9 @@ function normalizedProgressPercent(value) {
 }
 
 function isTerminalStatus(status) {
-  return ["landed", "cancelled", "diverted"].includes(String(status || "").toLowerCase());
+  return ["landed", "arrived", "arrived_at_gate", "cancelled"].includes(
+    String(status || "").toLowerCase()
+  );
 }
 
 function choosePreferredLivePosition(nextLivePosition, previousLivePosition) {

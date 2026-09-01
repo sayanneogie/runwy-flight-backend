@@ -7,7 +7,7 @@ const path = require("node:path");
 
 const { createFlightCache, createMemoryRedis } = require("../src/shared-flight/cache");
 const { createMemorySharedFlightRepository } = require("../src/shared-flight/repository");
-const { createSharedFlightService, preserveKnownOperationalFields } = require("../src/shared-flight/service");
+const { createSharedFlightService, preserveKnownOperationalFields, isOlderStreamEvent } = require("../src/shared-flight/service");
 const { createProviderAdapter } = require("../src/shared-flight/provider-adapter");
 const {
   compareFlightState,
@@ -15,7 +15,81 @@ const {
   displayStatusForPhase,
   getFlightFreshnessTTL,
   mapNormalizedToDb,
+  reconcileDiversionContext,
 } = require("../src/shared-flight/state");
+
+test("diversion keeps the booked route identity and records the operational airport", () => {
+  const existing = {
+    flight_key: "DL-2307-2026-08-30-MSP-BIS",
+    airline_code: "DL",
+    flight_number: "2307",
+    departure_date: "2026-08-30",
+    origin_airport: "MSP",
+    destination_airport: "BIS",
+    status: "enroute",
+    actual_departure_at: "2026-08-30T23:17:00.000Z",
+    normalized_data: { destination: "BIS", aircraftType: "A220" },
+  };
+  const requested = { airline: "DL", number: "2307", date: "2026-08-30", origin: "MSP", destination: "BIS" };
+  const reconciled = reconcileDiversionContext(
+    normalizedFlight({
+      airlineCode: "DL",
+      flightNumber: "2307",
+      origin: "MSP",
+      destination: "FAR",
+      status: "enroute",
+      actualDepartureAt: "2026-08-30T23:17:00.000Z",
+    }),
+    requested,
+    existing
+  );
+  const db = mapNormalizedToDb(reconciled, { ...requested, existingRow: existing });
+
+  assert.equal(reconciled.originalDestination, "BIS");
+  assert.equal(reconciled.diversionAirport, "FAR");
+  assert.equal(db.destination_airport, "BIS");
+  assert.equal(db.flight_key, existing.flight_key);
+  assert.equal(db.normalized_data.diversionAirport, "FAR");
+});
+
+test("canonical stream ordering rejects replayed events but accepts equal or newer events", () => {
+  const current = "2026-09-01T12:30:00.000Z";
+  assert.equal(isOlderStreamEvent(current, "2026-09-01T12:29:59.000Z"), true);
+  assert.equal(isOlderStreamEvent(current, current), false);
+  assert.equal(isOlderStreamEvent(current, "2026-09-01T12:30:01.000Z"), false);
+});
+
+test("diversion and aircraft swaps emit actionable events without ending airborne lifecycle", () => {
+  const now = Date.parse("2026-08-31T00:30:00.000Z");
+  const oldState = {
+    status: "enroute",
+    destination_airport: "BIS",
+    normalized_data: { originalDestination: "BIS", aircraftType: "A220", aircraftRegistration: "N101DU" },
+  };
+  const newState = {
+    status: "enroute",
+    destination_airport: "BIS",
+    normalized_data: {
+      originalDestination: "BIS",
+      diversionAirport: "FAR",
+      isDiverted: true,
+      aircraftType: "A319",
+      aircraftRegistration: "N202DU",
+    },
+  };
+  const events = compareFlightState(oldState, newState, now);
+
+  assert.ok(events.some((event) => event.event_type === "DIVERTED" && event.new_value.diversionAirport === "FAR"));
+  assert.ok(events.some((event) => event.event_type === "AIRCRAFT_CHANGED"));
+  assert.ok(["airborne", "approaching"].includes(deriveFlightLifecyclePhase({
+    status: "diverted",
+    normalized_data: {
+      takeoffTimes: { actual: "2026-08-30T23:20:00.000Z" },
+      diversionAirport: "FAR",
+    },
+    estimated_arrival_at: "2026-08-31T01:00:00.000Z",
+  }, now).phase));
+});
 const { buildWeatherInsight } = require("../src/shared-flight/weather");
 
 function normalizedFlight(overrides = {}) {
@@ -69,11 +143,19 @@ function makeService(providerFlight = normalizedFlight(), options = {}) {
     repository,
     provider,
     streamingEnabled: options.streamingEnabled === true,
+    apiPollingEnabled: options.apiPollingEnabled,
+    apiActivePollMs: options.apiActivePollMs,
+    apiPredeparturePollMs: options.apiPredeparturePollMs,
+    apiPredepartureWindowMs: options.apiPredepartureWindowMs,
+    apiPostArrivalPollMs: options.apiPostArrivalPollMs,
+    apiPostArrivalWindowMs: options.apiPostArrivalWindowMs,
     queue,
     cache: createFlightCache(createMemoryRedis()),
     weather: options.weather,
     wait: options.wait || ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
     apns: options.apns,
+    liveActivities: options.liveActivities,
+    stateProjection: options.stateProjection,
   });
   return { service, repository, providerCalls: () => calls, providerOptions };
 }
@@ -106,6 +188,43 @@ test("shared refresh preserves known gates when the provider temporarily omits t
   assert.equal(merged.arrivalGate, "C23");
   assert.equal(merged.departureTerminal, "3");
   assert.equal(merged.arrivalTerminal, "1");
+});
+
+test("shared refresh preserves resolved inbound details when the provider returns only its ID", () => {
+  const estimatedArrival = "2026-09-01T08:26:00.000Z";
+  const merged = preserveKnownOperationalFields(
+    normalizedFlight({
+      inboundFlight: {
+        providerFlightId: "IGO508-instance",
+        flightNumber: null,
+        originAirportIata: null,
+        destinationAirportIata: "RDP",
+        estimatedArrival: null,
+        status: null,
+      },
+    }),
+    {
+      normalized_data: {
+        inboundFlight: {
+          providerFlightId: "IGO508-instance",
+          flightNumber: "6E508",
+          originAirportIata: "BLR",
+          destinationAirportIata: "RDP",
+          estimatedArrival,
+          status: "enroute",
+          providerAlertId: "inbound-alert",
+          providerAlertStatus: "active",
+        },
+      },
+    }
+  );
+
+  assert.equal(merged.inboundFlight.flightNumber, "6E508");
+  assert.equal(merged.inboundFlight.originAirportIata, "BLR");
+  assert.equal(merged.inboundFlight.destinationAirportIata, "RDP");
+  assert.equal(merged.inboundFlight.estimatedArrival, estimatedArrival);
+  assert.equal(merged.inboundFlight.status, "enroute");
+  assert.equal(merged.inboundFlight.providerAlertId, "inbound-alert");
 });
 
 test("production provider adapter exposes shared alert registration callbacks", async () => {
@@ -1020,6 +1139,8 @@ test("an active but incomplete inbound aircraft retries detail resolution with r
 
   assert.equal(detailCalls, 1);
   assert.equal(inboundAlertCalls, 0);
+  assert.equal(saved.flight.inboundFlight.originAirportIata, "FAR");
+  assert.ok(saved.flight.inboundFlight.estimatedArrival);
   assert.equal(row.normalized_data.inboundFlight.originAirportIata, "FAR");
   assert.ok(row.normalized_data.inboundFlight.estimatedArrival);
   assert.equal(row.normalized_data.inboundFlight.providerAlertStatus, "active");
@@ -1317,6 +1438,33 @@ test("streamed updates change shared state and queue fanout without REST provide
   assert.ok(service.queue.jobs.some((job) => job.name === "fanoutNotificationJob"));
 });
 
+test("position-only streamed updates still project to app state and Live Activities", async () => {
+  let projected = 0;
+  const { service } = makeService(normalizedFlight(), {
+    streamingEnabled: true,
+    stateProjection: { syncFlightState: async () => { projected += 1; return { synced: 1 }; } },
+    liveActivities: { sendFlightState: async () => ({ sent: 1 }) },
+  });
+  const saved = await service.saveUserFlight("u1", {
+    airline: "SQ",
+    number: "509",
+    date: "2026-05-27",
+    origin: "BLR",
+    destination: "SIN",
+  });
+  service.queue.jobs.length = 0;
+
+  await service.applyStreamedFlightUpdate(saved.flight.flightInstanceId, normalizedFlight({
+    position: { lat: 12.97, lon: 77.59, altitude: 18_000, groundSpeed: 410, heading: 120 },
+    liveDataSource: "streaming",
+    streamingStatus: "active",
+  }), { eventTime: "2026-05-27T10:01:00.000Z" });
+
+  assert.equal(projected, 1);
+  assert.ok(!service.queue.jobs.some((job) => job.name === "legacyStateProjectionJob"));
+  assert.ok(service.queue.jobs.some((job) => job.name === "liveActivityUpdateJob"));
+});
+
 test("stream-backed stale flights do not enqueue provider refreshes", async () => {
   const { service, repository, providerCalls } = makeService();
   const flight = await service.searchFlight({ airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" });
@@ -1367,7 +1515,7 @@ test("active detail fetch refreshes overdue scheduled shared flights into live s
   assert.equal(providerCalls(), 2);
 });
 
-test("saved flights schedule low-call departure and arrival catchups without polling loops", async () => {
+test("saved flights schedule bounded catchups plus one shared API poll", async () => {
   const departure = new Date(Date.now() + 30 * 60_000).toISOString();
   const arrival = new Date(Date.now() + 150 * 60_000).toISOString();
   const { service } = makeService(normalizedFlight({
@@ -1389,6 +1537,82 @@ test("saved flights schedule low-call departure and arrival catchups without pol
   assert.equal(service.queue.jobs.filter((job) => job.name === "arrivalCatchupJob").length, 1);
   assert.equal(service.queue.jobs.filter((job) => job.name === "arrivalDetailRefreshJob").length, 5);
   assert.equal(service.queue.jobs.filter((job) => job.name === "refreshFlightJob").length, 0);
+  assert.equal(service.queue.jobs.filter((job) => job.name === "apiFlightPollJob").length, 1);
+});
+
+test("API-only active flights schedule one deduplicated two-minute poll for every user", async () => {
+  const departure = new Date(Date.now() - 20 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 120 * 60_000).toISOString();
+  const { service } = makeService(normalizedFlight({
+    status: "airborne",
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    actualDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+  }));
+
+  const input = {
+    airline: "SQ",
+    number: "509",
+    date: departure.slice(0, 10),
+    origin: "BLR",
+    destination: "SIN",
+  };
+  await service.saveUserFlight("u1", input);
+  await service.saveUserFlight("u2", input);
+
+  const polls = service.queue.jobs.filter((job) => job.name === "apiFlightPollJob");
+  assert.equal(polls.length, 1);
+  assert.ok(polls[0].options.delayMs <= 2 * 60_000);
+  assert.ok(polls[0].options.delayMs > 0);
+});
+
+test("shared API polling is disabled when streaming is enabled", async () => {
+  const departure = new Date(Date.now() - 5 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 90 * 60_000).toISOString();
+  const { service } = makeService(normalizedFlight({
+    status: "airborne",
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    actualDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+  }), {
+    streamingEnabled: true,
+    ensureFlightStream: async () => ({ status: "active", liveDataSource: "streaming" }),
+  });
+
+  await service.saveUserFlight("u1", {
+    airline: "SQ",
+    number: "509",
+    date: departure.slice(0, 10),
+    origin: "BLR",
+    destination: "SIN",
+  });
+
+  assert.equal(service.queue.jobs.some((job) => job.name === "apiFlightPollJob"), false);
+});
+
+test("API-only polling does not create an overflowing timer for distant flights", async () => {
+  const departure = new Date(Date.now() + 10 * 24 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 10 * 24 * 60 * 60_000 + 2 * 60 * 60_000).toISOString();
+  const { service } = makeService(normalizedFlight({
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+  }));
+
+  await service.saveUserFlight("u1", {
+    airline: "SQ",
+    number: "509",
+    date: departure.slice(0, 10),
+    origin: "BLR",
+    destination: "SIN",
+  });
+
+  assert.equal(service.queue.jobs.some((job) => job.name === "apiFlightPollJob"), false);
 });
 
 test("streaming flights retain bounded departure and arrival catchups", async () => {

@@ -203,6 +203,11 @@ test("keeps FlightAware gate-out and wheels-off timestamps separate", async () =
   assert.equal(airborneRow.status, "airborne");
   assert.equal(airborneRow.normalized_data.departureTimes.actual, "2026-05-09T16:42:00.000Z");
   assert.equal(airborneRow.normalized_data.takeoffTimes.actual, "2026-05-09T16:55:00.000Z");
+  assert.ok(service.queue.jobs.some((job) =>
+    job.name === "refreshFlightJob" &&
+    job.data.reason === "provider_alert_position_seed" &&
+    job.data.trigger === "takeoff_alert"
+  ));
 });
 
 test("impending departure remains preflight and does not masquerade as takeoff", () => {

@@ -102,6 +102,7 @@ function createTrackingStore({
           ls.provider_flight_id as snapshot_provider_flight_id,
           ls.canonical_snapshot_json,
           ls.provider_last_updated_at,
+          ls.canonical_revision,
           ls.updated_at as snapshot_updated_at
         from public.tracking_sessions ts
         left join public.live_snapshots ls
@@ -131,7 +132,7 @@ function createTrackingStore({
         (!endDate || (travelDate && travelDate <= endDate)) &&
         (!departureIata || normalizeAirportCode(item.query?.departureIata) === departureIata) &&
         (!arrivalIata || normalizeAirportCode(item.query?.arrivalIata) === arrivalIata) &&
-        !["landed", "cancelled", "diverted"].includes(itemStatus)
+        !["landed", "arrived", "arrived_at_gate", "cancelled"].includes(itemStatus)
       );
     });
   }
@@ -151,6 +152,7 @@ function createTrackingStore({
           ls.provider_flight_id as snapshot_provider_flight_id,
           ls.canonical_snapshot_json,
           ls.provider_last_updated_at,
+          ls.canonical_revision,
           ls.updated_at as snapshot_updated_at
         from public.tracking_sessions ts
         left join public.live_snapshots ls
@@ -172,7 +174,7 @@ function createTrackingStore({
       return (
         itemProviderFlightId === normalizedProviderFlightId &&
         statuses.includes(sessionStatus) &&
-        !["landed", "cancelled", "diverted"].includes(itemStatus)
+        !["landed", "arrived", "arrived_at_gate", "cancelled"].includes(itemStatus)
       );
     });
   }
@@ -470,16 +472,17 @@ function createTrackingStore({
       return {
         ...canonical,
         baggageBelt:
+          row.baggage_claim ||
           canonical.baggageBelt ||
           canonical.baggageClaim ||
-          row.baggage_claim ||
           null,
         baggageClaim:
+          row.baggage_claim ||
           canonical.baggageClaim ||
           canonical.baggageBelt ||
-          row.baggage_claim ||
           null,
         provider: canonical.provider || row.snapshot_provider || row.provider || providerName,
+        stateRevision: Number(row.canonical_revision || canonical.stateRevision || 0),
         lastUpdated:
           canonical.lastUpdated ||
           toISOString(row.provider_last_updated_at || row.snapshot_updated_at || row.last_snapshot_at || row.updated_at) ||
@@ -517,7 +520,9 @@ function createTrackingStore({
       case "cancelled":
         return "cancelled";
       case "diverted":
-        return "completed";
+        return normalized?.landingTimes?.actual || normalized?.arrivalTimes?.actual
+          ? "completed"
+          : "active";
       default:
         return "active";
     }
@@ -531,11 +536,22 @@ function createTrackingStore({
       case "landed":
       case "arrived":
       case "arrived_at_gate":
-      case "diverted":
         return "landed";
+      case "diverted":
+        return normalized?.landingTimes?.actual || normalized?.arrivalTimes?.actual
+          ? "landed"
+          : "active";
       case "boarding":
       case "delayed":
+      case "taxiing":
+      case "taxi_out":
+      case "takeoff_roll":
       case "departed":
+      case "airborne":
+      case "climb":
+      case "cruise":
+      case "descent":
+      case "approaching":
       case "enroute":
         return "active";
       default:
@@ -545,7 +561,7 @@ function createTrackingStore({
 
   function trackingWindowExpired(normalized, query, now = new Date()) {
     const status = String(normalized?.status || "").toLowerCase();
-    if (["landed", "cancelled", "diverted"].includes(status)) {
+    if (["landed", "arrived", "arrived_at_gate", "cancelled"].includes(status)) {
       return false;
     }
 
@@ -672,7 +688,7 @@ function createTrackingStore({
 
   function nextPollAfterForNormalized(normalized, query, now = new Date()) {
     const status = String(normalized?.status || "").toLowerCase();
-    if (["landed", "arrived", "arrived_at_gate", "cancelled", "diverted"].includes(status)) {
+    if (["landed", "arrived", "arrived_at_gate", "cancelled"].includes(status)) {
       return null;
     }
 
@@ -765,6 +781,7 @@ function createTrackingStore({
         ls.metrics_json,
         ls.canonical_snapshot_json,
         ls.provider_last_updated_at,
+        ls.canonical_revision,
         ls.updated_at as snapshot_updated_at
       from public.tracking_sessions ts
       left join public.live_snapshots ls
@@ -798,6 +815,7 @@ function createTrackingStore({
         ls.metrics_json,
         ls.canonical_snapshot_json,
         ls.provider_last_updated_at,
+        ls.canonical_revision,
         ls.updated_at as snapshot_updated_at
       from public.tracking_sessions ts
       left join public.live_snapshots ls
@@ -837,6 +855,21 @@ function createTrackingStore({
     if (!usesDatabase()) {
       throw new Error("Tracking persistence requires DATABASE_URL pointing at Supabase Postgres.");
     }
+
+    // One provider path historically populated `baggageClaim` while an older
+    // `baggageBelt` survived in the JSON object. Persist one authoritative
+    // value into the column and both JSON aliases so clients cannot regress.
+    const canonicalBaggage = String(
+      normalized?.baggageClaim || normalized?.baggageBelt || ""
+    ).trim() || null;
+    normalized = {
+      ...normalized,
+      baggageBelt: canonicalBaggage,
+      baggageClaim: canonicalBaggage,
+    };
+    const canonicalRevision = Number.isSafeInteger(Number(normalized.stateRevision))
+      ? Math.max(0, Number(normalized.stateRevision))
+      : 0;
 
     const trackingPolicy = trackingPolicyForSnapshot(normalized, query);
     const nextPollAfter = trackingPolicy.nextPollAfter;
@@ -1016,7 +1049,8 @@ function createTrackingStore({
         metrics_json,
         canonical_snapshot_json,
         raw_provider_payload_json,
-        provider_last_updated_at
+        provider_last_updated_at,
+        canonical_revision
       )
       values (
         $1::uuid,
@@ -1037,7 +1071,8 @@ function createTrackingStore({
         $16::jsonb,
         $17::jsonb,
         $18::jsonb,
-        $19::timestamptz
+        $19::timestamptz,
+        $20::bigint
       )
       on conflict (tracking_session_id)
       do update set
@@ -1059,7 +1094,16 @@ function createTrackingStore({
         canonical_snapshot_json = excluded.canonical_snapshot_json,
         raw_provider_payload_json = excluded.raw_provider_payload_json,
         provider_last_updated_at = excluded.provider_last_updated_at,
+        canonical_revision = excluded.canonical_revision,
         updated_at = now()
+      where excluded.canonical_revision > coalesce(public.live_snapshots.canonical_revision, 0)
+         or (
+           excluded.canonical_revision = coalesce(public.live_snapshots.canonical_revision, 0)
+           and excluded.provider_last_updated_at >= coalesce(
+             public.live_snapshots.provider_last_updated_at,
+             '-infinity'::timestamptz
+           )
+         )
       `,
       [
         flightId,
@@ -1081,6 +1125,7 @@ function createTrackingStore({
         JSON.stringify(normalized),
         JSON.stringify(rawProviderPayload || {}),
         normalized.lastUpdated || new Date().toISOString(),
+        canonicalRevision,
       ]
     );
 
@@ -1240,6 +1285,7 @@ function createTrackingStore({
         ls.provider_flight_id as snapshot_provider_flight_id,
         ls.canonical_snapshot_json,
         ls.provider_last_updated_at,
+        ls.canonical_revision,
         ls.updated_at as snapshot_updated_at
       from public.tracking_sessions ts
       left join public.live_snapshots ls
@@ -1314,12 +1360,15 @@ function createTrackingStore({
         ls.metrics_json,
         ls.canonical_snapshot_json,
         ls.provider_last_updated_at,
+        ls.canonical_revision,
         ls.updated_at as snapshot_updated_at
       from public.tracking_sessions ts
       left join public.live_snapshots ls
         on ls.tracking_session_id = ts.id
-      where ts.session_status in ('pending', 'active', 'errored')
-        and coalesce(ts.metadata_json->>'providerRefreshOwner', '') <> 'shared_flight_instance'
+      where (
+          ts.session_status in ('pending', 'active', 'errored')
+          or coalesce(ts.metadata_json->>'providerRefreshOwner', '') = 'shared_flight_instance'
+        )
         and exists (
           select 1
           from public.user_flights uf

@@ -108,6 +108,25 @@ async function persistSnapshot(normalized, query) {
   return trackingSessionUpdateParams(queries);
 }
 
+test("live snapshot projection is revisioned and rejects older envelopes atomically", async () => {
+  const { store, queries } = makeStore();
+  await store.persistTrackingSnapshot({
+    flightId: "11111111-1111-1111-1111-111111111111",
+    userId: "22222222-2222-2222-2222-222222222222",
+    query: { flightNumber: "AI203", date: "2026-09-01", departureIata: "DEL", arrivalIata: "BOM" },
+    normalized: makeNormalized({ stateRevision: 42, lastUpdated: "2026-09-01T12:30:00.000Z" }),
+    provider: "flightaware",
+    providerFlightId: "FAKE123",
+    rawProviderPayload: {},
+  });
+
+  const projection = queries.find(({ sql }) => sql.includes("insert into public.live_snapshots"));
+  assert.ok(projection);
+  assert.match(projection.sql, /canonical_revision/);
+  assert.match(projection.sql, /excluded\.canonical_revision > coalesce/);
+  assert.equal(projection.params.at(-1), 42);
+});
+
 test("terminal snapshots expose actual breadcrumbs for archive persistence", () => {
   const points = [
     { latitude: 41.8, longitude: 12.2 },
@@ -199,7 +218,7 @@ test("terminal snapshots copy the longer actual route into matching archived fli
   assert.equal(archiveUpdate.params[8], 5);
 });
 
-test("tracked detail snapshots expose baggage claims as baggage belts", async () => {
+test("tracked detail snapshots prefer the newest baggage column over stale canonical JSON", async () => {
   const { store } = makeStore({
     queryHandler(sql) {
       if (!sql.includes("from public.tracking_sessions ts")) return { rows: [] };
@@ -214,10 +233,10 @@ test("tracked detail snapshots expose baggage claims as baggage belts", async ()
             origin_iata: "HKT",
             destination_iata: "DXB",
             travel_date: "2026-08-04",
-            baggage_claim: "7",
+            baggage_claim: "6A",
             canonical_snapshot_json: {
               flightNumber: "EK379",
-              baggageClaim: "7",
+              baggageClaim: "5A",
               status: "enroute",
             },
           },
@@ -230,8 +249,8 @@ test("tracked detail snapshots expose baggage claims as baggage belts", async ()
     "11111111-1111-1111-1111-111111111111"
   );
 
-  assert.equal(tracked.normalized.baggageBelt, "7");
-  assert.equal(tracked.normalized.baggageClaim, "7");
+  assert.equal(tracked.normalized.baggageBelt, "6A");
+  assert.equal(tracked.normalized.baggageClaim, "6A");
 });
 
 test("far future flights sleep until the pre-departure polling window", async () => {

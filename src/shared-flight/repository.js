@@ -66,6 +66,13 @@ function createMemorySharedFlightRepository() {
     async findFlightById(id) {
       return [...flights.values()].find((row) => row.id === id) || null;
     },
+    async hasActiveUserFlights(flightInstanceId) {
+      return [...userFlights.values()].some((row) =>
+        row.flight_instance_id === flightInstanceId &&
+        !row.deleted_at &&
+        row.lifecycle_state !== "deleted"
+      );
+    },
     async listStreamUpdateTargets({ providerFlightId, flightNumber, departureDate }) {
       return [...flights.values()].filter((row) => {
         if (providerFlightId && row.provider_flight_id === providerFlightId) return true;
@@ -125,9 +132,26 @@ function createMemorySharedFlightRepository() {
       return saved;
     },
     async updateFlight(row) {
-      const saved = { ...row, updated_at: new Date().toISOString() };
+      const current = [...flights.values()].find((item) => item.id === row.id);
+      const currentStreamMs = new Date(current?.last_stream_event_at || 0).getTime();
+      const incomingStreamMs = new Date(row.last_stream_event_at || 0).getTime();
+      if (Number.isFinite(currentStreamMs) && currentStreamMs > 0 &&
+          Number.isFinite(incomingStreamMs) && incomingStreamMs > 0 &&
+          incomingStreamMs < currentStreamMs) {
+        return current;
+      }
+      const saved = {
+        ...row,
+        state_revision: Number(current?.state_revision || row.state_revision || 0) + 1,
+        updated_at: new Date().toISOString(),
+      };
       flights.set(saved.flight_key, saved);
       return saved;
+    },
+    async commitCanonicalState(row, eventRows, provider) {
+      const saved = await this.updateFlight(row);
+      const savedEvents = await this.insertEvents(saved.id, eventRows, provider);
+      return { flight: saved, events: savedEvents, applied: true };
     },
     async updateProviderAlert(flightInstanceId, alert) {
       const row = [...flights.values()].find((item) => item.id === flightInstanceId);
@@ -146,7 +170,12 @@ function createMemorySharedFlightRepository() {
       row.live_data_source = stream.liveDataSource || (stream.status === "active" ? "streaming" : row.live_data_source || "on_demand");
       row.streaming_status = stream.status || "disabled";
       row.stream_registered_at = stream.registeredAt || new Date().toISOString();
-      row.last_stream_event_at = stream.lastStreamEventAt || row.last_stream_event_at || null;
+      const currentEventMs = new Date(row.last_stream_event_at || 0).getTime();
+      const incomingEventMs = new Date(stream.lastStreamEventAt || 0).getTime();
+      if (!Number.isFinite(currentEventMs) || currentEventMs <= 0 ||
+          (Number.isFinite(incomingEventMs) && incomingEventMs >= currentEventMs)) {
+        row.last_stream_event_at = stream.lastStreamEventAt || row.last_stream_event_at || null;
+      }
       row.refresh_priority = stream.refreshPriority || row.refresh_priority || "minimal";
       row.updated_at = new Date().toISOString();
       return row;
@@ -448,6 +477,77 @@ function createMemorySharedFlightRepository() {
 
 function createPostgresSharedFlightRepository(pool) {
   const one = (result) => result.rows[0] || null;
+
+  async function updateCanonicalFlight(executor, row) {
+    const incomingStreamEventAt = row.last_stream_event_at || null;
+    const result = await executor.query(
+      `update public.flight_instances set
+        provider_flight_id=$2, scheduled_departure_at=$3, scheduled_arrival_at=$4,
+        estimated_departure_at=$5, estimated_arrival_at=$6, actual_departure_at=$7,
+        actual_arrival_at=$8, status=$9, status_detail=$10, gate=$11, terminal=$12,
+        baggage_belt=$13, position_lat=$14, position_lon=$15, altitude=$16, ground_speed=$17,
+        heading=$18, provider=$19, data_confidence=$20, normalized_data=$21,
+        raw_provider_response=$22, last_fetched_at=$23, fresh_until=$24,
+        needs_revalidation=$25, is_final=$26,
+        last_stream_event_at = case
+          when $27::timestamptz is null then last_stream_event_at
+          when last_stream_event_at is null then $27::timestamptz
+          else greatest(last_stream_event_at, $27::timestamptz)
+        end,
+        state_revision=state_revision + 1, updated_at=now()
+      where id=$1
+        and (
+          $27::timestamptz is null
+          or last_stream_event_at is null
+          or $27::timestamptz >= last_stream_event_at
+        )
+      returning *`,
+      [
+        row.id, row.provider_flight_id, row.scheduled_departure_at, row.scheduled_arrival_at,
+        row.estimated_departure_at, row.estimated_arrival_at, row.actual_departure_at, row.actual_arrival_at,
+        row.status, row.status_detail, row.gate, row.terminal, row.baggage_belt, row.position_lat,
+        row.position_lon, row.altitude, row.ground_speed, row.heading, row.provider, row.data_confidence,
+        row.normalized_data, row.raw_provider_response, row.last_fetched_at, row.fresh_until,
+        row.needs_revalidation, row.is_final, incomingStreamEventAt,
+      ]
+    );
+    if (result.rows[0]) return { flight: result.rows[0], applied: true };
+    const current = one(await executor.query(
+      `select * from public.flight_instances where id=$1 limit 1`,
+      [row.id]
+    ));
+    return { flight: current, applied: false };
+  }
+
+  async function insertCanonicalSnapshot(executor, row) {
+    await executor.query(
+      `insert into public.flight_snapshots (
+        flight_instance_id, status, estimated_departure_at, estimated_arrival_at,
+        actual_departure_at, actual_arrival_at, gate, terminal, baggage_belt,
+        position_lat, position_lon, altitude, ground_speed, heading, raw_provider_response,
+        normalized_data, state_revision
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+      [row.id, row.status, row.estimated_departure_at, row.estimated_arrival_at, row.actual_departure_at, row.actual_arrival_at, row.gate, row.terminal, row.baggage_belt, row.position_lat, row.position_lon, row.altitude, row.ground_speed, row.heading, row.raw_provider_response, row.normalized_data, Number(row.state_revision || 0)]
+    );
+  }
+
+  async function insertCanonicalEvents(executor, flightInstanceId, eventRows, provider) {
+    const saved = [];
+    for (const event of eventRows) {
+      saved.push(one(await executor.query(
+        `insert into public.flight_events (
+          flight_instance_id, event_type, event_severity, old_value, new_value,
+          summary, provider, provider_event_time, confidence, notification_required,
+          state_revision
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+          coalesce((select state_revision from public.flight_instances where id=$1), 0)
+        ) returning *`,
+        [flightInstanceId, event.event_type, event.event_severity, event.old_value || null, event.new_value || null, event.summary || null, provider || null, event.provider_event_time || null, event.confidence || "medium", event.notification_required === true]
+      )));
+    }
+    return saved;
+  }
+
   return {
     async acquireProviderRequestLease(lockKey, ttlMs) {
       const token = crypto.randomUUID();
@@ -495,6 +595,18 @@ function createPostgresSharedFlightRepository(pool) {
     },
     async findFlightById(id) {
       return one(await pool.query(`select * from public.flight_instances where id = $1`, [id]));
+    },
+    async hasActiveUserFlights(flightInstanceId) {
+      const result = await pool.query(
+        `select 1
+         from public.user_flights
+         where flight_instance_id = $1
+           and deleted_at is null
+           and coalesce(lifecycle_state, '') <> 'deleted'
+         limit 1`,
+        [flightInstanceId]
+      );
+      return result.rowCount > 0;
     },
     async listStreamUpdateTargets({ providerFlightId, flightNumber, departureDate }) {
       const normalizedFlightNumber = String(flightNumber || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -607,6 +719,7 @@ function createPostgresSharedFlightRepository(pool) {
           fresh_until = excluded.fresh_until,
           needs_revalidation = excluded.needs_revalidation,
           is_final = excluded.is_final,
+          state_revision = public.flight_instances.state_revision + 1,
           updated_at = now()
         returning *
         `,
@@ -629,28 +742,27 @@ function createPostgresSharedFlightRepository(pool) {
       return saved;
     },
     async updateFlight(row) {
-      return one(await pool.query(
-        `
-        update public.flight_instances set
-          provider_flight_id=$2, scheduled_departure_at=$3, scheduled_arrival_at=$4,
-          estimated_departure_at=$5, estimated_arrival_at=$6, actual_departure_at=$7,
-          actual_arrival_at=$8, status=$9, status_detail=$10, gate=$11, terminal=$12,
-          baggage_belt=$13, position_lat=$14, position_lon=$15, altitude=$16, ground_speed=$17,
-          heading=$18, provider=$19, data_confidence=$20, normalized_data=$21,
-          raw_provider_response=$22, last_fetched_at=$23, fresh_until=$24,
-          needs_revalidation=$25, is_final=$26, updated_at=now()
-        where id=$1
-        returning *
-        `,
-        [
-          row.id, row.provider_flight_id, row.scheduled_departure_at, row.scheduled_arrival_at,
-          row.estimated_departure_at, row.estimated_arrival_at, row.actual_departure_at, row.actual_arrival_at,
-          row.status, row.status_detail, row.gate, row.terminal, row.baggage_belt, row.position_lat,
-          row.position_lon, row.altitude, row.ground_speed, row.heading, row.provider, row.data_confidence,
-          row.normalized_data, row.raw_provider_response, row.last_fetched_at, row.fresh_until,
-          row.needs_revalidation, row.is_final,
-        ]
-      ));
+      return (await updateCanonicalFlight(pool, row)).flight;
+    },
+    async commitCanonicalState(row, eventRows, provider) {
+      const client = await pool.connect();
+      try {
+        await client.query("begin");
+        const committed = await updateCanonicalFlight(client, row);
+        if (!committed.applied || !committed.flight) {
+          await client.query("commit");
+          return { flight: committed.flight, events: [], applied: false };
+        }
+        await insertCanonicalSnapshot(client, committed.flight);
+        const events = await insertCanonicalEvents(client, committed.flight.id, eventRows, provider);
+        await client.query("commit");
+        return { flight: committed.flight, events, applied: true };
+      } catch (error) {
+        await client.query("rollback");
+        throw error;
+      } finally {
+        client.release();
+      }
     },
     async updateProviderAlert(flightInstanceId, alert) {
       return one(await pool.query(
@@ -679,7 +791,11 @@ function createPostgresSharedFlightRepository(pool) {
           live_data_source = $2,
           streaming_status = $3,
           stream_registered_at = coalesce($4, now()),
-          last_stream_event_at = coalesce($5, last_stream_event_at),
+          last_stream_event_at = case
+            when $5::timestamptz is null then last_stream_event_at
+            when last_stream_event_at is null then $5::timestamptz
+            else greatest(last_stream_event_at, $5::timestamptz)
+          end,
           refresh_priority = coalesce($6, refresh_priority),
           updated_at = now()
          where id = $1
@@ -695,27 +811,10 @@ function createPostgresSharedFlightRepository(pool) {
       ));
     },
     async insertSnapshot(row) {
-      await pool.query(
-        `insert into public.flight_snapshots (
-          flight_instance_id, status, estimated_departure_at, estimated_arrival_at,
-          actual_departure_at, actual_arrival_at, gate, terminal, baggage_belt,
-          position_lat, position_lon, altitude, ground_speed, heading, raw_provider_response, normalized_data
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-        [row.id, row.status, row.estimated_departure_at, row.estimated_arrival_at, row.actual_departure_at, row.actual_arrival_at, row.gate, row.terminal, row.baggage_belt, row.position_lat, row.position_lon, row.altitude, row.ground_speed, row.heading, row.raw_provider_response, row.normalized_data]
-      );
+      await insertCanonicalSnapshot(pool, row);
     },
     async insertEvents(flightInstanceId, eventRows, provider) {
-      const saved = [];
-      for (const event of eventRows) {
-        saved.push(one(await pool.query(
-          `insert into public.flight_events (
-            flight_instance_id, event_type, event_severity, old_value, new_value,
-            summary, provider, provider_event_time, confidence, notification_required
-          ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning *`,
-          [flightInstanceId, event.event_type, event.event_severity, event.old_value || null, event.new_value || null, event.summary || null, provider || null, event.provider_event_time || null, event.confidence || "medium", event.notification_required === true]
-        )));
-      }
-      return saved;
+      return insertCanonicalEvents(pool, flightInstanceId, eventRows, provider);
     },
     async insertFlightEventLog(entry) {
       const row = one(await pool.query(

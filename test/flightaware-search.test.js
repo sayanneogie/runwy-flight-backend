@@ -9,6 +9,12 @@ process.env.FLIGHTAWARE_API_KEY = "test-flightaware-key";
 
 const { __test__ } = require("../src/server.js");
 
+test("only explicit final route refreshes bypass the track cache", () => {
+  assert.equal(__test__.shouldForceTrackTrailRefreshMode("detail"), false);
+  assert.equal(__test__.shouldForceTrackTrailRefreshMode("final"), true);
+  assert.equal(__test__.shouldForceTrackTrailRefreshMode("force"), true);
+});
+
 test("FlightAware reserves bounded capacity for user searches", () => {
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("flight_instance"), 500);
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("position"), 500);
@@ -37,6 +43,31 @@ test("shared-flight tracking projection keeps resolved inbound aircraft details"
   });
 
   assert.deepEqual(projected.inboundFlight, inboundFlight);
+});
+
+test("shared-flight tracking projection preserves diversion and aircraft metadata", () => {
+  const projected = __test__.trackedPayloadFromSharedFlight({
+    airlineCode: "DL",
+    flightNumber: "2307",
+    origin: "MSP",
+    destination: "BIS",
+    originalDestination: "BIS",
+    diversionAirport: "FAR",
+    isDiverted: true,
+    aircraftType: "BCS1",
+    aircraftRegistration: "N101DU",
+    status: "enroute",
+    scheduledDepartureAt: "2026-08-30T23:15:00.000Z",
+    scheduledArrivalAt: "2026-08-31T00:46:00.000Z",
+    estimatedArrivalAt: "2026-08-31T00:42:00.000Z",
+    lastUpdatedAt: "2026-08-31T00:30:00.000Z",
+  });
+
+  assert.equal(projected.arrivalAirportIata, "BIS");
+  assert.equal(projected.originalArrivalAirportIata, "BIS");
+  assert.equal(projected.diversionAirportIata, "FAR");
+  assert.equal(projected.aircraftType, "BCS1");
+  assert.equal(projected.aircraftRegistration, "N101DU");
 });
 
 test("opening flight details does not bypass FlightAware caches", () => {
@@ -155,6 +186,32 @@ test("FlightAware IATA and ICAO copies collapse into one real occurrence", () =>
   const deduped = __test__.dedupeFlightAwareRecords(records, { flightNumber: "DL2307" });
   assert.equal(deduped.length, 1);
   assert.equal(deduped[0].ident_iata, "DL2307");
+});
+
+test("IndiGo operating and marketing aliases collapse despite one-minute estimate drift", () => {
+  const records = [
+    {
+      fa_flight_id: "IGO968-operating",
+      ident: "IGO968",
+      origin_iata: "STV",
+      destination_iata: "CCU",
+      scheduled_out: "2026-09-01T11:50:00Z",
+      scheduled_in: "2026-09-01T14:29:00Z",
+    },
+    {
+      fa_flight_id: "IGO968-marketing",
+      ident_iata: "6E968",
+      ident: "IGO968",
+      origin_iata: "STV",
+      destination_iata: "CCU",
+      scheduled_out: "2026-09-01T11:50:30Z",
+      scheduled_in: "2026-09-01T14:30:00Z",
+    },
+  ];
+
+  const deduped = __test__.dedupeFlightAwareRecords(records, { flightNumber: "6E968" });
+  assert.equal(deduped.length, 1);
+  assert.equal(deduped[0].ident_iata, "6E968");
 });
 
 test("occurrence dedupe preserves two real same-day flights at different times", () => {

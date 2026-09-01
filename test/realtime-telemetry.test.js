@@ -158,3 +158,29 @@ test("mergeRealtimeTelemetry clears live position for terminal states", () => {
   assert.equal(merged.progressPercent, 100);
   assert.equal(merged.lastUpdated, "2026-03-18T10:12:00.000Z");
 });
+
+test("mergeRealtimeTelemetry keeps live tracking active through a diversion", () => {
+  const previous = {
+    status: "enroute",
+    livePosition: {
+      latitude: 46.1,
+      longitude: -96.2,
+      recordedAt: "2026-08-31T00:20:00.000Z",
+    },
+    progressPercent: 74,
+  };
+  const next = {
+    status: "diverted",
+    originalArrivalAirportIata: "BIS",
+    diversionAirportIata: "FAR",
+    livePosition: null,
+    progressPercent: null,
+    lastUpdated: "2026-08-31T00:21:00.000Z",
+  };
+
+  const merged = mergeRealtimeTelemetry(previous, next);
+
+  assert.deepEqual(merged.livePosition, previous.livePosition);
+  assert.equal(merged.progressPercent, 74);
+  assert.equal(merged.diversionAirportIata, "FAR");
+});

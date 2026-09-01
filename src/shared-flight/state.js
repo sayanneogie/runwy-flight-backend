@@ -69,6 +69,58 @@ function isFinalStatus(status) {
   return FINAL_STATUSES.has(String(status || "").toLowerCase());
 }
 
+function reconcileDiversionContext(normalized, requested = {}, existingRow = null) {
+  if (!normalized || typeof normalized !== "object") return normalized;
+
+  const existingNormalized = existingRow?.normalized_data || existingRow?.normalizedData || {};
+  const bookedDestination = normalizeAirport(
+    existingNormalized.originalDestination ||
+    existingNormalized.originalDestinationAirportIata ||
+    existingRow?.destination_airport ||
+    requested.destination ||
+    normalized.originalDestination ||
+    normalized.originalDestinationAirportIata ||
+    normalized.destination
+  );
+  const incomingDestination = normalizeAirport(
+    normalized.diversionAirport ||
+    normalized.diversionAirportIata ||
+    normalized.destination
+  );
+  const previousDiversion = normalizeAirport(
+    existingNormalized.diversionAirport || existingNormalized.diversionAirportIata
+  );
+  const providerSaysDiverted = String(
+    normalized.providerStatus || normalized.status || normalized.statusDetail || ""
+  ).toLowerCase().includes("divert");
+  const destinationChangedAfterDeparture = Boolean(existingRow) &&
+    bookedDestination !== "UNKNOWN" &&
+    incomingDestination !== "UNKNOWN" &&
+    incomingDestination !== bookedDestination &&
+    Boolean(
+      existingRow.actual_departure_at ||
+      normalized.actualDepartureAt ||
+      normalized.departureTimes?.actual ||
+      AIRBORNE_STATUSES.has(String(existingRow.status || normalized.status || "").toLowerCase())
+    );
+  const hasDiversion = previousDiversion !== "UNKNOWN" || providerSaysDiverted || destinationChangedAfterDeparture;
+
+  if (!hasDiversion) return normalized;
+
+  const diversionAirport = incomingDestination !== bookedDestination
+    ? incomingDestination
+    : previousDiversion;
+  if (bookedDestination === "UNKNOWN" || diversionAirport === "UNKNOWN") return normalized;
+
+  return {
+    ...normalized,
+    destination: bookedDestination,
+    originalDestination: bookedDestination,
+    diversionAirport,
+    isDiverted: true,
+  };
+}
+
 function timestampMs(value) {
   if (!value) return null;
   const ms = new Date(value).getTime();
@@ -195,7 +247,7 @@ function deriveFlightLifecyclePhase(flight, nowMs = Date.now()) {
       Number.isFinite(liveGroundSpeedKnots) && liveGroundSpeedKnots > 80)
   );
 
-  if (providerPhase === "cancelled" || providerPhase === "diverted") {
+  if (providerPhase === "cancelled") {
     return { phase: providerPhase, confidence: "provider_confirmed", reason: `provider_status_${providerPhase}` };
   }
   if (freshAirborneTelemetry(flight, nowMs) && (
@@ -231,6 +283,9 @@ function deriveFlightLifecyclePhase(flight, nowMs = Date.now()) {
       confidence: hasAirbornePosition ? "position_confirmed" : actualTakeoff ? "timestamp_confirmed" : "provider_confirmed",
       reason: hasAirbornePosition ? "airborne_position_present" : actualTakeoff ? "actual_takeoff_present" : "provider_airborne_status",
     };
+  }
+  if (providerPhase === "diverted") {
+    return { phase: "diverted", confidence: "provider_confirmed", reason: "provider_status_diverted_without_movement_evidence" };
   }
   // FlightAware's actual OUT timestamp means the aircraft left the gate. It is
   // not the OFF timestamp and must never, by itself, be shown as airborne.
@@ -342,8 +397,9 @@ function isStreamingActive(flightInstance) {
 }
 
 function mapNormalizedToDb(normalized, params = {}) {
+  normalized = reconcileDiversionContext(normalized, params, params.existingRow || null);
   const origin = normalizeAirport(normalized.origin || params.origin);
-  const destination = normalizeAirport(normalized.destination || params.destination);
+  const destination = normalizeAirport(normalized.originalDestination || normalized.destination || params.destination);
   const status = statusReconciledWithActualTimes(normalized);
   return {
     flight_key: buildFlightKey({
@@ -413,11 +469,15 @@ function rowToFlightResponse(row, { source = "postgres", freshness = "fresh", is
   return {
     flightKey: row.flight_key,
     flightInstanceId: row.id,
+    stateRevision: Number(row.state_revision || 0),
     providerFlightId: row.provider_flight_id,
     airlineCode: row.airline_code,
     flightNumber: row.flight_number,
     origin: row.origin_airport,
     destination: row.destination_airport,
+    originalDestination: normalized.originalDestination || row.destination_airport,
+    diversionAirport: normalized.diversionAirport || null,
+    isDiverted: normalized.isDiverted === true || Boolean(normalized.diversionAirport),
     status: displayStatusForPhase(lifecycle.phase, row.status),
     providerStatus: row.status,
     computedPhase: lifecycle.phase,
@@ -451,6 +511,9 @@ function rowToFlightResponse(row, { source = "postgres", freshness = "fresh", is
     arrivalTimezone: normalized.arrivalTimezone || null,
     inboundFlight: normalized.inboundFlight || null,
     baggageBelt: row.baggage_belt,
+    trackPoints: Array.isArray(normalized.trackPoints) ? normalized.trackPoints : [],
+    aircraftType: normalized.aircraftType || null,
+    aircraftRegistration: normalized.aircraftRegistration || null,
     position: {
       lat: row.position_lat,
       lon: row.position_lon,
@@ -472,6 +535,7 @@ function rowToFlightResponse(row, { source = "postgres", freshness = "fresh", is
 }
 
 function validateProviderFlight(normalized, requested, existingRow = null) {
+  normalized = reconcileDiversionContext(normalized, requested, existingRow);
   const problems = [];
   const airline = normalizeAirline(normalized.airlineCode);
   const number = normalizeFlightNumber(normalized.flightNumber);
@@ -488,7 +552,7 @@ function validateProviderFlight(normalized, requested, existingRow = null) {
     if (dayDelta > 1) problems.push("departure_date_mismatch");
   }
   if (requested.origin !== "UNKNOWN" && normalizeAirport(normalized.origin) !== requested.origin) problems.push("origin_mismatch");
-  if (requested.destination !== "UNKNOWN" && normalizeAirport(normalized.destination) !== requested.destination) problems.push("destination_mismatch");
+  if (requested.destination !== "UNKNOWN" && normalizeAirport(normalized.destination) !== requested.destination && normalized.isDiverted !== true) problems.push("destination_mismatch");
   if (normalized.scheduledArrivalAt && normalized.scheduledDepartureAt && Date.parse(normalized.scheduledArrivalAt) < Date.parse(normalized.scheduledDepartureAt)) {
     problems.push("arrival_before_departure");
   }
@@ -516,6 +580,14 @@ function compareFlightState(oldState, newState, nowMs = Date.now()) {
     events.push({ event_type, event_severity, old_value, new_value, summary, notification_required, confidence });
   };
 
+  const oldNormalized = oldState?.normalized_data || oldState?.normalizedData || oldState || {};
+  const newNormalized = newState?.normalized_data || newState?.normalizedData || newState || {};
+  const oldDiversion = normalizeAirport(oldNormalized.diversionAirport || oldNormalized.diversionAirportIata);
+  const newDiversion = normalizeAirport(newNormalized.diversionAirport || newNormalized.diversionAirportIata);
+  const originalDestination = normalizeAirport(
+    newNormalized.originalDestination || newNormalized.originalDestinationAirportIata || oldState?.destination_airport
+  );
+
   if (!oldState) {
     push("SCHEDULED", "low", null, { status: newStatus }, "Flight tracking started", false);
     return events;
@@ -537,7 +609,7 @@ function compareFlightState(oldState, newState, nowMs = Date.now()) {
   let emittedAirborneEvent = false;
   if (newStatus !== oldStatus) {
     if (newStatus === "cancelled") push("CANCELLED", "critical", { status: oldStatus }, { status: newStatus }, "Flight has been cancelled", true);
-    else if (newStatus === "diverted") push("DIVERTED", "critical", { status: oldStatus }, { status: newStatus }, "Flight has been diverted", true);
+    else if (newStatus === "diverted") push("DIVERTED", "critical", { status: oldStatus }, { status: newStatus, originalDestination, diversionAirport: newDiversion === "UNKNOWN" ? null : newDiversion }, newDiversion !== "UNKNOWN" ? `Flight diverted to ${newDiversion}` : "Flight has been diverted", true);
     else if (["taxiing", "taxi_out"].includes(newStatus)) push("TAXIING", "medium", { status: oldStatus }, { status: newStatus }, "Flight is taxiing", true);
     else if (newStatus === "takeoff_roll") push("TAKEOFF_ROLL", "high", { status: oldStatus }, { status: newStatus }, "Flight is about to take off", true);
     else if (newStatus === "taxi_in") push("TAXI_IN", "low", { status: oldStatus }, { status: newStatus }, "Flight is taxiing to the gate", true);
@@ -549,6 +621,34 @@ function compareFlightState(oldState, newState, nowMs = Date.now()) {
     }
     else if (newStatus === "landed") push("LANDED", "medium", { status: oldStatus }, { status: newStatus }, "Flight has landed", true);
     else if (newStatus === "arrived") push("ARRIVED", "medium", { status: oldStatus }, { status: newStatus }, "Flight has arrived", true);
+  }
+
+
+  if (newDiversion !== "UNKNOWN" && newDiversion !== oldDiversion && newStatus !== "diverted") {
+    push(
+      "DIVERTED",
+      "critical",
+      { originalDestination, diversionAirport: oldDiversion === "UNKNOWN" ? null : oldDiversion },
+      { originalDestination, diversionAirport: newDiversion },
+      `Flight diverted to ${newDiversion}`,
+      true
+    );
+  }
+
+  const oldAircraftType = String(oldNormalized.aircraftType || "").trim().toUpperCase();
+  const newAircraftType = String(newNormalized.aircraftType || "").trim().toUpperCase();
+  const oldRegistration = String(oldNormalized.aircraftRegistration || "").trim().toUpperCase();
+  const newRegistration = String(newNormalized.aircraftRegistration || "").trim().toUpperCase();
+  if ((newAircraftType && oldAircraftType && newAircraftType !== oldAircraftType) ||
+      (newRegistration && oldRegistration && newRegistration !== oldRegistration)) {
+    push(
+      "AIRCRAFT_CHANGED",
+      "medium",
+      { aircraftType: oldAircraftType || null, aircraftRegistration: oldRegistration || null },
+      { aircraftType: newAircraftType || null, aircraftRegistration: newRegistration || null },
+      `Aircraft changed${newAircraftType ? ` to ${newAircraftType}` : ""}`,
+      true
+    );
   }
 
   // A stale/time-inferred row may already say `enroute` before the aircraft
@@ -644,6 +744,7 @@ module.exports = {
   isProviderAlertActive,
   isFinalStatus,
   mapNormalizedToDb,
+  reconcileDiversionContext,
   isStreamingActive,
   normalizeSearchParams,
   rowToFlightResponse,

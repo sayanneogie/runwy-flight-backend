@@ -268,8 +268,16 @@ Legacy query-string webhook secrets are still accepted for backward compatibilit
 - Railway should be split into at least two services:
   - API service: `node src/server.js`
   - Firehose worker: `node src/flight-firehose.js`
-- If your Firehose access is unavailable or expired, add the poller as the fallback worker:
-  - Poller worker: `node src/flight-poller.js`
+- The separate legacy poller worker (`node src/flight-poller.js`) remains available
+  only for non-shared tracking sessions; it is not required for canonical flights.
+- Runwy's shared-flight API path works without Firehose. Keep
+  `SHARED_FLIGHT_API_POLLING_ENABLED=true` and `ENABLE_FIREHOSE_WORKER=false` to
+  refresh each active physical flight once for all subscribed users. By default
+  it checks active flights every two minutes, begins predeparture polling 45
+  minutes before takeoff, and backs off after the arrival window.
+- Do not enable the legacy poller merely to refresh shared-flight rows; those
+  rows deliberately have `providerRefreshOwner=shared_flight_instance` so the
+  canonical API loop remains the single provider-call owner.
 - On Railway, prefer direct Node start commands over `npm run ...` to avoid npm runtime warnings.
 - If you use a custom API command, keep `ENABLE_TRACKING_POLLER=false`.
 - For a Firehose-only worker, it is fine to set `DISABLE_PROVIDER_CALLS=true` there so the worker does not make AeroAPI refresh calls.

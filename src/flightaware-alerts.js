@@ -107,7 +107,10 @@ function flightUpdateFromAlert(row, alert) {
     airlineCode: row.airline_code || alert.airlineCode,
     flightNumber: row.flight_number || alert.flightNumber,
     origin: row.origin_airport || alert.origin,
-    destination: row.destination_airport || alert.destination,
+    // A diversion alert's destination is the operational diversion airport.
+    // Keep it so the shared-state layer can preserve the booked destination
+    // separately instead of silently flattening the exception.
+    destination: alert.destination || row.destination_airport,
     status,
     statusDetail: alert.human_readable_summary,
     scheduledDepartureAt: alert.scheduled_out || row.scheduled_departure_at,
@@ -178,7 +181,7 @@ function targetMatchesAlert(row, alert) {
   // it because a local-midnight database date serialized to the prior UTC day.
   if (!exactProviderFlight && alert.departureDate && String(row.departure_date || "").slice(0, 10) !== alert.departureDate) return false;
   if (alert.origin && row.origin_airport && row.origin_airport !== alert.origin) return false;
-  if (alert.destination && row.destination_airport && row.destination_airport !== alert.destination) return false;
+  if (!exactProviderFlight && alert.destination && row.destination_airport && row.destination_airport !== alert.destination) return false;
   return true;
 }
 
