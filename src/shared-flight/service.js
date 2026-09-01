@@ -333,6 +333,7 @@ function createSharedFlightService({
       // passes the original flight identity validation below.
       const shouldResolveOperationalReplacement =
         !providerNormalized ||
+        isOperationallyPastArrivalWithoutFinalState(row) ||
         (
           isOperationallyOverdueWithoutTakeoff(row) &&
           !hasOperationalDepartureEvidence(providerNormalized)

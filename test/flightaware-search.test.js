@@ -794,6 +794,44 @@ test("scoreCandidate prioritizes an airborne adjacent-date occurrence over a sch
   assert.ok(airborneScore > scheduledScore);
 });
 
+test("scoreCandidate prioritizes a completed occurrence over a stale taxiing match", () => {
+  const query = {
+    flightNumber: "QP1824",
+    date: "2026-09-01",
+    departureIata: "DEL",
+    arrivalIata: "BLR",
+  };
+  const staleTaxiingScore = __test__.scoreCandidate(
+    {
+      ident_iata: "QP1824",
+      status: "Taxiing / Delayed",
+      scheduled_out: "2026-09-01T14:40:00Z",
+      scheduled_in: "2026-09-01T17:40:00Z",
+      actual_out: "2026-09-01T15:43:00Z",
+      origin_iata: "DEL",
+      destination_iata: "BLR",
+    },
+    query,
+    __test__.normalizeRecordFromFlightAware
+  );
+  const landedScore = __test__.scoreCandidate(
+    {
+      ident_iata: "QP1824",
+      status: "Landed",
+      scheduled_out: "2026-09-01T14:40:00Z",
+      scheduled_in: "2026-09-01T17:40:00Z",
+      actual_out: "2026-09-01T15:03:00Z",
+      actual_on: "2026-09-01T18:14:00Z",
+      origin_iata: "DEL",
+      destination_iata: "BLR",
+    },
+    query,
+    __test__.normalizeRecordFromFlightAware
+  );
+
+  assert.ok(landedScore > staleTaxiingScore);
+});
+
 test("flightAwareHistoryBounds widens to UTC day coverage for the selected local day", () => {
   assert.deepEqual(__test__.flightAwareHistoryBounds("2026-04-23", 330), {
     start: "2026-04-22",

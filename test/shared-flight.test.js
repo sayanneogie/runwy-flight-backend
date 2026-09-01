@@ -1796,6 +1796,73 @@ test("arrival catchup reconciles a streamed flight when both lifecycle events we
   assert.equal(row.actual_arrival_at, arrival);
 });
 
+test("post-arrival refresh replaces a stale exact provider occurrence with the completed match", async () => {
+  const departure = new Date(Date.now() - 4 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() - 35 * 60_000).toISOString();
+  let exactProviderCalls = 0;
+  const { service, repository, providerCalls } = makeService((calls) => calls === 1
+    ? normalizedFlight({
+        providerFlightId: "AKJ1824-stale",
+        airlineCode: "QP",
+        flightNumber: "1824",
+        origin: "DEL",
+        destination: "BLR",
+        status: "taxiing",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+      })
+    : normalizedFlight({
+        providerFlightId: "AKJ1824-completed",
+        airlineCode: "QP",
+        flightNumber: "1824",
+        origin: "DEL",
+        destination: "BLR",
+        status: "landed",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        actualArrivalAt: arrival,
+      }), {
+    fetchFlightByProviderId: async () => {
+      exactProviderCalls += 1;
+      return normalizedFlight({
+        providerFlightId: "AKJ1824-stale",
+        airlineCode: "QP",
+        flightNumber: "1824",
+        origin: "DEL",
+        destination: "BLR",
+        status: "taxiing",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+      });
+    },
+  });
+
+  const flight = await service.searchFlight({
+    airline: "QP",
+    number: "1824",
+    date: departure.slice(0, 10),
+    origin: "DEL",
+    destination: "BLR",
+  });
+  await service.arrivalCatchupJob({ data: { flight_instance_id: flight.flightInstanceId } });
+
+  const row = await repository.findFlightById(flight.flightInstanceId);
+  assert.equal(exactProviderCalls, 1);
+  assert.equal(providerCalls(), 2);
+  assert.equal(row.provider_flight_id, "AKJ1824-completed");
+  assert.equal(row.status, "landed");
+  assert.equal(row.actual_arrival_at, arrival);
+});
+
 test("arrival detail refresh fills destination gate terminal and baggage before arrival", async () => {
   const departure = new Date(Date.now() - 6 * 60 * 60_000).toISOString();
   const arrival = new Date(Date.now() + 2 * 60 * 60_000).toISOString();

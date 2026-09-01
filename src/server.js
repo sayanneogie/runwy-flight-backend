@@ -3043,6 +3043,13 @@ function scoreCandidate(record, query, normalizer) {
       "taxi_in",
     ].includes(normalized.status)
   ) score += 8;
+  // An operational search can contain both an old active-looking occurrence
+  // and the completed occurrence for the same flight/date/route. Arrival is
+  // stronger lifecycle evidence than a stale "Taxiing / Delayed" status, so
+  // never let the active-state bonus hide a landed match.
+  if (["landed", "arrived", "arrived_at_gate"].includes(normalized.status)) {
+    score += normalized.arrivalTimes?.actual || normalized.landingTimes?.actual ? 12 : 10;
+  }
   return score;
 }
 
