@@ -16,6 +16,7 @@ const {
   displayStatusForPhase,
   getFlightFreshnessTTL,
   mapNormalizedToDb,
+  normalizeSearchParams,
   reconcileDiversionContext,
 } = require("../src/shared-flight/state");
 
@@ -393,6 +394,67 @@ test("provider adapter preserves separate gate-out and wheels-off timestamps", a
 
   assert.equal(result.departureTimes.actual, "2026-08-28T10:53:00.000Z");
   assert.equal(result.takeoffTimes.actual, "2026-08-28T11:07:35.000Z");
+});
+
+test("shared flight search preserves the origin timezone offset for the provider query", async () => {
+  let providerQuery = null;
+  const adapter = createProviderAdapter({
+    providerName: "flightaware",
+    fetchFlights: async (query) => {
+      providerQuery = query;
+      return [{ fa_flight_id: "AKJ1516-instance" }];
+    },
+    normalizeRecord: () => normalizedFlight({
+      airlineCode: "QP",
+      flightNumber: "QP1516",
+      origin: "BOM",
+      destination: "BLR",
+    }),
+    selectRecord: (records) => records[0],
+  });
+  const params = normalizeSearchParams({
+    airline: "QP",
+    number: "1516",
+    date: "2026-09-03",
+    origin: "BOM",
+    destination: "BLR",
+    timezoneOffsetMinutes: 330,
+  });
+
+  const result = await adapter.fetchFlightByNumber(params);
+
+  assert.equal(providerQuery.timezoneOffsetMinutes, 330);
+  assert.equal(result.timezoneOffsetMinutes, 330);
+});
+
+test("shared flight search repairs an adjacent UTC-day occurrence cached under the local date", async () => {
+  const { service, providerCalls } = makeService((call) => normalizedFlight({
+    providerFlightId: call === 1 ? "QP1516-next-day" : "QP1516-current",
+    airlineCode: "QP",
+    flightNumber: "1516",
+    origin: "BOM",
+    destination: "BLR",
+    scheduledDepartureAt: call === 1
+      ? "2026-09-03T19:10:00.000Z"
+      : "2026-09-02T19:10:00.000Z",
+    scheduledArrivalAt: call === 1
+      ? "2026-09-03T21:05:00.000Z"
+      : "2026-09-02T21:05:00.000Z",
+  }));
+  const input = {
+    airline: "QP",
+    number: "1516",
+    date: "2026-09-03",
+    origin: "BOM",
+    destination: "BLR",
+  };
+
+  await service.searchFlight(input);
+  const repaired = await service.searchFlight({ ...input, timezoneOffsetMinutes: 330 });
+
+  assert.equal(providerCalls(), 2);
+  assert.equal(repaired.providerFlightId, "QP1516-current");
+  assert.equal(repaired.scheduledDepartureAt, "2026-09-02T19:10:00.000Z");
 });
 
 test("1000 users searching the same missing flight cause only one provider call", async () => {

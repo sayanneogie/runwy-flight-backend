@@ -242,10 +242,15 @@ function createSharedFlightService({
     const params = normalizeSearchParams(input);
     const cacheKey = `flight:${params.flightKey}`;
     const cached = await cache.getJSON(cacheKey);
-    if (cached) return { ...cached, source: "redis", freshness: cached.freshness || "fresh", isRefreshing: false };
+    if (cached && matchesRequestedOriginLocalDate(cached, params)) {
+      return { ...cached, source: "redis", freshness: cached.freshness || "fresh", isRefreshing: false };
+    }
+    if (cached) {
+      await cache.redis.del(cacheKey);
+    }
 
     const existing = await repository.findFlightByKeyOrAlias(params.flightKey);
-    if (existing) {
+    if (existing && matchesRequestedOriginLocalDate(existing, params)) {
       const fresh = existing.fresh_until && new Date(existing.fresh_until).getTime() > Date.now();
       const deferPolling = shouldDeferProviderPolling(existing);
       const row = !fresh && deferPolling
@@ -351,6 +356,7 @@ function createSharedFlightService({
     const startedAt = Date.now();
     try {
       const params = { airline: row.airline_code, number: row.flight_number, date: dateOnly(row.departure_date), origin: row.origin_airport || "UNKNOWN", destination: row.destination_airport || "UNKNOWN", flightKey: row.flight_key };
+      params.timezoneOffsetMinutes = row.normalized_data?.timezoneOffsetMinutes ?? null;
       const reason = String(job.data.reason || "");
       const usesTrackedFlightReserve =
         isOperationallyOverdueWithoutTakeoff(row) ||
@@ -1865,6 +1871,33 @@ function sharedNotificationType(eventType) {
 function dateOnly(value) {
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return String(value || "").slice(0, 10);
+}
+
+function matchesRequestedOriginLocalDate(flight, params) {
+  if (params.timezoneOffsetMinutes === null || params.timezoneOffsetMinutes === undefined) {
+    return true;
+  }
+
+  const departure =
+    flight?.scheduledDepartureAt ||
+    flight?.estimatedDepartureAt ||
+    flight?.actualDepartureAt ||
+    flight?.scheduled_departure_at ||
+    flight?.estimated_departure_at ||
+    flight?.actual_departure_at ||
+    flight?.departureTimes?.scheduled ||
+    flight?.departureTimes?.estimated ||
+    flight?.departureTimes?.actual ||
+    flight?.normalized_data?.departureTimes?.scheduled ||
+    flight?.normalized_data?.departureTimes?.estimated ||
+    flight?.normalized_data?.departureTimes?.actual;
+  const departureMs = new Date(departure || 0).getTime();
+  if (!Number.isFinite(departureMs)) return true;
+
+  const localDepartureDate = new Date(
+    departureMs + params.timezoneOffsetMinutes * 60_000
+  ).toISOString().slice(0, 10);
+  return localDepartureDate === params.date;
 }
 
 function searchInputFromUserFlight(row = {}) {

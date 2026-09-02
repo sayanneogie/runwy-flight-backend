@@ -6916,6 +6916,7 @@ function sharedTrackInputFromQuery(query) {
     date: query.date,
     origin: query.departureIata || undefined,
     destination: query.arrivalIata || undefined,
+    timezoneOffsetMinutes: query.timezoneOffsetMinutes ?? null,
     // The shared flight instance is the sole provider-refresh and notification
     // owner for bridged sessions. The legacy tracking projection stays paused.
     notificationEnabled: true,

@@ -10,6 +10,7 @@ function createProviderAdapter({ providerName, fetchFlights, fetchByProviderId, 
         date: params.date,
         departureIata: params.origin === "UNKNOWN" ? null : params.origin,
         arrivalIata: params.destination === "UNKNOWN" ? null : params.destination,
+        timezoneOffsetMinutes: params.timezoneOffsetMinutes ?? null,
       };
       const records = await fetchFlights(query, options);
       const selected = selectRecord ? selectRecord(records, query, normalizeRecord) : records?.[0];
@@ -86,6 +87,7 @@ function normalizeProviderRecord(record, normalizeRecord, providerName, params) 
       recordedAt: normalized.livePosition?.recordedAt ?? normalized.position?.recordedAt ?? normalized.lastUpdated ?? null,
     },
     provider: providerName,
+    timezoneOffsetMinutes: params.timezoneOffsetMinutes ?? normalized.timezoneOffsetMinutes ?? null,
     dataConfidence: normalized.dataConfidence || "medium",
     rawProviderResponse: record,
   };

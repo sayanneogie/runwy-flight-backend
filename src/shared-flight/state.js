@@ -26,6 +26,13 @@ function normalizeDate(input) {
   return value;
 }
 
+function normalizeTimezoneOffsetMinutes(input) {
+  if (input === null || input === undefined || input === "") return null;
+  const numeric = Number(input);
+  if (!Number.isFinite(numeric)) return null;
+  return Math.max(-840, Math.min(840, Math.trunc(numeric)));
+}
+
 function buildFlightKey({ airline, airlineCode, number, flightNumber, date, departureDate, origin, destination }) {
   const airlinePart = normalizeAirline(airline || airlineCode);
   const numberPart = normalizeFlightNumber(number || flightNumber);
@@ -44,12 +51,21 @@ function normalizeSearchParams(input) {
   const date = normalizeDate(input.date || input.departureDate);
   const origin = input.origin || input.departureIata ? normalizeAirport(input.origin || input.departureIata) : "UNKNOWN";
   const destination = input.destination || input.arrivalIata ? normalizeAirport(input.destination || input.arrivalIata) : "UNKNOWN";
+  const timezoneOffsetMinutes = normalizeTimezoneOffsetMinutes(input.timezoneOffsetMinutes);
   if (!airline || !number || !date) {
     const error = new Error("airline, number, and date are required");
     error.statusCode = 400;
     throw error;
   }
-  return { airline, number, date, origin, destination, flightKey: buildFlightKey({ airline, number, date, origin, destination }) };
+  return {
+    airline,
+    number,
+    date,
+    origin,
+    destination,
+    timezoneOffsetMinutes,
+    flightKey: buildFlightKey({ airline, number, date, origin, destination }),
+  };
 }
 
 function toIso(value) {
