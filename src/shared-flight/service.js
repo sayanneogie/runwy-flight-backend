@@ -861,6 +861,15 @@ function createSharedFlightService({
       if (deleted) removed.push(deleted);
     }
 
+    // Deleting a duplicate is not the same as deleting the occurrence. Mark
+    // the row selected by the current displayed manifest after cleanup so its
+    // active intent outranks the duplicate tombstone during APNs targeting.
+    // Without this ordering, notifications remain suppressed until a later app
+    // sync happens to touch the retained row.
+    if (retainedIds.size > 0 && typeof repository.markUserFlightsDisplayed === "function") {
+      await repository.markUserFlightsDisplayed(userId, [...retainedIds]);
+    }
+
     const orphanedFlightInstanceIds = [];
     const candidateFlightInstanceIds = new Set(
       removed.map((row) => row.flight_instance_id).filter(Boolean)

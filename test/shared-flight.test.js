@@ -1306,6 +1306,14 @@ test("displayed-flight reconciliation consolidates duplicate rows for one occurr
   assert.equal(result.duplicatesConsolidated, 1);
   assert.equal(repository.__memory.userFlights.get("client").deleted_at, null);
   assert.ok(repository.__memory.userFlights.get("mirror").deleted_at);
+
+  const targets = await repository.listNotificationTargets(
+    "shared-flight",
+    "medium",
+    "LANDED"
+  );
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].userFlight.id, "client-row");
 });
 
 test("displayed-flight reconciliation rejects an incomplete manifest before deleting anything", async () => {
@@ -1337,10 +1345,13 @@ test("Postgres shared-flight upsert clears tombstones and notification lookup fo
   await repository.upsertUserFlight("user-1", "flight-1", {});
   await repository.hasActiveUserFlights("flight-1");
   await repository.listNotificationTargets("flight-1", "high", "LANDED");
+  await repository.markUserFlightsDisplayed("user-1", ["user-flight-1"]);
 
   assert.match(statements[0], /on conflict[\s\S]*deleted_at = null/i);
   assert.match(statements[1], /sharedFlightInstanceId/);
   assert.match(statements[2], /sharedFlightInstanceId/);
+  assert.match(statements[2], /deleted_uf\.deleted_at > greatest/);
+  assert.match(statements[3], /set updated_at = clock_timestamp\(\)/);
 });
 
 test("stream update targets can be found by provider id or canonical flight number", async () => {

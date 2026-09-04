@@ -36,7 +36,7 @@ function hasNewerDeletedOccurrence(rows, candidate) {
     const deletedDeparture = Date.parse(row.scheduled_departure || "");
     if (!Number.isFinite(candidateDeparture) || !Number.isFinite(deletedDeparture) || Math.abs(deletedDeparture - candidateDeparture) > 30 * 60_000) return false;
     const deletedAt = Date.parse(row.deleted_at);
-    return candidateRevisionAt === Number.NEGATIVE_INFINITY || (Number.isFinite(deletedAt) && deletedAt >= candidateRevisionAt);
+    return candidateRevisionAt === Number.NEGATIVE_INFINITY || (Number.isFinite(deletedAt) && deletedAt > candidateRevisionAt);
   });
 }
 
@@ -312,6 +312,23 @@ function createMemorySharedFlightRepository() {
       const saved = { ...row, ...patch };
       userFlights.set(key, saved);
       return saved;
+    },
+    async markUserFlightsDisplayed(userId, ids) {
+      const wanted = new Set((ids || []).map((id) => String(id)));
+      const displayedAt = new Date().toISOString();
+      let updated = 0;
+      for (const [key, row] of userFlights.entries()) {
+        if (
+          row.user_id === userId &&
+          wanted.has(String(row.id)) &&
+          !row.deleted_at &&
+          row.lifecycle_state !== "deleted"
+        ) {
+          userFlights.set(key, { ...row, updated_at: displayedAt });
+          updated += 1;
+        }
+      }
+      return updated;
     },
     async listUserFlightsByIds(userId, ids) {
       const wanted = new Set((ids || []).map((id) => String(id)));
@@ -1186,6 +1203,18 @@ function createPostgresSharedFlightRepository(pool) {
         [userId, id, patch.notification_enabled, patch.alert_preferences, patch.user_label, patch.visibility]
       ));
     },
+    async markUserFlightsDisplayed(userId, ids) {
+      const result = await pool.query(
+        `update public.user_flights
+         set updated_at = clock_timestamp()
+         where user_id = $1::uuid
+           and id = any($2::uuid[])
+           and deleted_at is null
+           and coalesce(lifecycle_state, '') <> 'deleted'`,
+        [userId, ids || []]
+      );
+      return result.rowCount || 0;
+    },
     async listUserFlightsByIds(userId, ids) {
       const result = await pool.query(
         `select *
@@ -1353,7 +1382,7 @@ function createPostgresSharedFlightRepository(pool) {
                from public.user_flights deleted_uf
                where deleted_uf.user_id = uf.user_id
                  and deleted_uf.deleted_at is not null
-                 and deleted_uf.deleted_at >= greatest(
+                 and deleted_uf.deleted_at > greatest(
                    coalesce(uf.created_at, '-infinity'::timestamptz),
                    coalesce(uf.updated_at, '-infinity'::timestamptz)
                  )
@@ -1397,7 +1426,7 @@ function createPostgresSharedFlightRepository(pool) {
                from public.user_flights deleted_uf
                where deleted_uf.user_id = uf.user_id
                  and deleted_uf.deleted_at is not null
-                 and deleted_uf.deleted_at >= greatest(
+                 and deleted_uf.deleted_at > greatest(
                    coalesce(uf.created_at, '-infinity'::timestamptz),
                    coalesce(uf.updated_at, '-infinity'::timestamptz)
                  )
