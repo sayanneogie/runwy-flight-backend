@@ -18,6 +18,11 @@ function normalizedFlightNumber(value) {
 function hasNewerDeletedOccurrence(rows, candidate) {
   const candidateDeparture = Date.parse(candidate.scheduled_departure || "");
   const candidateCreatedAt = Date.parse(candidate.created_at || candidate.added_at || "");
+  const candidateUpdatedAt = Date.parse(candidate.updated_at || "");
+  const candidateRevisionAt = Math.max(
+    Number.isFinite(candidateCreatedAt) ? candidateCreatedAt : Number.NEGATIVE_INFINITY,
+    Number.isFinite(candidateUpdatedAt) ? candidateUpdatedAt : Number.NEGATIVE_INFINITY
+  );
   return rows.some((row) => {
     if (row.user_id !== candidate.user_id || !row.deleted_at) return false;
     if (normalizedFlightNumber(row.display_flight_number) !== normalizedFlightNumber(candidate.display_flight_number)) return false;
@@ -26,7 +31,7 @@ function hasNewerDeletedOccurrence(rows, candidate) {
     const deletedDeparture = Date.parse(row.scheduled_departure || "");
     if (!Number.isFinite(candidateDeparture) || !Number.isFinite(deletedDeparture) || Math.abs(deletedDeparture - candidateDeparture) > 30 * 60_000) return false;
     const deletedAt = Date.parse(row.deleted_at);
-    return !Number.isFinite(candidateCreatedAt) || (Number.isFinite(deletedAt) && deletedAt >= candidateCreatedAt);
+    return candidateRevisionAt === Number.NEGATIVE_INFINITY || (Number.isFinite(deletedAt) && deletedAt >= candidateRevisionAt);
   });
 }
 
@@ -1343,7 +1348,10 @@ function createPostgresSharedFlightRepository(pool) {
                from public.user_flights deleted_uf
                where deleted_uf.user_id = uf.user_id
                  and deleted_uf.deleted_at is not null
-                 and deleted_uf.deleted_at >= uf.created_at
+                 and deleted_uf.deleted_at >= greatest(
+                   coalesce(uf.created_at, '-infinity'::timestamptz),
+                   coalesce(uf.updated_at, '-infinity'::timestamptz)
+                 )
                  and regexp_replace(upper(coalesce(deleted_uf.display_flight_number, '')), '[^A-Z0-9]', '', 'g')
                    = regexp_replace(upper(coalesce(uf.display_flight_number, '')), '[^A-Z0-9]', '', 'g')
                  and upper(coalesce(deleted_uf.origin_iata, '')) = upper(coalesce(uf.origin_iata, ''))
@@ -1384,7 +1392,10 @@ function createPostgresSharedFlightRepository(pool) {
                from public.user_flights deleted_uf
                where deleted_uf.user_id = uf.user_id
                  and deleted_uf.deleted_at is not null
-                 and deleted_uf.deleted_at >= uf.created_at
+                 and deleted_uf.deleted_at >= greatest(
+                   coalesce(uf.created_at, '-infinity'::timestamptz),
+                   coalesce(uf.updated_at, '-infinity'::timestamptz)
+                 )
                  and regexp_replace(upper(coalesce(deleted_uf.display_flight_number, '')), '[^A-Z0-9]', '', 'g')
                    = regexp_replace(upper(coalesce(uf.display_flight_number, '')), '[^A-Z0-9]', '', 'g')
                  and upper(coalesce(deleted_uf.origin_iata, '')) = upper(coalesce(uf.origin_iata, ''))

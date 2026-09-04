@@ -1110,6 +1110,45 @@ test("notification fanout rejects an active canonical row when a normalized dele
   assert.equal(targets.length, 0);
 });
 
+test("notification fanout retains a canonical row refreshed after duplicate cleanup", async () => {
+  const { service, repository } = makeService();
+  const saved = await service.saveUserFlight("u1", {
+    airline: "SQ",
+    number: "509",
+    date: "2026-05-27",
+    origin: "BLR",
+    destination: "SIN",
+  });
+  const active = saved.userFlight;
+  const deletedAt = new Date(Date.parse(active.created_at) + 1_000).toISOString();
+  const refreshedAt = new Date(Date.parse(active.created_at) + 2_000).toISOString();
+
+  repository.__memory.userFlights.set("deleted-duplicate", {
+    ...active,
+    id: "deleted-duplicate",
+    flight_instance_id: null,
+    display_flight_number: "SQ509",
+    lifecycle_state: "deleted",
+    notification_enabled: false,
+    notifications_enabled: false,
+    deleted_at: deletedAt,
+    updated_at: deletedAt,
+  });
+  repository.__memory.userFlights.set(`${active.user_id}:${active.flight_instance_id}`, {
+    ...active,
+    updated_at: refreshedAt,
+  });
+
+  const targets = await repository.listNotificationTargets(
+    saved.flight.flightInstanceId,
+    "low",
+    "TRIP_STARTING"
+  );
+
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].userFlight.id, active.id);
+});
+
 test("saving a previously deleted shared flight reactivates its notification row", async () => {
   const { service, repository } = makeService();
   const input = {
