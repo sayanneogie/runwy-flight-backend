@@ -148,6 +148,23 @@ test("live snapshot projection is revisioned and rejects older envelopes atomica
   assert.equal(projection.params.at(-1), 42);
 });
 
+test("tracking snapshot upserts reactivate a previously deleted bridge row", async () => {
+  const { store, queries } = makeStore();
+  await store.persistTrackingSnapshot({
+    flightId: "11111111-1111-1111-1111-111111111111",
+    userId: "22222222-2222-2222-2222-222222222222",
+    query: { flightNumber: "AI101", date: "2026-09-04", departureIata: "DEL", arrivalIata: "FCO" },
+    normalized: makeNormalized({ flightNumber: "AI101", arrivalAirportIata: "FCO", status: "taxiing" }),
+    provider: "flightaware",
+    providerFlightId: "AIC101-test",
+    rawProviderPayload: {},
+  });
+
+  const bridgeUpsert = queries.find(({ sql }) => sql.includes("insert into public.user_flights"));
+  assert.ok(bridgeUpsert, "expected tracking bridge upsert");
+  assert.match(bridgeUpsert.sql, /on conflict \(user_id, tracking_session_id\)[\s\S]*deleted_at = null/);
+});
+
 test("terminal snapshots expose actual breadcrumbs for archive persistence", () => {
   const points = [
     { latitude: 41.8, longitude: 12.2 },

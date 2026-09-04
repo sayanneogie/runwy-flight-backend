@@ -1010,6 +1010,11 @@ function createTrackingStore({
       )
       on conflict (user_id, tracking_session_id)
       do update set
+        -- A tracking bridge can reuse a row that the user previously deleted.
+        -- Once the flight has been saved/tracked again, that tombstone must not
+        -- survive the upsert or the deletion trigger will immediately pause the
+        -- newly active tracking session.
+        deleted_at = null,
         source_type = excluded.source_type,
         lifecycle_state = excluded.lifecycle_state,
         display_flight_number = excluded.display_flight_number,
