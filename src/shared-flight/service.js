@@ -14,7 +14,7 @@ const {
   validateProviderFlight,
 } = require("./state");
 const { createSharedFlightQueue } = require("./queue");
-const { createApnsSender, notificationPayload } = require("./notifications");
+const { createApnsSender, notificationDedupeKey, notificationPayload } = require("./notifications");
 const { createFlightWeatherService, weatherEventFromInsight, weatherTargetForFlight } = require("./weather");
 const {
   extractFlightAwareAlertEvents,
@@ -55,6 +55,61 @@ const ARRIVAL_DETAIL_CHECKPOINTS = [
   { stage: "post-15m", offsetMs: 15 * 60_000 },
   { stage: "post-30m", offsetMs: 30 * 60_000 },
 ];
+const DISPLAYED_FLIGHT_OCCURRENCE_TOLERANCE_MS = 30 * 60_000;
+const MAX_DISPLAYED_FLIGHT_MANIFEST_ITEMS = 100;
+const APNS_OUTBOX_LEASE_MS = 30_000;
+const APNS_OUTBOX_MAX_ATTEMPTS = 4;
+const APNS_OUTBOX_RETRY_BASE_MS = 30_000;
+
+function normalizedDisplayedFlightManifest(input = {}) {
+  if (!Array.isArray(input.flights)) {
+    const error = new Error("flights must be an array");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (input.flights.length > MAX_DISPLAYED_FLIGHT_MANIFEST_ITEMS) {
+    const error = new Error(`flights may contain at most ${MAX_DISPLAYED_FLIGHT_MANIFEST_ITEMS} items`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return input.flights.map((item, index) => {
+    const flightNumber = String(item?.flightNumber || item?.flight_number || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "");
+    const origin = String(item?.origin || item?.originIata || item?.origin_iata || "").trim().toUpperCase();
+    const destination = String(item?.destination || item?.destinationIata || item?.destination_iata || "").trim().toUpperCase();
+    const scheduledDeparture = item?.scheduledDeparture || item?.scheduled_departure;
+    const scheduledDepartureMs = Date.parse(scheduledDeparture || "");
+    if (!flightNumber || !origin || !destination || !Number.isFinite(scheduledDepartureMs)) {
+      const error = new Error(`flights[${index}] must include flightNumber, origin, destination, and scheduledDeparture`);
+      error.statusCode = 400;
+      throw error;
+    }
+    return {
+      id: String(item?.id || "").trim() || null,
+      flightNumber,
+      origin,
+      destination,
+      scheduledDepartureMs,
+    };
+  });
+}
+
+function userFlightMatchesDisplayedManifest(row, manifestItem) {
+  if (manifestItem.id && String(row.id) === manifestItem.id) return true;
+  const flightNumber = String(row.display_flight_number || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+  if (flightNumber !== manifestItem.flightNumber) return false;
+  if (String(row.origin_iata || "").trim().toUpperCase() !== manifestItem.origin) return false;
+  if (String(row.destination_iata || "").trim().toUpperCase() !== manifestItem.destination) return false;
+  const scheduledDepartureMs = Date.parse(row.scheduled_departure || "");
+  return Number.isFinite(scheduledDepartureMs) &&
+    Math.abs(scheduledDepartureMs - manifestItem.scheduledDepartureMs) <= DISPLAYED_FLIGHT_OCCURRENCE_TOLERANCE_MS;
+}
 
 function normalizedBreadcrumb(point) {
   const latitude = Number(point?.latitude ?? point?.lat);
@@ -110,6 +165,16 @@ function preserveKnownOperationalFields(normalized, row) {
     }
     return next;
   };
+  const mergeTimes = (name) => {
+    const prior = previous?.[name] || {};
+    const incoming = normalized?.[name] || {};
+    if (!Object.keys(prior).length && !Object.keys(incoming).length) return undefined;
+    return {
+      ...prior,
+      ...incoming,
+      actual: preferred(incoming.actual, prior.actual),
+    };
+  };
 
   const mergeInboundFlight = (nextInbound, previousInbound) => {
     if (!nextInbound) return previousInbound || null;
@@ -147,9 +212,55 @@ function preserveKnownOperationalFields(normalized, row) {
   };
 
   const trackPoints = accumulatedBreadcrumbs(previous, normalized);
+  const takeoffTimes = mergeTimes("takeoffTimes");
+  const departureTimes = mergeTimes("departureTimes");
+  const arrivalTimes = mergeTimes("arrivalTimes");
+  const previousStatus = String(row?.status || previous?.status || "").trim().toLowerCase();
+  const incomingStatus = String(normalized?.status || "").trim().toLowerCase();
+  const confirmedTakeoff =
+    takeoffTimes?.actual ||
+    normalized?.actualTakeoffAt ||
+    previous?.actualTakeoffAt;
+  const confirmedArrival =
+    normalized?.actualArrivalAt ||
+    arrivalTimes?.actual ||
+    row?.actual_arrival_at;
+  const departureGroundStatuses = [
+    "scheduled", "delayed", "boarding", "taxiing", "taxi_out", "takeoff_roll",
+  ];
+  const terminalArrivalStatuses = ["landed", "arrived", "arrived_at_gate"];
+  const regressedToDepartureGroundState =
+    ["airborne", "enroute", "departed"].includes(previousStatus) &&
+    departureGroundStatuses.includes(incomingStatus) &&
+    Boolean(confirmedTakeoff) &&
+    !confirmedArrival;
+  const regressedFromConfirmedArrival =
+    terminalArrivalStatuses.includes(previousStatus) &&
+    !terminalArrivalStatuses.includes(incomingStatus) &&
+    Boolean(confirmedArrival);
+  const stableStatus = regressedToDepartureGroundState || regressedFromConfirmedArrival
+    ? previousStatus
+    : normalized?.status;
+
   return {
     ...normalized,
+    status: stableStatus,
     trackPoints,
+    ...(takeoffTimes ? { takeoffTimes } : {}),
+    ...(departureTimes ? { departureTimes } : {}),
+    ...(arrivalTimes ? { arrivalTimes } : {}),
+    actualDepartureAt: preferred(
+      normalized?.actualDepartureAt,
+      row?.actual_departure_at ?? departureTimes?.actual
+    ),
+    actualArrivalAt: preferred(
+      normalized?.actualArrivalAt,
+      row?.actual_arrival_at ?? arrivalTimes?.actual
+    ),
+    actualTakeoffAt: preferred(
+      normalized?.actualTakeoffAt,
+      takeoffTimes?.actual ?? previous?.actualTakeoffAt
+    ),
     gate: preferred(normalized?.gate, row?.gate ?? previous.gate),
     terminal: preferred(normalized?.terminal, row?.terminal ?? previous.terminal),
     departureGate: preferred(
@@ -370,7 +481,10 @@ function createSharedFlightService({
           },
         });
       const providerOptions = {
-        forceRefresh: reason === "forced" || reason.startsWith("provider_alert_position"),
+        forceRefresh:
+          reason === "forced" ||
+          reason === "detail_open" ||
+          reason.startsWith("provider_alert_position"),
         skipLivePosition: isOperationalDetailsRefreshReason(job.data.reason),
         ...(usesTrackedFlightReserve ? { budgetEndpoint: "tracked_flight" } : {}),
       };
@@ -484,11 +598,28 @@ function createSharedFlightService({
   async function fanoutNotificationJob(job) {
     const data = await repository.getEventWithFlight(job.data.flight_event_id);
     if (!data?.event || !data?.flight) return { sent: 0 };
+
+    // Keep the ActivityKit push causally tied to the same canonical snapshot as
+    // the visible alert. The normal state-consumer job remains the broad update
+    // path, while this closes the gap where an alert is delivered before that
+    // queued Live Activity update has run (or after it transiently failed).
+    if (liveActivities?.sendFlightState) {
+      try {
+        await liveActivities.sendFlightState(data.flight);
+      } catch (_error) {
+        await queue.add("liveActivityUpdateJob", { flight_instance_id: data.flight.id }, {
+          dedupe: true,
+          dedupeKey: `live-activity:notification:${data.flight.id}:${data.event.id}`,
+        });
+      }
+    }
+
     const targets = await repository.listNotificationTargets(data.flight.id, data.event.event_severity, data.event.event_type);
     const isArrival = ["LANDED", "ARRIVED"].includes(data.event.event_type);
     const weatherInsight = isArrival
       ? await weatherService.insightForFlight(data.flight, { cacheStatus: "arrival_notification" })
       : null;
+    const dedupeKey = notificationDedupeKey(data.flight, data.event);
     let sent = 0;
     for (const target of targets) {
       const ownerUserId = target.userFlight.owner_user_id || target.userFlight.user_id;
@@ -501,9 +632,10 @@ function createSharedFlightService({
         data.flight.id,
         data.event.id,
         "apns",
-        target.userFlight.id || null
+        target.userFlight.id || null,
+        dedupeKey
       );
-      if (!delivery.created || !delivery.row) continue;
+      if (!delivery.row || (!delivery.created && delivery.row.status !== "pending")) continue;
       const notificationContext = {
         isCircle: target.isCircle === true,
         isTraveler: target.isTraveler !== false,
@@ -511,6 +643,8 @@ function createSharedFlightService({
         recipientDisplayName: target.recipientDisplayName || null,
         temperatureUnit: target.temperatureUnit || "celsius",
         weatherInsight: weatherInsight?.available ? weatherInsight : null,
+        userFlightId: target.userFlight.id || null,
+        trackingSessionId: target.userFlight.tracking_session_id || null,
         visitOrdinal: isArrival && target.isCircle !== true && target.isTraveler !== false && repository.arrivalVisitOrdinalForUser
           ? await repository.arrivalVisitOrdinalForUser(
             ownerUserId,
@@ -520,10 +654,10 @@ function createSharedFlightService({
           : null,
       };
       try {
+        const payload = notificationPayload(data.flight, data.event, notificationContext);
+        payload.user_flight_id = target.userFlight.id || null;
+        payload.owner_user_id = target.userFlight.owner_user_id || target.userFlight.user_id || null;
         if (repository.createAppNotification) {
-          const payload = notificationPayload(data.flight, data.event, notificationContext);
-          payload.user_flight_id = target.userFlight.id || null;
-          payload.owner_user_id = target.userFlight.owner_user_id || target.userFlight.user_id || null;
           await repository.createAppNotification({
             userId: target.userFlight.user_id,
             flightInstanceId: data.flight.id,
@@ -533,6 +667,7 @@ function createSharedFlightService({
             body: payload.aps.alert.body,
             payload,
             deliveryStatus: "queued",
+            dedupeKey,
           });
         }
         if (repository.isUserFlightNotificationActive) {
@@ -545,52 +680,59 @@ function createSharedFlightService({
             continue;
           }
         }
-        const results = [];
+        if (!repository.createNotificationTokenDelivery || !repository.claimNotificationTokenDelivery) {
+          throw new Error("durable_apns_outbox_unavailable");
+        }
+        const tokenDeliveries = [];
         for (const token of target.tokens) {
-          const result = await apns.sendFlightEvent({
-            token,
+          const tokenDelivery = await repository.createNotificationTokenDelivery(delivery.row.id, token, payload);
+          if (tokenDelivery.row) tokenDeliveries.push({ row: tokenDelivery.row, token });
+        }
+        if (tokenDeliveries.length === 0) {
+          throw new Error("no_active_push_tokens");
+        }
+        for (const item of tokenDeliveries) {
+          await deliverNotificationToken(item.row, {
+            token: item.token,
+            payload,
             flight: data.flight,
             event: data.event,
             context: notificationContext,
           });
-          results.push({ token, result });
-          if (isInvalidApnsTokenResult(result) && repository.disableDeviceToken) {
-            await repository.disableDeviceToken(token.device_token || token.apnsToken);
-          }
         }
-        if (results.length === 0) {
-          throw new Error("no_active_push_tokens");
-        }
-        // One account can retain tokens from both Xcode (sandbox) and
-        // TestFlight/App Store (production). A stale or misconfigured token in
-        // one environment must not turn a successful delivery to another
-        // active device into a total failure.
-        if (!results.some(({ result }) => result?.ok === true)) {
-          throw new Error(results.find(({ result }) => result?.reason || result?.error)?.result?.reason || "APNs delivery failed");
-        }
+        const parent = await repository.refreshNotificationDeliveryStatus(delivery.row.id);
+        const deliveryStatus = parent?.status || "pending";
         if (repository.updateAppNotificationDeliveryStatus) {
           await repository.updateAppNotificationDeliveryStatus({
             userId: target.userFlight.user_id,
             flightInstanceId: data.flight.id,
             flightEventId: data.event.id,
             notificationType: sharedNotificationType(data.event.event_type),
-            deliveryStatus: "sent",
-            sentAt: new Date().toISOString(),
+            deliveryStatus: deliveryStatus === "sent" ? "sent" : deliveryStatus === "failed" ? "failed" : "queued",
+            sentAt: deliveryStatus === "sent" ? new Date().toISOString() : null,
+            dedupeKey,
           });
         }
-        await repository.updateNotificationDelivery(delivery.row.id, { status: "sent", sent_at: new Date().toISOString() });
-        sent += 1;
+        if (deliveryStatus === "sent") sent += 1;
       } catch (error) {
+        const recoveredParent = repository.refreshNotificationDeliveryStatus
+          ? await repository.refreshNotificationDeliveryStatus(delivery.row.id).catch(() => null)
+          : null;
+        const recoveredStatus = recoveredParent?.status || "failed";
         if (repository.updateAppNotificationDeliveryStatus) {
           await repository.updateAppNotificationDeliveryStatus({
             userId: target.userFlight.user_id,
             flightInstanceId: data.flight.id,
             flightEventId: data.event.id,
             notificationType: sharedNotificationType(data.event.event_type),
-            deliveryStatus: "failed",
+            deliveryStatus: recoveredStatus === "sent" ? "sent" : recoveredStatus === "pending" ? "queued" : "failed",
+            sentAt: recoveredStatus === "sent" ? recoveredParent?.sent_at || new Date().toISOString() : null,
+            dedupeKey,
           });
         }
-        await repository.updateNotificationDelivery(delivery.row.id, { status: "failed", error: error?.message || String(error) });
+        if (!recoveredParent) {
+          await repository.updateNotificationDelivery(delivery.row.id, { status: "failed", error: error?.message || String(error) });
+        }
       }
     }
     return { sent };
@@ -684,6 +826,67 @@ function createSharedFlightService({
     return deleted;
   }
 
+  async function reconcileDisplayedUserFlights(userId, input = {}) {
+    if (typeof repository.listActiveUserFlightRows !== "function") {
+      const error = new Error("Displayed-flight reconciliation is unavailable");
+      error.statusCode = 503;
+      throw error;
+    }
+
+    const manifest = normalizedDisplayedFlightManifest(input);
+    const activeRows = await repository.listActiveUserFlightRows(userId);
+    const retainedIds = new Set();
+    for (const item of manifest) {
+      const matches = activeRows
+        .filter((row) => userFlightMatchesDisplayedManifest(row, item))
+        .sort((left, right) => {
+          const leftExact = item.id && String(left.id) === item.id ? 1 : 0;
+          const rightExact = item.id && String(right.id) === item.id ? 1 : 0;
+          if (leftExact !== rightExact) return rightExact - leftExact;
+          const leftLinked = left.flight_instance_id ? 1 : 0;
+          const rightLinked = right.flight_instance_id ? 1 : 0;
+          if (leftLinked !== rightLinked) return rightLinked - leftLinked;
+          return Date.parse(right.updated_at || right.added_at || 0) - Date.parse(left.updated_at || left.added_at || 0);
+        });
+      if (matches[0]) retainedIds.add(String(matches[0].id));
+    }
+    // A legacy tracked mirror and its client-owned row can describe the same
+    // displayed occurrence. Keep exactly one subscription so target discovery,
+    // provider ownership, and APNs fanout remain one-to-one.
+    const staleRows = activeRows.filter((row) => !retainedIds.has(String(row.id)));
+    const removed = [];
+
+    for (const row of staleRows) {
+      const deleted = await deleteUserFlight(userId, row.id);
+      if (deleted) removed.push(deleted);
+    }
+
+    const orphanedFlightInstanceIds = [];
+    const candidateFlightInstanceIds = new Set(
+      removed.map((row) => row.flight_instance_id).filter(Boolean)
+    );
+    if (typeof repository.hasActiveUserFlights === "function") {
+      for (const flightInstanceId of candidateFlightInstanceIds) {
+        if (!await repository.hasActiveUserFlights(flightInstanceId)) {
+          orphanedFlightInstanceIds.push(flightInstanceId);
+        }
+      }
+    }
+
+    return {
+      displayed: manifest.length,
+      checked: activeRows.length,
+      kept: activeRows.length - removed.length,
+      removed: removed.length,
+      duplicatesConsolidated: Math.max(0, activeRows.length - retainedIds.size - activeRows.filter((row) =>
+        !manifest.some((item) => userFlightMatchesDisplayedManifest(row, item))
+      ).length),
+      removedUserFlightIds: removed.map((row) => row.id),
+      stoppedTrackingSessionIds: [...new Set(removed.map((row) => row.tracking_session_id).filter(Boolean))],
+      orphanedFlightInstanceIds,
+    };
+  }
+
   async function ensureLiveSource(flightInstanceId, reason) {
     let stream = null;
     if (streamingEnabled) {
@@ -705,11 +908,12 @@ function createSharedFlightService({
     const departureMs = new Date(flight?.estimated_departure_at || flight?.scheduled_departure_at || 0).getTime();
     const untilDepartureMs = departureMs - Date.now();
     const needsDetails = !inbound?.originAirportIata || !inbound?.estimatedArrival;
+    const needsAlertUpgrade = needsInboundProviderAlertConfigurationUpgrade(inbound, provider);
     if (
       !flight ||
       isFinalStatus(flight.status) ||
       !inbound?.providerFlightId ||
-      (inbound.providerAlertStatus === "active" && !needsDetails) ||
+      (inbound.providerAlertStatus === "active" && !needsDetails && !needsAlertUpgrade) ||
       !Number.isFinite(departureMs) ||
       untilDepartureMs > INBOUND_MONITOR_WINDOW_MS ||
       untilDepartureMs < -30 * 60_000
@@ -750,7 +954,7 @@ function createSharedFlightService({
           status_code: resolved ? 200 : null,
         });
       }
-      if (inbound.providerAlertStatus === "active") {
+      if (inbound.providerAlertStatus === "active" && !needsAlertUpgrade) {
         await cache.setJSON(`flight:${flight.flight_key}`, rowToFlightResponse(flight, { source: "redis", freshness: "fresh" }), await freshnessTTL(flight));
         return flight;
       }
@@ -1063,11 +1267,13 @@ function createSharedFlightService({
         }
         const eventType = alert.event_type === "flight_departed"
           ? "INBOUND_DEPARTED"
-          : alert.event_type === "flight_cancelled"
-            ? "INBOUND_CANCELLED"
-            : alert.event_type === "flight_diverted"
-              ? "INBOUND_DIVERTED"
-              : null;
+          : alert.event_type === "flight_arrived"
+            ? "INBOUND_ARRIVED"
+            : alert.event_type === "flight_cancelled"
+              ? "INBOUND_CANCELLED"
+              : alert.event_type === "flight_diverted"
+                ? "INBOUND_DIVERTED"
+                : null;
         if (!eventType) continue;
         const recent = await repository.findRecentEventByType?.(parent.id, eventType, 12 * 60 * 60_000);
         if (recent) continue;
@@ -1076,9 +1282,11 @@ function createSharedFlightService({
           ...inbound,
           status: alert.event_type === "flight_departed"
             ? "airborne"
-            : alert.event_type === "flight_cancelled" ? "cancelled" : "diverted",
+            : alert.event_type === "flight_arrived"
+              ? "landed"
+              : alert.event_type === "flight_cancelled" ? "cancelled" : "diverted",
           actualDeparture: alert.actual_out || inbound.actualDeparture || null,
-          estimatedArrival: alert.estimated_in || inbound.estimatedArrival || null,
+          estimatedArrival: alert.actual_in || alert.estimated_in || inbound.estimatedArrival || null,
         };
         const updatedParent = await repository.updateFlight({
           ...parent,
@@ -1086,7 +1294,7 @@ function createSharedFlightService({
         });
         const [event] = await repository.insertEvents(parent.id, [{
           event_type: eventType,
-          event_severity: eventType === "INBOUND_DEPARTED" ? "medium" : "high",
+          event_severity: ["INBOUND_DEPARTED", "INBOUND_ARRIVED"].includes(eventType) ? "medium" : "high",
           old_value: { inboundFlight: inbound },
           new_value: { inboundFlight: nextInbound },
           summary: alert.human_readable_summary,
@@ -1394,13 +1602,93 @@ function createSharedFlightService({
 
   async function recoverPendingNotificationFanout() {
     if (typeof repository.listPendingNotificationEventIds !== "function") return 0;
+    let recovered = await recoverDurableApnsOutbox();
     const eventIds = await repository.listPendingNotificationEventIds();
-    let recovered = 0;
     for (const flightEventId of eventIds) {
       const result = await fanoutNotificationJob({ data: { flight_event_id: flightEventId } });
       if (result?.sent > 0) recovered += result.sent;
     }
     return recovered;
+  }
+
+  async function deliverNotificationToken(outboxRow, fallback = {}) {
+    const claimed = await repository.claimNotificationTokenDelivery(outboxRow.id, APNS_OUTBOX_LEASE_MS);
+    if (!claimed) return outboxRow;
+    const token = fallback.token || {
+      id: claimed.device_token_id,
+      device_token: claimed.device_token,
+      environment: claimed.environment,
+      is_active: claimed.is_active,
+    };
+    if (claimed.is_active === false || token.is_active === false) {
+      return repository.updateNotificationTokenDelivery(claimed.id, {
+        status: "permanent_failed",
+        error: "inactive_device_token",
+      });
+    }
+
+    try {
+      const payload = fallback.payload || claimed.payload_json || {};
+      const result = typeof apns.sendPayload === "function"
+        ? await apns.sendPayload({ token, payload })
+        : await apns.sendFlightEvent({
+            token,
+            flight: fallback.flight,
+            event: fallback.event,
+            context: fallback.context || {},
+          });
+      if (result?.ok === true) {
+        return repository.updateNotificationTokenDelivery(claimed.id, {
+          status: "accepted",
+          accepted_at: new Date().toISOString(),
+          apns_id: result.apnsId || null,
+          error: null,
+        });
+      }
+      if (isInvalidApnsTokenResult(result) && repository.disableDeviceToken) {
+        await repository.disableDeviceToken(token.device_token || token.apnsToken);
+      }
+      const retryable = isDefinitelyRetryableApnsResult(result);
+      const mayRetry = retryable && Number(claimed.attempt_count || 0) < APNS_OUTBOX_MAX_ATTEMPTS;
+      return repository.updateNotificationTokenDelivery(claimed.id, {
+        status: mayRetry ? "retry" : "permanent_failed",
+        next_attempt_at: mayRetry ? apnsRetryAt(claimed.attempt_count) : null,
+        error: result?.reason || result?.error || (result?.skipped ? "apns_not_configured" : "apns_rejected"),
+      });
+    } catch (error) {
+      // A transport exception can happen after APNs accepted the request. Do
+      // not blindly resend an ambiguous outcome and recreate alert storms.
+      return repository.updateNotificationTokenDelivery(claimed.id, {
+        status: "uncertain",
+        error: error?.message || String(error),
+      });
+    }
+  }
+
+  async function recoverDurableApnsOutbox() {
+    if (typeof repository.listDueNotificationTokenDeliveries !== "function") return 0;
+    const rows = await repository.listDueNotificationTokenDeliveries(250);
+    const touchedParents = new Set();
+    let accepted = 0;
+    for (const row of rows) {
+      const result = await deliverNotificationToken(row);
+      touchedParents.add(row.notification_delivery_id);
+      if (result?.status === "accepted") accepted += 1;
+    }
+    for (const deliveryId of touchedParents) {
+      const parent = await repository.refreshNotificationDeliveryStatus(deliveryId);
+      if (parent && repository.updateAppNotificationDeliveryStatus) {
+        await repository.updateAppNotificationDeliveryStatus({
+          userId: parent.user_id,
+          flightEventId: parent.flight_event_id,
+          notificationType: null,
+          deliveryStatus: parent.status === "sent" ? "sent" : parent.status === "failed" ? "failed" : "queued",
+          sentAt: parent.status === "sent" ? parent.sent_at || new Date().toISOString() : null,
+          dedupeKey: parent.dedupe_key,
+        });
+      }
+    }
+    return accepted;
   }
 
   async function scheduleArrivalDetailRefreshes(flightInstanceId, reason, existingRow = null) {
@@ -1472,7 +1760,14 @@ function createSharedFlightService({
 
   async function inboundMonitoringJob(job) {
     const row = await repository.findFlightById(job.data.flight_instance_id);
-    if (!row || isFinalStatus(row.status) || row.normalized_data?.inboundFlight?.providerAlertStatus === "active") return row;
+    if (
+      !row ||
+      isFinalStatus(row.status) ||
+      (
+        row.normalized_data?.inboundFlight?.providerAlertStatus === "active" &&
+        !needsInboundProviderAlertConfigurationUpgrade(row.normalized_data.inboundFlight, provider)
+      )
+    ) return row;
     return refreshFlightJob({
       data: {
         flight_key: row.flight_key,
@@ -1559,6 +1854,7 @@ function createSharedFlightService({
     searchFlight,
     saveUserFlight,
     ensureUserFlightLiveCoverage,
+    reconcileDisplayedUserFlights,
     deleteUserFlight,
     listUserFlights,
     updateUserFlight: repository.updateUserFlight,
@@ -1573,6 +1869,7 @@ function createSharedFlightService({
     preflightReminderJob,
     recoverLifecycleCatchups,
     recoverPendingNotificationFanout,
+    recoverDurableApnsOutbox,
     ensureLiveSource,
     ensureInboundFlightMonitoring,
     ensureStreamingRegistration,
@@ -1812,6 +2109,14 @@ function needsProviderAlertConfigurationUpgrade(row, provider) {
   return !Number.isFinite(configuredAt) || configuredAt < changedAt;
 }
 
+function needsInboundProviderAlertConfigurationUpgrade(inbound, provider) {
+  if (inbound?.providerAlertStatus !== "active" || !inbound?.providerAlertId) return false;
+  const changedAt = Date.parse(provider?.alertConfigurationChangedAt || "");
+  if (!Number.isFinite(changedAt)) return false;
+  const configuredAt = Date.parse(inbound.providerAlertCreatedAt || "");
+  return !Number.isFinite(configuredAt) || configuredAt < changedAt;
+}
+
 function isOperationalDetailsRefreshReason(reason) {
   const value = String(reason || "");
   return value.startsWith("arrival_details_") || value.startsWith("departure_details_") || value.startsWith("inbound_monitoring_");
@@ -1824,6 +2129,20 @@ function sleep(ms) {
 function isInvalidApnsTokenResult(result) {
   const reason = String(result?.reason || result?.error || "").trim();
   return ["BadDeviceToken", "Unregistered", "DeviceTokenNotForTopic"].includes(reason);
+}
+
+function isDefinitelyRetryableApnsResult(result) {
+  if (result?.skipped === true) return true;
+  const status = Number(result?.status || 0);
+  if (status === 429 || status >= 500) return true;
+  const reason = String(result?.reason || result?.error || "").trim();
+  return ["TooManyRequests", "InternalServerError", "ServiceUnavailable", "Shutdown"].includes(reason);
+}
+
+function apnsRetryAt(attemptCount) {
+  const exponent = Math.max(0, Number(attemptCount || 1) - 1);
+  const delayMs = Math.min(15 * 60_000, APNS_OUTBOX_RETRY_BASE_MS * (2 ** exponent));
+  return new Date(Date.now() + delayMs).toISOString();
 }
 
 function sharedNotificationType(eventType) {
@@ -1848,6 +2167,8 @@ function sharedNotificationType(eventType) {
       return "flight_trip_starting";
     case "INBOUND_DEPARTED":
       return "flight_inbound_departed";
+    case "INBOUND_ARRIVED":
+      return "flight_inbound_arrived";
     case "INBOUND_CANCELLED":
       return "flight_inbound_cancelled";
     case "INBOUND_DIVERTED":

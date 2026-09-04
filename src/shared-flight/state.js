@@ -3,6 +3,8 @@
 const FINAL_STATUSES = new Set(["landed", "arrived", "arrived_at_gate", "cancelled"]);
 const AIRBORNE_STATUSES = new Set(["airborne", "enroute", "departed"]);
 const TAXI_STATUSES = new Set(["taxiing", "taxi_out", "takeoff_roll", "taxi_in"]);
+const DEPARTURE_TAXI_STATUSES = new Set(["taxiing", "taxi_out"]);
+const TOUCHDOWN_STATUSES = new Set(["landed", "arrived"]);
 const APPROACH_WINDOW_MINUTES = 45;
 const LIVE_POSITION_CONTRADICTION_WINDOW_MS = 5 * 60_000;
 const ACTUAL_EVENT_CLOCK_SKEW_MS = 2 * 60_000;
@@ -623,7 +625,12 @@ function compareFlightState(oldState, newState, nowMs = Date.now()) {
   }
 
   let emittedAirborneEvent = false;
-  if (newStatus !== oldStatus) {
+  const changedOperationalPhase = !(
+    (AIRBORNE_STATUSES.has(oldStatus) && AIRBORNE_STATUSES.has(newStatus)) ||
+    (DEPARTURE_TAXI_STATUSES.has(oldStatus) && DEPARTURE_TAXI_STATUSES.has(newStatus)) ||
+    (TOUCHDOWN_STATUSES.has(oldStatus) && TOUCHDOWN_STATUSES.has(newStatus))
+  );
+  if (newStatus !== oldStatus && changedOperationalPhase) {
     if (newStatus === "cancelled") push("CANCELLED", "critical", { status: oldStatus }, { status: newStatus }, "Flight has been cancelled", true);
     else if (newStatus === "diverted") push("DIVERTED", "critical", { status: oldStatus }, { status: newStatus, originalDestination, diversionAirport: newDiversion === "UNKNOWN" ? null : newDiversion }, newDiversion !== "UNKNOWN" ? `Flight diverted to ${newDiversion}` : "Flight has been diverted", true);
     else if (["taxiing", "taxi_out"].includes(newStatus)) push("TAXIING", "medium", { status: oldStatus }, { status: newStatus }, "Flight is taxiing", true);

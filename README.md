@@ -27,6 +27,7 @@ Optional live-tracking transport:
   - `FLIGHTAWARE_API_KEY` when `FLIGHT_DATA_PROVIDER=flightaware`
   - `FLIGHTAWARE_DAILY_FLIGHT_CALL_LIMIT` (default `500`)
   - `FLIGHTAWARE_DAILY_SEARCH_RESERVE` (default `100`; only flight-number search can use this reserve)
+  - `FLIGHTAWARE_DAILY_TRACKED_FLIGHT_CALL_LIMIT` (temporary testing default `2000`)
 - Optional but recommended:
   - `DATABASE_URL` for durable tracked-flight + device storage
   - APNs key configuration for true background push alerts

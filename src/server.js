@@ -156,6 +156,10 @@ const FLIGHTAWARE_DAILY_SEARCH_RESERVE = toPositiveNumber(
   process.env.FLIGHTAWARE_DAILY_SEARCH_RESERVE,
   100
 );
+const FLIGHTAWARE_DAILY_TRACKED_FLIGHT_CALL_LIMIT = toPositiveNumber(
+  process.env.FLIGHTAWARE_DAILY_TRACKED_FLIGHT_CALL_LIMIT,
+  2_000
+);
 const FLIGHTAWARE_SCHEDULE_WINDOW_MS = 48 * 60 * 60_000;
 // This bucket covers every authenticated /v1 request, including background
 // lifecycle, Circle, device-token, and cached status traffic. Keep enough
@@ -272,7 +276,7 @@ const FLIGHTAWARE_AUTO_ALERT_EVENTS = Object.freeze({
 });
 const FLIGHTAWARE_AUTO_ALERT_IMPENDING_DEPARTURE_MINUTES = Object.freeze([120, 60, 15]);
 const FLIGHTAWARE_AUTO_ALERT_IMPENDING_ARRIVAL_MINUTES = Object.freeze([30]);
-const FLIGHTAWARE_ALERT_CONFIGURATION_CHANGED_AT = "2026-08-30T23:20:00.000Z";
+const FLIGHTAWARE_ALERT_CONFIGURATION_CHANGED_AT = "2026-09-03T09:05:12.000Z";
 let flightAwareAlertEndpointReadyURL = null;
 let flightAwareAlertEndpointPromise = null;
 
@@ -403,12 +407,14 @@ const pool = DATABASE_URL
   : null;
 
 function flightAwareDailyBudgetLimitForEndpoint(endpoint) {
+  if (String(endpoint || "") === "tracked_flight") {
+    return FLIGHTAWARE_DAILY_TRACKED_FLIGHT_CALL_LIMIT;
+  }
   const isReservedRequest = [
     "operational",
     "schedules",
     "historical",
     "inbound_flight_instance",
-    "tracked_flight",
   ].includes(String(endpoint || ""));
   return FLIGHTAWARE_DAILY_FLIGHT_CALL_LIMIT +
     (isReservedRequest ? FLIGHTAWARE_DAILY_SEARCH_RESERVE : 0);
@@ -418,6 +424,7 @@ async function flightAwareFlightFetch(url, options, { endpoint, units = 1 } = {}
   const usageEndpoint = `aeroapi:flight:${String(endpoint || "unknown")}`;
   const estimatedUnits = Math.max(1, Math.round(Number(units) || 1));
   const isSearchRequest = ["operational", "schedules", "historical"].includes(String(endpoint || ""));
+  const isTrackedFlightRequest = String(endpoint || "") === "tracked_flight";
   const effectiveLimit = flightAwareDailyBudgetLimitForEndpoint(endpoint);
 
   if (pool) {
@@ -426,12 +433,18 @@ async function flightAwareFlightFetch(url, options, { endpoint, units = 1 } = {}
        from public.api_usage_logs
        where provider = 'flightaware'
          and endpoint like 'aeroapi:flight:%'
+         and (
+           ($1::boolean = true and endpoint = 'aeroapi:flight:tracked_flight')
+           or ($1::boolean = false and endpoint <> 'aeroapi:flight:tracked_flight')
+         )
          and created_at >= date_trunc('day', now() at time zone 'UTC') at time zone 'UTC'`
+      ,
+      [isTrackedFlightRequest]
     );
     const usedUnits = Number(usage.rows[0]?.units || 0);
     if (usedUnits + estimatedUnits > effectiveLimit) {
       const error = new Error(
-        `FlightAware daily ${isSearchRequest ? "search reserve" : "Flight-call"} budget exhausted (${usedUnits}/${effectiveLimit})`
+        `FlightAware daily ${isTrackedFlightRequest ? "tracked-flight" : isSearchRequest ? "search reserve" : "Flight-call"} budget exhausted (${usedUnits}/${effectiveLimit})`
       );
       error.code = "FLIGHTAWARE_DAILY_BUDGET_EXHAUSTED";
       error.statusCode = 429;
@@ -2716,6 +2729,29 @@ function mergeFlightAwareTrackTrailIntoNormalized(normalized, { trackPoints, liv
   });
 }
 
+// A provider /track response with multiple points is a coherent history and
+// therefore replaces older geometry. Canonical/Firehose points remain the
+// fallback when the provider has no history, while a single provider point is
+// treated as an incremental observation.
+function authoritativeProviderTrackTrail(canonicalTrackPoints, providerTrackTrail = {}) {
+  const providerPoints = compactTrackPoints([
+    ...(Array.isArray(providerTrackTrail.trackPoints) ? providerTrackTrail.trackPoints : []),
+    providerTrackTrail.livePosition || null,
+  ]);
+  const trackPoints = providerPoints.length >= 2
+    ? providerPoints
+    : (mergeTrackPoints(
+        canonicalTrackPoints,
+        providerPoints,
+        providerTrackTrail.livePosition || null
+      ) || []);
+
+  return {
+    trackPoints,
+    livePosition: providerTrackTrail.livePosition || latestTrackPoint(trackPoints),
+  };
+}
+
 function flightAwareTelemetryBudgetEndpoint(options, fallbackEndpoint) {
   return String(options?.budgetEndpoint || "").trim() || fallbackEndpoint;
 }
@@ -2738,7 +2774,11 @@ async function fetchFlightAwareTrackTrail(providerFlightId, options = {}) {
     return cached.data;
   }
 
-  return withProviderRequestDedup(cacheKey, async () => {
+  // A forced detail-open request must not join a cache-backed request that was
+  // already in flight, otherwise it can still receive the older snapshot it
+  // explicitly asked to bypass.
+  const requestKey = forceRefresh ? `${cacheKey}:force` : cacheKey;
+  return withProviderRequestDedup(requestKey, async () => {
     const response = await flightAwareFlightFetch(
       `${FLIGHTAWARE_BASE_URL}/flights/${encodeURIComponent(normalizedFlightId)}/track`,
       {
@@ -2829,7 +2869,13 @@ function airportCoordinateForCode(code) {
 function normalizeCoordinatePoint(point) {
   const latitude = Number(point?.latitude);
   const longitude = Number(point?.longitude);
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+  if (
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude) ||
+    Math.abs(latitude) > 90 ||
+    Math.abs(longitude) > 180 ||
+    (Math.abs(latitude) < 0.0001 && Math.abs(longitude) < 0.0001)
+  ) {
     return null;
   }
   return { latitude, longitude };
@@ -2888,7 +2934,8 @@ async function fetchFlightAwareLivePosition(providerFlightId, options = {}) {
     return cached.data;
   }
 
-  return withProviderRequestDedup(cacheKey, async () => {
+  const requestKey = forceRefresh ? `${cacheKey}:force` : cacheKey;
+  return withProviderRequestDedup(requestKey, async () => {
     const endpointPaths = [
       `/flights/${encodeURIComponent(normalizedFlightId)}/position`,
       `/flights/${encodeURIComponent(normalizedFlightId)}/track`,
@@ -3398,7 +3445,9 @@ async function fetchFlightAwareFlightByProviderId(providerFlightId, options = {}
     return cached.data;
   }
 
-  return withProviderRequestDedup(cacheKey, async () => {
+  // Forced detail refreshes must not join an older background instance lookup.
+  const requestKey = options.forceRefresh ? `${cacheKey}:force` : cacheKey;
+  return withProviderRequestDedup(requestKey, async () => {
     const response = await flightAwareFlightFetch(
       `${FLIGHTAWARE_BASE_URL}/flights/${encodeURIComponent(normalizedFlightId)}`,
       {
@@ -3593,6 +3642,94 @@ async function enrichNormalizedWithLivePosition(normalized, providerName, rawRec
   }
 }
 
+function inboundFlightNeedsDetailResolution(inboundFlight) {
+  return Boolean(
+    inboundFlight?.providerFlightId &&
+      (
+        !inboundFlight.flightNumber ||
+        !inboundFlight.originAirportIata ||
+        !inboundFlight.destinationAirportIata ||
+        !inboundFlight.estimatedArrival ||
+        !inboundFlight.status
+      )
+  );
+}
+
+function mergeResolvedInboundFlight(normalized, resolvedRecord) {
+  const inboundFlight = normalized?.inboundFlight;
+  if (!inboundFlight?.providerFlightId || !resolvedRecord) {
+    return normalized;
+  }
+
+  const resolved = reconcileOperationalStatus(normalizeRecordFromFlightAware(resolvedRecord));
+  const resolvedArrival =
+    resolved.arrivalTimes?.actual ||
+    resolved.landingTimes?.actual ||
+    resolved.arrivalTimes?.estimated ||
+    resolved.landingTimes?.estimated ||
+    resolved.arrivalTimes?.scheduled ||
+    resolved.landingTimes?.scheduled ||
+    null;
+  const resolvedDeparture =
+    resolved.departureTimes?.estimated ||
+    resolved.takeoffTimes?.estimated ||
+    resolved.departureTimes?.scheduled ||
+    resolved.takeoffTimes?.scheduled ||
+    null;
+
+  return {
+    ...normalized,
+    inboundFlight: {
+      ...inboundFlight,
+      flightNumber: resolved.flightNumber || inboundFlight.flightNumber || null,
+      providerFlightId: inboundFlight.providerFlightId,
+      originAirportIata:
+        resolved.departureAirportIata || inboundFlight.originAirportIata || null,
+      destinationAirportIata:
+        resolved.arrivalAirportIata ||
+        inboundFlight.destinationAirportIata ||
+        normalized.departureAirportIata ||
+        null,
+      estimatedArrival: resolvedArrival || inboundFlight.estimatedArrival || null,
+      estimatedDeparture: resolvedDeparture || inboundFlight.estimatedDeparture || null,
+      actualDeparture:
+        resolved.departureTimes?.actual ||
+        resolved.takeoffTimes?.actual ||
+        inboundFlight.actualDeparture ||
+        null,
+      status: resolved.status || inboundFlight.status || null,
+    },
+  };
+}
+
+async function enrichNormalizedWithInboundFlight(normalized, providerName, options = {}) {
+  const inboundFlight = normalized?.inboundFlight;
+  if (providerName !== "flightaware" || !inboundFlight?.providerFlightId) {
+    return normalized;
+  }
+
+  const forceRefresh = options.forceRefresh === true;
+  if (!forceRefresh && !inboundFlightNeedsDetailResolution(inboundFlight)) {
+    return normalized;
+  }
+
+  try {
+    const resolvedRecord = await fetchFlightAwareFlightByProviderId(
+      inboundFlight.providerFlightId,
+      {
+        forceRefresh,
+        budgetEndpoint: "inbound_flight_instance",
+      }
+    );
+    return mergeResolvedInboundFlight(normalized, resolvedRecord);
+  } catch (error) {
+    console.warn(
+      `FlightAware inbound flight lookup failed for ${inboundFlight.providerFlightId}: ${error?.message || String(error)}`
+    );
+    return normalized;
+  }
+}
+
 function addDaysToISODate(dateString, dayOffset) {
   const date = new Date(`${String(dateString || "").slice(0, 10)}T00:00:00Z`);
   if (!Number.isFinite(date.getTime())) {
@@ -3741,7 +3878,9 @@ async function ensureFlightAwareAlertForInboundFlight(_flight, inboundFlight) {
       filed: false,
       out: false,
       off: true,
-      on: false,
+      // ON is FlightAware's wheels-down event. Subscribe to it so Runwy can
+      // alert the traveler when the inbound aircraft reaches their airport.
+      on: true,
       in: false,
       hold_start: false,
       hold_end: false,
@@ -4612,7 +4751,7 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
   }
 
   if (alerts.gateChangedNow) {
-    const gate = `${normalized?.gate || ""}`.trim();
+    const gate = `${normalized?.departureGate || normalized?.gate || ""}`.trim();
     const gateText = gate ? ` to gate ${gate}` : "";
 
     return {
@@ -4713,6 +4852,28 @@ function notificationEventFor(normalized, flightId, context = {}) {
   if (!payload || !title || !body || !type) {
     return null;
   }
+
+  // Alert delivery is also a model invalidation. Allow iOS to wake Runwy's
+  // background notification handler so an assigned gate is visible before the
+  // user opens the detail panel.
+  payload.aps["content-available"] = 1;
+  payload.runwy = {
+    ...(payload.runwy || {}),
+    status: normalized.status || payload.runwy?.status || null,
+    computedPhase: normalized.computedPhase || normalized.phase || null,
+    departureTerminal: normalized.departureTerminal || normalized.terminal || null,
+    departureGate: normalized.departureGate || normalized.gate || payload.runwy?.gate || null,
+    arrivalTerminal: normalized.arrivalTerminal || null,
+    arrivalGate: normalized.arrivalGate || null,
+    baggageBelt: normalized.baggageBelt || normalized.baggageClaim || payload.runwy?.baggageBelt || null,
+    departureEstimatedAt: normalized.departureTimes?.estimated || normalized.estimatedDepartureAt || null,
+    departureActualAt: normalized.departureTimes?.actual || normalized.actualDepartureAt || null,
+    takeoffActualAt: normalized.takeoffTimes?.actual || null,
+    arrivalEstimatedAt: normalized.arrivalTimes?.estimated || normalized.estimatedArrivalAt || null,
+    landingActualAt: normalized.landingTimes?.actual || null,
+    arrivalActualAt: normalized.arrivalTimes?.actual || normalized.actualArrivalAt || null,
+    lastUpdatedAt: normalized.lastUpdated || normalized.lastUpdatedAt || new Date().toISOString(),
+  };
 
   return {
     type,
@@ -5691,7 +5852,14 @@ async function findReusableTrackedRecordForUser({
 }
 
 function trackedProviderRefreshOptions(options = {}) {
-  return { forceRefresh: options.forceProviderRefresh === true };
+  const forceRefresh = options.forceProviderRefresh === true;
+  return {
+    forceRefresh,
+    // A detail open for an already tracked flight is operational telemetry,
+    // not general browsing. Keep it inside the bounded tracked-flight reserve
+    // so reaching the ordinary daily bucket does not freeze an airborne plane.
+    ...(forceRefresh ? { budgetEndpoint: "tracked_flight" } : {}),
+  };
 }
 
 async function refreshTrackedFlightRecord(trackedRecord, options = {}) {
@@ -5720,6 +5888,16 @@ async function refreshTrackedFlightRecord(trackedRecord, options = {}) {
     trackedRecord.query,
     provider.normalizeRecord,
     trackedRecord.normalized
+  );
+
+  // The outbound instance frequently supplies only inbound_fa_flight_id. A
+  // detail open is the moment the user asks for the actual incoming aircraft,
+  // so expand that ID into its route, timing, and live lifecycle before the
+  // response is persisted and returned to the app.
+  normalized = await enrichNormalizedWithInboundFlight(
+    normalized,
+    provider.name,
+    providerRefreshOptions
   );
 
   let trailSeedMetadataPatch = null;
@@ -6376,8 +6554,6 @@ async function claimDueFinalTravelRouteRows(limit = POLLER_BATCH_SIZE) {
       select id
       from public.user_flights
       where deleted_at is null
-        and tracking_session_id is null
-        and coalesce(source_type, '') <> 'tracked'
         and coalesce(lifecycle_state, '') in ('active', 'landed', 'archived')
         and lower(coalesce(provider_name, $5)) = 'flightaware'
         and nullif(trim(coalesce(provider_flight_id, '')), '') is not null
@@ -6386,9 +6562,9 @@ async function claimDueFinalTravelRouteRows(limit = POLLER_BATCH_SIZE) {
           between now() - ($2::double precision * interval '1 millisecond')
               and now() + ($3::double precision * interval '1 millisecond')
         and (
-          route_polyline is null
-          or jsonb_typeof(route_polyline) <> 'array'
-          or jsonb_array_length(route_polyline) < 3
+          actual_arrival is not null
+          or coalesce(lifecycle_state, '') in ('landed', 'archived')
+          or lower(coalesce(status, '')) in ('landed', 'arrived', 'arrived_at_gate')
         )
         and coalesce(final_route_capture_status, 'pending') in ('pending', 'failed', 'in_progress')
         and (
@@ -6500,7 +6676,17 @@ async function captureFinalTravelRoutes(limit = POLLER_BATCH_SIZE) {
   for (const [providerFlightId, groupRows] of groups.entries()) {
     try {
       providerCalls += 1;
-      const trackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId);
+      const providerTrackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(
+        providerFlightId,
+        { forceRefresh: true, budgetEndpoint: "tracked_flight" }
+      );
+      const canonicalTrackPoints = typeof sharedFlightRepository?.listTrackPointsForProviderFlightId === "function"
+        ? await sharedFlightRepository.listTrackPointsForProviderFlightId(providerFlightId)
+        : [];
+      const trackTrail = authoritativeProviderTrackTrail(
+        canonicalTrackPoints,
+        providerTrackTrail
+      );
       const representative = groupRows[0] || {};
       const routePolyline = routePolylineFromTrackTrail({
         originIata: representative.origin_iata,
@@ -6920,6 +7106,7 @@ function sharedTrackInputFromQuery(query) {
     // The shared flight instance is the sole provider-refresh and notification
     // owner for bridged sessions. The legacy tracking projection stays paused.
     notificationEnabled: true,
+    sourceType: "trip",
   };
 }
 
@@ -7331,6 +7518,9 @@ app.get("/v1/flights/:flightId", async (req, res) => {
   const flightId = req.params.flightId;
   const userId = String(req.auth?.userId || "").trim() || null;
   const forceDetailRefresh = String(req.query?.refresh || "").toLowerCase() === "detail";
+  if (forceDetailRefresh) {
+    res.set("Cache-Control", "no-store");
+  }
 
   if (!userId) {
     return res.status(401).json({ error: "Sign in is required" });
@@ -7395,9 +7585,24 @@ app.get("/v1/flights/:flightId", async (req, res) => {
     }
 
     const shouldRefresh = forceDetailRefresh || isTrackedRecordRefreshDue(tracked);
-    const current = shouldRefresh
-      ? await refreshTrackedFlightRecord(tracked, { includeLivePosition: forceDetailRefresh })
-      : tracked;
+    let current = tracked;
+    if (shouldRefresh) {
+      try {
+        current = await refreshTrackedFlightRecord(tracked, {
+          includeLivePosition: forceDetailRefresh,
+          forceProviderRefresh: forceDetailRefresh,
+        });
+      } catch (error) {
+        if (!forceDetailRefresh) throw error;
+        // A detail open performs a second, track-specific request on the
+        // client. Returning the last canonical snapshot here lets that request
+        // proceed even if the status/detail lookup is temporarily unavailable.
+        console.warn("Forced flight-detail status refresh failed; returning the saved snapshot", {
+          flightId,
+          error: error?.message || String(error),
+        });
+      }
+    }
 
     return res.json({
       flightId,
@@ -7523,6 +7728,14 @@ function shouldForceTrackTrailRefreshMode(value) {
   return ["force", "final"].includes(String(value || "").trim().toLowerCase());
 }
 
+function providerTrackTrailRefreshOptions(value) {
+  const forceRefresh = shouldForceTrackTrailRefreshMode(value);
+  return {
+    forceRefresh,
+    ...(forceRefresh ? { budgetEndpoint: "tracked_flight" } : {}),
+  };
+}
+
 app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req, res) => {
   if (!PROVIDER_CALLS_ENABLED) {
     return res.status(503).json({ error: "Provider calls are temporarily disabled" });
@@ -7539,23 +7752,22 @@ app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req,
       ? await sharedFlightRepository.listTrackPointsForProviderFlightId(providerFlightId)
       : [];
 
-    // Old clients used `refresh=detail` every two minutes. Honoring that as a
-    // cache bypass multiplied one open map into thousands of paid AeroAPI calls.
-    // Only explicit final-route capture (`final`) or an internal repair
-    // (`force`) may bypass the shared cache.
-    const forceDetailRefresh = shouldForceTrackTrailRefreshMode(req.query?.refresh);
-    const providerTrackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(providerFlightId, {
-      forceRefresh: forceDetailRefresh,
-    });
-    const trackPoints = mergeTrackPoints(
+    // Normal polling remains cache-backed. A user-driven live-detail open uses
+    // `force`, and final-route capture uses `final`; both must bypass the shared
+    // cache so the returned endpoint and trail are current.
+    const providerRefreshOptions = providerTrackTrailRefreshOptions(req.query?.refresh);
+    const forceDetailRefresh = providerRefreshOptions.forceRefresh;
+    if (forceDetailRefresh) {
+      res.set("Cache-Control", "no-store");
+    }
+    const providerTrackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(
+      providerFlightId,
+      providerRefreshOptions
+    );
+    const trackTrail = authoritativeProviderTrackTrail(
       canonicalTrackPoints,
-      providerTrackTrail.trackPoints,
-      providerTrackTrail.livePosition
-    ) || [];
-    const trackTrail = {
-      trackPoints,
-      livePosition: providerTrackTrail.livePosition || latestTrackPoint(trackPoints),
-    };
+      providerTrackTrail
+    );
     return res.json({
       providerFlightId,
       trackPoints: Array.isArray(trackTrail.trackPoints) ? trackTrail.trackPoints : [],
@@ -7721,6 +7933,21 @@ async function startApiServer() {
   const lifecycleRecoveryTimer = setInterval(() => runLifecycleRecovery("periodic_recovery"), 5 * 60_000);
   if (typeof lifecycleRecoveryTimer.unref === "function") lifecycleRecoveryTimer.unref();
 
+  let apnsOutboxRecoveryRunning = false;
+  const runApnsOutboxRecovery = async () => {
+    if (apnsOutboxRecoveryRunning) return;
+    apnsOutboxRecoveryRunning = true;
+    try {
+      await sharedFlightService.recoverDurableApnsOutbox();
+    } catch (error) {
+      console.warn(`APNs outbox recovery failed: ${error?.message || String(error)}`);
+    } finally {
+      apnsOutboxRecoveryRunning = false;
+    }
+  };
+  const apnsOutboxRecoveryTimer = setInterval(runApnsOutboxRecovery, 30_000);
+  if (typeof apnsOutboxRecoveryTimer.unref === "function") apnsOutboxRecoveryTimer.unref();
+
   return server;
 }
 
@@ -7743,6 +7970,7 @@ module.exports = {
   usesDatabase,
   __test__: {
     coalesceFlightAwareTrackTrail,
+    authoritativeProviderTrackTrail,
     buildFlightAwareAlertPayload,
     circleNotificationPreferenceConditionForEventType,
     classifyFlightAwareAuthProbeResult,
@@ -7777,9 +8005,12 @@ module.exports = {
     liveActivityStaleDateUnix,
     shouldEndLiveActivity,
     shouldForceTrackTrailRefreshMode,
+    providerTrackTrailRefreshOptions,
     shouldDirectlyProjectFirehoseTrackedRecord,
     shouldSendInitialLiveActivityState,
     isPermanentLiveActivityTokenFailure,
+    inboundFlightNeedsDetailResolution,
+    mergeResolvedInboundFlight,
     normalizeRecordFromFlightAware,
     normalizeWithContext,
     normalizeRecordFromAviationstack,

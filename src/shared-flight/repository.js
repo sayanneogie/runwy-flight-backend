@@ -38,6 +38,7 @@ function createMemorySharedFlightRepository() {
   const flightEventLogs = new Map();
   const appNotifications = new Map();
   const deliveries = new Map();
+  const deliveryTokens = new Map();
   const deviceTokens = new Map();
   const apiLogs = [];
   const providerRequestLeases = new Map();
@@ -253,7 +254,7 @@ function createMemorySharedFlightRepository() {
         alert_preferences: input.alertPreferences || DEFAULT_ALERT_PREFERENCES,
         user_label: input.userLabel || null,
         visibility: input.visibility || "private",
-        source_type: input.sourceType || "manual_search",
+        source_type: input.sourceType || "trip",
         lifecycle_state: input.lifecycleState || "upcoming",
         display_flight_number: displayFlightNumber,
         marketing_airline_code: flight.airline_code || input.airline || null,
@@ -285,6 +286,14 @@ function createMemorySharedFlightRepository() {
         .filter((row) => row.user_id === userId && !row.deleted_at && row.lifecycle_state !== "deleted")
         .map((userFlight) => ({ userFlight, flight: [...flights.values()].find((flight) => flight.id === userFlight.flight_instance_id) || null }))
         .filter((item) => item.flight);
+    },
+    async listActiveUserFlightRows(userId) {
+      return [...userFlights.values()]
+        .filter((row) =>
+          row.user_id === userId &&
+          !row.deleted_at &&
+          ["upcoming", "active"].includes(row.lifecycle_state || "upcoming")
+        );
     },
     async updateUserFlight(userId, id, patch) {
       const entry = [...userFlights.entries()].find(([, row]) => row.user_id === userId && row.id === id);
@@ -452,15 +461,86 @@ function createMemorySharedFlightRepository() {
         row.lifecycle_state !== "deleted"
       );
     },
-    async createNotificationDelivery(userId, flightInstanceId, eventId, channel = "apns", userFlightId = null) {
-      const key = `${userId}:${eventId}:${channel}`;
+    async createNotificationDelivery(userId, flightInstanceId, eventId, channel = "apns", userFlightId = null, dedupeKey = null) {
+      const key = dedupeKey
+        ? `${userId}:${dedupeKey}:${channel}`
+        : `${userId}:${eventId}:${channel}`;
       if (deliveries.has(key)) return { row: deliveries.get(key), created: false };
-      const row = { id: nextId(), user_id: userId, user_flight_id: userFlightId, flight_instance_id: flightInstanceId, flight_event_id: eventId, channel, status: "pending", created_at: new Date().toISOString() };
+      const row = { id: nextId(), user_id: userId, user_flight_id: userFlightId, flight_instance_id: flightInstanceId, flight_event_id: eventId, dedupe_key: dedupeKey, channel, status: "pending", created_at: new Date().toISOString() };
       deliveries.set(key, row);
       return { row, created: true };
     },
+    async createNotificationTokenDelivery(deliveryId, token, payload) {
+      const key = `${deliveryId}:${token.id}`;
+      const existing = deliveryTokens.get(key);
+      if (existing) return { row: existing, created: false };
+      const now = new Date().toISOString();
+      const row = {
+        id: nextId(),
+        notification_delivery_id: deliveryId,
+        device_token_id: token.id,
+        device_token: token.device_token || token.apnsToken,
+        environment: token.environment,
+        is_active: token.is_active !== false,
+        payload_json: payload || {},
+        status: "queued",
+        attempt_count: 0,
+        next_attempt_at: now,
+        created_at: now,
+        updated_at: now,
+      };
+      deliveryTokens.set(key, row);
+      return { row, created: true };
+    },
+    async claimNotificationTokenDelivery(id, leaseMs = 30_000) {
+      const entry = [...deliveryTokens.entries()].find(([, row]) => row.id === id);
+      if (!entry) return null;
+      const [key, row] = entry;
+      if (!["queued", "retry"].includes(row.status) || Date.parse(row.next_attempt_at) > Date.now()) return null;
+      const updated = {
+        ...row,
+        status: "sending",
+        attempt_count: Number(row.attempt_count || 0) + 1,
+        last_attempt_at: new Date().toISOString(),
+        locked_until: new Date(Date.now() + leaseMs).toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      deliveryTokens.set(key, updated);
+      return updated;
+    },
+    async updateNotificationTokenDelivery(id, patch) {
+      const entry = [...deliveryTokens.entries()].find(([, row]) => row.id === id);
+      if (!entry) return null;
+      const [key, row] = entry;
+      const updated = { ...row, ...patch, locked_until: null, updated_at: new Date().toISOString() };
+      deliveryTokens.set(key, updated);
+      return updated;
+    },
+    async listDueNotificationTokenDeliveries(limit = 250) {
+      for (const [key, row] of deliveryTokens.entries()) {
+        if (row.status === "sending" && Date.parse(row.locked_until || 0) <= Date.now()) {
+          deliveryTokens.set(key, { ...row, status: "uncertain", locked_until: null, error: "worker_lost_after_send_started" });
+        }
+      }
+      return [...deliveryTokens.values()]
+        .filter((row) => ["queued", "retry"].includes(row.status) && Date.parse(row.next_attempt_at) <= Date.now())
+        .slice(0, limit);
+    },
+    async refreshNotificationDeliveryStatus(deliveryId) {
+      const rows = [...deliveryTokens.values()].filter((row) => row.notification_delivery_id === deliveryId);
+      const status = rows.some((row) => row.status === "accepted")
+        ? "sent"
+        : rows.some((row) => ["queued", "retry", "sending"].includes(row.status))
+          ? "pending"
+          : "failed";
+      const delivery = [...deliveries.values()].find((row) => row.id === deliveryId);
+      if (delivery) await this.updateNotificationDelivery(deliveryId, { status, ...(status === "sent" ? { sent_at: new Date().toISOString() } : {}) });
+      return delivery ? { ...delivery, status, ...(status === "sent" ? { sent_at: delivery.sent_at || new Date().toISOString() } : {}) } : null;
+    },
     async createAppNotification(input) {
-      const key = `${input.userId}:${input.flightEventId}:${input.notificationType}`;
+      const key = input.dedupeKey
+        ? `${input.userId}:${input.dedupeKey}`
+        : `${input.userId}:${input.flightEventId}:${input.notificationType}`;
       const existing = appNotifications.get(key);
       if (existing) return { row: existing, created: false };
       const row = {
@@ -474,6 +554,7 @@ function createMemorySharedFlightRepository() {
         title: input.title,
         body: input.body,
         payload_json: input.payload || {},
+        dedupe_key: input.dedupeKey || null,
         scheduled_for: new Date().toISOString(),
         created_at: new Date().toISOString(),
       };
@@ -481,7 +562,9 @@ function createMemorySharedFlightRepository() {
       return { row, created: true };
     },
     async updateAppNotificationDeliveryStatus(input) {
-      const key = `${input.userId}:${input.flightEventId}:${input.notificationType}`;
+      const key = input.dedupeKey
+        ? `${input.userId}:${input.dedupeKey}`
+        : `${input.userId}:${input.flightEventId}:${input.notificationType}`;
       const row = appNotifications.get(key);
       if (!row) return null;
       const updated = {
@@ -501,7 +584,7 @@ function createMemorySharedFlightRepository() {
     async logApiUsage(entry) {
       apiLogs.push({ id: nextId(), created_at: new Date().toISOString(), ...entry });
     },
-    __memory: { flights, aliases, userFlights, events, flightEventLogs, appNotifications, deliveries, deviceTokens, apiLogs },
+    __memory: { flights, aliases, userFlights, events, flightEventLogs, appNotifications, deliveries, deliveryTokens, deviceTokens, apiLogs },
   };
 }
 
@@ -629,10 +712,15 @@ function createPostgresSharedFlightRepository(pool) {
     async hasActiveUserFlights(flightInstanceId) {
       const result = await pool.query(
         `select 1
-         from public.user_flights
-         where flight_instance_id = $1
-           and deleted_at is null
-           and coalesce(lifecycle_state, '') <> 'deleted'
+         from public.user_flights uf
+         left join public.tracking_sessions ts
+           on ts.id = uf.tracking_session_id
+         where (
+             uf.flight_instance_id = $1
+             or ts.metadata_json->>'sharedFlightInstanceId' = $1::text
+           )
+           and uf.deleted_at is null
+           and coalesce(uf.lifecycle_state, '') <> 'deleted'
          limit 1`,
         [flightInstanceId]
       );
@@ -703,10 +791,19 @@ function createPostgresSharedFlightRepository(pool) {
       const result = await pool.query(
         `select distinct fi.*
          from public.flight_instances fi
-         join public.user_flights uf on uf.flight_instance_id = fi.id
          where fi.is_final = false
-           and uf.deleted_at is null
-           and coalesce(uf.lifecycle_state, '') <> 'deleted'
+           and exists (
+             select 1
+             from public.user_flights uf
+             left join public.tracking_sessions ts
+               on ts.id = uf.tracking_session_id
+             where (
+                 uf.flight_instance_id = fi.id
+                 or ts.metadata_json->>'sharedFlightInstanceId' = fi.id::text
+               )
+               and uf.deleted_at is null
+               and coalesce(uf.lifecycle_state, '') <> 'deleted'
+           )
            and (
              coalesce(fi.estimated_departure_at, fi.scheduled_departure_at)
                between now() - interval '24 hours' and now() + interval '72 hours'
@@ -724,10 +821,22 @@ function createPostgresSharedFlightRepository(pool) {
          from public.flight_events fe
          where fe.notification_required = true
            and fe.created_at >= now() - interval '48 hours'
-           and not exists (
-             select 1
-             from public.notification_deliveries nd
-             where nd.flight_event_id = fe.id
+           and (
+             not exists (
+               select 1
+               from public.notification_deliveries nd
+               where nd.flight_event_id = fe.id
+             )
+             or exists (
+               select 1
+               from public.notification_deliveries nd
+               where nd.flight_event_id = fe.id
+                 and nd.status = 'pending'
+                 and not exists (
+                   select 1 from public.notification_delivery_tokens ndt
+                   where ndt.notification_delivery_id = nd.id
+                 )
+             )
            )
          order by fe.created_at asc
          limit 250`
@@ -956,7 +1065,7 @@ function createPostgresSharedFlightRepository(pool) {
            $5,
            $6,
            now(),
-           coalesce($7, 'manual_search'),
+           coalesce($7, 'trip'),
            coalesce(
              $8,
              case
@@ -986,6 +1095,7 @@ function createPostgresSharedFlightRepository(pool) {
          from public.flight_instances fi
          where fi.id = $2
          on conflict (user_id, flight_instance_id) where flight_instance_id is not null do update set
+           deleted_at = null,
            notification_enabled = excluded.notification_enabled,
            alert_preferences = excluded.alert_preferences,
            user_label = excluded.user_label,
@@ -1040,6 +1150,18 @@ function createPostgresSharedFlightRepository(pool) {
         [userId]
       );
       return result.rows.map((row) => ({ userFlight: row.user_flight, flight: row.flight }));
+    },
+    async listActiveUserFlightRows(userId) {
+      const result = await pool.query(
+        `select *
+         from public.user_flights
+         where user_id = $1::uuid
+           and deleted_at is null
+           and coalesce(lifecycle_state, 'upcoming') in ('upcoming', 'active')
+         order by updated_at desc nulls last, added_at desc nulls last`,
+        [userId]
+      );
+      return result.rows;
     },
     async updateUserFlight(userId, id, patch) {
       return one(await pool.query(
@@ -1111,6 +1233,28 @@ function createPostgresSharedFlightRepository(pool) {
       const flightInstanceId = userFlight.flight_instance_id || null;
       const trackingSessionId = userFlight.tracking_session_id || null;
       const userFlightId = userFlight.id || null;
+      const hasOccurrenceIdentity = Boolean(
+        userFlightId && userFlight.display_flight_number && userFlight.origin_iata &&
+        userFlight.destination_iata && userFlight.scheduled_departure
+      );
+      const sibling = hasOccurrenceIdentity ? one(await pool.query(
+        `select exists (
+           select 1 from public.user_flights sibling
+           where sibling.user_id = $1::uuid
+             and sibling.id is distinct from $2::uuid
+             and sibling.deleted_at is null
+             and coalesce(sibling.lifecycle_state, '') <> 'deleted'
+             and regexp_replace(upper(coalesce(sibling.display_flight_number, '')), '[^A-Z0-9]', '', 'g')
+               = regexp_replace(upper($3), '[^A-Z0-9]', '', 'g')
+             and upper(coalesce(sibling.origin_iata, '')) = upper($4)
+             and upper(coalesce(sibling.destination_iata, '')) = upper($5)
+             and abs(extract(epoch from (sibling.scheduled_departure - $6::timestamptz))) <= 1800
+         ) as present`,
+        [userId, userFlightId, userFlight.display_flight_number, userFlight.origin_iata, userFlight.destination_iata, userFlight.scheduled_departure]
+      )) : null;
+      const preserveSharedArtifacts = sibling?.present === true;
+      const broadFlightInstanceId = preserveSharedArtifacts ? null : flightInstanceId;
+      const broadTrackingSessionId = preserveSharedArtifacts ? null : trackingSessionId;
 
       const notifications = await pool.query(
         `delete from public.notifications
@@ -1123,14 +1267,14 @@ function createPostgresSharedFlightRepository(pool) {
              or ($4::uuid is not null and payload_json ->> 'flight_id' = $4::text)
              or ($4::uuid is not null and payload_json ->> 'flightId' = $4::text)
            ))`,
-        [userId, flightInstanceId, trackingSessionId, userFlightId]
+        [userId, broadFlightInstanceId, broadTrackingSessionId, userFlightId]
       );
 
       const deliveries = await pool.query(
         `delete from public.notification_deliveries
          where ($3::uuid is not null and user_flight_id = $3::uuid)
             or (user_id = $1::uuid and $2::uuid is not null and flight_instance_id = $2::uuid)`,
-        [userId, flightInstanceId, userFlightId]
+        [userId, broadFlightInstanceId, userFlightId]
       );
 
       return {
@@ -1183,9 +1327,14 @@ function createPostgresSharedFlightRepository(pool) {
              coalesce(us.temperature_unit, 'celsius') as temperature_unit,
              coalesce(uf.source_type, 'tracked') <> 'tracked' as is_traveler
            from public.user_flights uf
+           left join public.tracking_sessions ts
+             on ts.id = uf.tracking_session_id
            left join public.profiles p on p.user_id = uf.user_id
            left join public.user_settings us on us.user_id = uf.user_id
-           where uf.flight_instance_id = $1
+           where (
+               uf.flight_instance_id = $1
+               or ts.metadata_json->>'sharedFlightInstanceId' = $1::text
+             )
              and uf.notification_enabled = true
              and uf.deleted_at is null
              and coalesce(uf.lifecycle_state, '') <> 'deleted'
@@ -1215,6 +1364,8 @@ function createPostgresSharedFlightRepository(pool) {
              coalesce(rus.temperature_unit, 'celsius') as temperature_unit,
              false as is_traveler
            from public.user_flights uf
+           left join public.tracking_sessions ts
+             on ts.id = uf.tracking_session_id
            left join public.profiles p on p.user_id = uf.user_id
            join public.friend_permissions fp
              on fp.owner_user_id = uf.user_id
@@ -1222,7 +1373,10 @@ function createPostgresSharedFlightRepository(pool) {
              on fr.id = fp.relationship_id
            left join public.profiles rp on rp.user_id = fp.viewer_user_id
            left join public.user_settings rus on rus.user_id = fp.viewer_user_id
-           where uf.flight_instance_id = $1
+           where (
+               uf.flight_instance_id = $1
+               or ts.metadata_json->>'sharedFlightInstanceId' = $1::text
+             )
              and uf.deleted_at is null
              and coalesce(uf.lifecycle_state, '') <> 'deleted'
              and not exists (
@@ -1322,7 +1476,28 @@ function createPostgresSharedFlightRepository(pool) {
       );
       return result.rows[0]?.active === true;
     },
-    async createNotificationDelivery(userId, flightInstanceId, eventId, channel = "apns", userFlightId = null) {
+    async createNotificationDelivery(userId, flightInstanceId, eventId, channel = "apns", userFlightId = null, dedupeKey = null) {
+      if (dedupeKey) {
+        let row = one(await pool.query(
+          `insert into public.notification_deliveries (
+             user_id, user_flight_id, flight_instance_id, flight_event_id, dedupe_key, channel
+           )
+           values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6)
+           on conflict do nothing
+           returning *`,
+          [userId, userFlightId, flightInstanceId, eventId, dedupeKey, channel]
+        ));
+        const created = Boolean(row);
+        if (!row) {
+          row = one(await pool.query(
+            `select * from public.notification_deliveries
+             where user_id = $1::uuid and dedupe_key = $2 and channel = $3
+             limit 1`,
+            [userId, dedupeKey, channel]
+          ));
+        }
+        return { row, created };
+      }
       const row = one(await pool.query(
         `insert into public.notification_deliveries (user_id, user_flight_id, flight_instance_id, flight_event_id, channel)
          values ($1, $2, $3, $4, $5)
@@ -1339,7 +1514,170 @@ function createPostgresSharedFlightRepository(pool) {
       ));
       return { row, created: Boolean(row) };
     },
+    async createNotificationTokenDelivery(deliveryId, token, payload) {
+      let row = one(await pool.query(
+        `insert into public.notification_delivery_tokens (
+           notification_delivery_id, device_token_id, payload_json
+         ) values ($1::uuid, $2::uuid, $3::jsonb)
+         on conflict (notification_delivery_id, device_token_id) do nothing
+         returning *`,
+        [deliveryId, token.id, JSON.stringify(payload || {})]
+      ));
+      const created = Boolean(row);
+      if (!row) {
+        row = one(await pool.query(
+          `select ndt.*, dt.device_token, dt.environment, dt.is_active
+           from public.notification_delivery_tokens ndt
+           join public.device_tokens dt on dt.id = ndt.device_token_id
+           where ndt.notification_delivery_id = $1::uuid
+             and ndt.device_token_id = $2::uuid
+           limit 1`,
+          [deliveryId, token.id]
+        ));
+      } else {
+        row = { ...row, device_token: token.device_token, environment: token.environment, is_active: token.is_active !== false };
+      }
+      return { row, created };
+    },
+    async claimNotificationTokenDelivery(id, leaseMs = 30_000) {
+      return one(await pool.query(
+        `update public.notification_delivery_tokens ndt set
+           status = 'sending',
+           attempt_count = attempt_count + 1,
+           last_attempt_at = now(),
+           locked_until = now() + ($2::bigint * interval '1 millisecond'),
+           updated_at = now()
+         from public.device_tokens dt
+         where ndt.id = $1::uuid
+           and dt.id = ndt.device_token_id
+           and ndt.status in ('queued', 'retry')
+           and ndt.next_attempt_at <= now()
+         returning ndt.*, dt.device_token, dt.environment, dt.is_active`,
+        [id, Math.max(1, Math.round(leaseMs))]
+      ));
+    },
+    async updateNotificationTokenDelivery(id, patch) {
+      return one(await pool.query(
+        `update public.notification_delivery_tokens set
+           status = $2,
+           next_attempt_at = coalesce($3::timestamptz, next_attempt_at),
+           accepted_at = coalesce($4::timestamptz, accepted_at),
+           apns_id = coalesce($5, apns_id),
+           error = $6,
+           locked_until = null,
+           updated_at = now()
+         where id = $1::uuid
+         returning *`,
+        [id, patch.status, patch.next_attempt_at || null, patch.accepted_at || null, patch.apns_id || null, patch.error || null]
+      ));
+    },
+    async listDueNotificationTokenDeliveries(limit = 250) {
+      await pool.query(
+        `update public.notification_delivery_tokens set
+           status = 'uncertain',
+           locked_until = null,
+           error = coalesce(error, 'worker_lost_after_send_started'),
+           updated_at = now()
+         where status = 'sending' and locked_until <= now()`
+      );
+      const result = await pool.query(
+        `select ndt.*, dt.device_token, dt.environment, dt.is_active
+         from public.notification_delivery_tokens ndt
+         join public.device_tokens dt on dt.id = ndt.device_token_id
+         where ndt.status in ('queued', 'retry')
+           and ndt.next_attempt_at <= now()
+         order by ndt.next_attempt_at asc, ndt.created_at asc
+         limit $1`,
+        [Math.max(1, Math.min(1000, Number(limit) || 250))]
+      );
+      return result.rows;
+    },
+    async refreshNotificationDeliveryStatus(deliveryId) {
+      return one(await pool.query(
+        `with aggregate as (
+           select
+             bool_or(status = 'accepted') as has_accepted,
+             bool_or(status in ('queued', 'retry', 'sending')) as has_pending
+           from public.notification_delivery_tokens
+           where notification_delivery_id = $1::uuid
+         )
+         update public.notification_deliveries nd set
+           status = case
+             when aggregate.has_accepted then 'sent'
+             when aggregate.has_pending then 'pending'
+             else 'failed'
+           end,
+           sent_at = case when aggregate.has_accepted then coalesce(nd.sent_at, now()) else nd.sent_at end,
+           updated_at = now()
+         from aggregate
+         where nd.id = $1::uuid
+         returning nd.*`,
+        [deliveryId]
+      ));
+    },
     async createAppNotification(input) {
+      if (input.dedupeKey) {
+        const payload = {
+          ...(input.payload || {}),
+          flight_event_id: input.flightEventId,
+          flight_instance_id: input.flightInstanceId,
+        };
+        const row = one(await pool.query(
+          `insert into public.notifications (
+             user_id,
+             tracking_session_id,
+             notification_type,
+             delivery_channel,
+             delivery_status,
+             title,
+             body,
+             payload_json,
+             scheduled_for,
+             dedupe_key
+           )
+           select $1::uuid,
+                  uf.tracking_session_id,
+                  $3,
+                  'push',
+                  $4,
+                  $5,
+                  $6,
+                  $7::jsonb,
+                  now(),
+                  $8
+           from (values (1)) as seed(value)
+           left join lateral (
+             select candidate.tracking_session_id
+             from public.user_flights candidate
+             left join public.tracking_sessions ts
+               on ts.id = candidate.tracking_session_id
+             where candidate.user_id = $1::uuid
+               and (
+                 candidate.flight_instance_id = $2::uuid
+                 or ts.metadata_json->>'sharedFlightInstanceId' = $2::text
+               )
+               and candidate.deleted_at is null
+               and coalesce(candidate.lifecycle_state, '') <> 'deleted'
+             order by (candidate.tracking_session_id is not null) desc,
+                      candidate.updated_at desc nulls last,
+                      candidate.added_at desc nulls last
+             limit 1
+           ) uf on true
+           on conflict do nothing
+           returning *`,
+          [
+            input.userId,
+            input.flightInstanceId,
+            input.notificationType,
+            input.deliveryStatus || "queued",
+            input.title,
+            input.body,
+            JSON.stringify(payload),
+            input.dedupeKey,
+          ]
+        ));
+        return { row, created: Boolean(row) };
+      }
       const existing = one(await pool.query(
         `select *
          from public.notifications
@@ -1354,12 +1692,20 @@ function createPostgresSharedFlightRepository(pool) {
       if (existing) return { row: existing, created: false };
 
       const trackingSession = one(await pool.query(
-        `select tracking_session_id
-         from public.user_flights
-         where user_id = $1::uuid
-           and flight_instance_id = $2::uuid
-           and deleted_at is null
-         order by updated_at desc nulls last, added_at desc nulls last
+        `select uf.tracking_session_id
+         from public.user_flights uf
+         left join public.tracking_sessions ts
+           on ts.id = uf.tracking_session_id
+         where uf.user_id = $1::uuid
+           and (
+             uf.flight_instance_id = $2::uuid
+             or ts.metadata_json->>'sharedFlightInstanceId' = $2::text
+           )
+           and uf.deleted_at is null
+           and coalesce(uf.lifecycle_state, '') <> 'deleted'
+         order by (uf.tracking_session_id is not null) desc,
+                  uf.updated_at desc nulls last,
+                  uf.added_at desc nulls last
          limit 1`,
         [input.userId, input.flightInstanceId]
       ));
@@ -1404,9 +1750,15 @@ function createPostgresSharedFlightRepository(pool) {
            sent_at = case when $4 = 'sent' then coalesce(sent_at, $5::timestamptz, now()) else sent_at end,
            updated_at = now()
          where user_id = $1::uuid
-           and notification_type = $2
-           and payload_json ->> 'flight_event_id' = $3
-           and created_at >= now() - interval '24 hours'
+           and (
+             ($6::text is not null and dedupe_key = $6)
+             or (
+               $6::text is null
+               and notification_type = $2
+               and payload_json ->> 'flight_event_id' = $3
+               and created_at >= now() - interval '24 hours'
+             )
+           )
          returning *`,
         [
           input.userId,
@@ -1414,6 +1766,7 @@ function createPostgresSharedFlightRepository(pool) {
           input.flightEventId,
           input.deliveryStatus,
           input.sentAt || null,
+          input.dedupeKey || null,
         ]
       ));
     },

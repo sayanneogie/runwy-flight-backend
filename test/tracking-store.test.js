@@ -230,13 +230,19 @@ test("terminal snapshots copy the longer actual route into matching archived fli
     rawProviderPayload: {},
   });
 
-  const archiveUpdate = queries.find(({ sql }) =>
-    sql.includes("route_polyline = $2::jsonb")
+  const archiveUpdate = queries.find(
+    ({ sql }) =>
+      sql.includes("update public.user_flights") &&
+      sql.includes("final_route_capture_next_attempt_at") &&
+      sql.includes("arrival_terminal")
   );
   assert.ok(archiveUpdate, "expected a terminal route archive update");
   assert.deepEqual(JSON.parse(archiveUpdate.params[1]), completedPoints);
   assert.equal(archiveUpdate.params[2], "AI101");
   assert.equal(archiveUpdate.params[8], 5);
+  assert.match(archiveUpdate.sql, /lifecycle_state in \('active', 'landed', 'archived'\)/);
+  assert.match(archiveUpdate.sql, /final_route_capture_status/);
+  assert.match(archiveUpdate.sql, /then 'landed'/);
 });
 
 test("tracked detail snapshots prefer the newest baggage column over stale canonical JSON", async () => {

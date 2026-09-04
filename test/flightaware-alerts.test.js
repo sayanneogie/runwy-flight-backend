@@ -7,10 +7,41 @@ const { createFlightCache, createMemoryRedis } = require("../src/shared-flight/c
 const { createMemorySharedFlightRepository } = require("../src/shared-flight/repository");
 const { createSharedFlightService } = require("../src/shared-flight/service");
 const {
+  flightUpdateFromAlert,
   generateFlightAwareAlertDedupeKey,
   normalizeFlightAwareAlert,
   targetMatchesAlert,
 } = require("../src/flightaware-alerts");
+
+test("coordinate-free alerts preserve the prior position observation time", () => {
+  const update = flightUpdateFromAlert({
+    airline_code: "AA",
+    flight_number: "53",
+    origin_airport: "FCO",
+    destination_airport: "MIA",
+    status: "enroute",
+    position_lat: 33.16667,
+    position_lon: -49.33333,
+    altitude: 38_000,
+    ground_speed: 486,
+    heading: 252,
+    normalized_data: {
+      position: { recordedAt: "2026-09-02T19:17:59.000Z" },
+    },
+  }, {
+    event_type: "gate_changed",
+    event_time: "2026-09-02T22:24:24.000Z",
+  });
+
+  assert.deepEqual(update.position, {
+    lat: 33.16667,
+    lon: -49.33333,
+    altitude: 38_000,
+    groundSpeed: 486,
+    heading: 252,
+    recordedAt: "2026-09-02T19:17:59.000Z",
+  });
+});
 
 function normalizedFlight(overrides = {}) {
   return {

@@ -32,6 +32,19 @@ function mountSharedFlightRoutes(app, service) {
     }
   });
 
+  app.put("/v1/user-flights/displayed", async (req, res) => {
+    const userId = String(req.auth?.userId || "").trim();
+    if (!userId) return res.status(401).json({ error: "Sign in is required" });
+    try {
+      const result = await service.reconcileDisplayedUserFlights(userId, req.body || {});
+      return res.json(result);
+    } catch (error) {
+      return res.status(error.statusCode || 500).json({
+        error: error.message || "Unable to reconcile displayed flights",
+      });
+    }
+  });
+
   app.get("/v1/user-flights", async (req, res) => {
     const userId = String(req.auth?.userId || "").trim();
     if (!userId) return res.status(401).json({ error: "Sign in is required" });

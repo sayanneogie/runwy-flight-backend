@@ -1168,25 +1168,61 @@ function createTrackingStore({
         `
         update public.user_flights
         set
-          route_polyline = $2::jsonb,
+          route_polyline = case
+            when coalesce(final_route_capture_status, 'pending') = 'captured' then route_polyline
+            else $2::jsonb
+          end,
           provider_name = coalesce(provider_name, $7),
           provider_flight_id = coalesce(provider_flight_id, $8),
+          lifecycle_state = case
+            when coalesce(source_type, '') <> 'tracked' and lifecycle_state = 'active' then 'landed'
+            else lifecycle_state
+          end,
+          status = case
+            when coalesce(source_type, '') <> 'tracked' then 'landed'
+            else status
+          end,
+          actual_arrival = coalesce(actual_arrival, $10::timestamptz),
+          baggage_claim = coalesce($11, baggage_claim),
+          arrival_terminal = coalesce($12, arrival_terminal),
+          arrival_gate = coalesce($13, arrival_gate),
+          final_route_capture_status = case
+            when coalesce(source_type, '') <> 'tracked'
+              and coalesce(final_route_capture_status, 'pending') <> 'captured'
+              then 'pending'
+            else final_route_capture_status
+          end,
+          final_route_capture_next_attempt_at = case
+            when coalesce(source_type, '') <> 'tracked'
+              and coalesce(final_route_capture_status, 'pending') <> 'captured'
+              then now()
+            else final_route_capture_next_attempt_at
+          end,
           updated_at = now()
         where user_id = $1::uuid
           and deleted_at is null
-          and lifecycle_state in ('landed', 'archived')
+          and lifecycle_state in ('active', 'landed', 'archived')
           and upper(regexp_replace(coalesce(display_flight_number, ''), '[^A-Z0-9]', '', 'g')) =
               upper(regexp_replace($3, '[^A-Z0-9]', '', 'g'))
           and upper(coalesce(origin_iata, '')) = upper($4)
           and upper(coalesce(destination_iata, '')) = upper($5)
           and abs(extract(epoch from (scheduled_departure - $6::timestamptz))) <= 64800
-          and coalesce(
-            case
-              when jsonb_typeof(route_polyline) = 'array' then jsonb_array_length(route_polyline)
-              else 0
-            end,
-            0
-          ) < $9
+          and (
+            (
+              coalesce(source_type, '') = 'tracked'
+              and coalesce(
+                case
+                  when jsonb_typeof(route_polyline) = 'array' then jsonb_array_length(route_polyline)
+                  else 0
+                end,
+                0
+              ) < $9
+            )
+            or (
+              coalesce(source_type, '') <> 'tracked'
+              and coalesce(final_route_capture_status, 'pending') <> 'captured'
+            )
+          )
         `,
         [
           userId,
@@ -1198,6 +1234,10 @@ function createTrackingStore({
           provider,
           providerFlightId,
           archivedRoutePoints.length,
+          normalized.arrivalTimes?.actual || normalized.landingTimes?.actual || null,
+          normalized.baggageClaim || normalized.baggageBelt || null,
+          normalized.arrivalTerminal || null,
+          normalized.arrivalGate || null,
         ]
       );
     }

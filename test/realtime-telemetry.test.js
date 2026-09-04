@@ -74,6 +74,55 @@ test("mergeRealtimeTelemetry preserves gates and terminals when a later snapshot
   assert.equal(merged.arrivalTerminal, "1");
 });
 
+test("mergeRealtimeTelemetry preserves an inbound aircraft assignment when a later snapshot omits it", () => {
+  const inboundFlight = {
+    providerFlightId: "QTR17-20260904-instance",
+    flightNumber: "QR17",
+    originAirportIata: "DOH",
+    destinationAirportIata: "DUB",
+    estimatedArrival: "2026-09-04T13:55:00.000Z",
+    status: "enroute",
+  };
+
+  const merged = mergeRealtimeTelemetry(
+    { status: "scheduled", inboundFlight },
+    { status: "scheduled", inboundFlight: null }
+  );
+
+  assert.deepEqual(merged.inboundFlight, inboundFlight);
+});
+
+test("mergeRealtimeTelemetry fills a sparse inbound assignment from its last resolved details", () => {
+  const previousInbound = {
+    providerFlightId: "QTR17-20260904-instance",
+    flightNumber: "QR17",
+    originAirportIata: "DOH",
+    destinationAirportIata: "DUB",
+    estimatedArrival: "2026-09-04T13:55:00.000Z",
+    status: "enroute",
+  };
+
+  const merged = mergeRealtimeTelemetry(
+    { status: "scheduled", inboundFlight: previousInbound },
+    {
+      status: "scheduled",
+      inboundFlight: {
+        providerFlightId: "QTR17-20260904-instance",
+        flightNumber: null,
+        originAirportIata: null,
+        destinationAirportIata: "DUB",
+        estimatedArrival: null,
+        status: null,
+      },
+    }
+  );
+
+  assert.equal(merged.inboundFlight.flightNumber, "QR17");
+  assert.equal(merged.inboundFlight.originAirportIata, "DOH");
+  assert.equal(merged.inboundFlight.estimatedArrival, "2026-09-04T13:55:00.000Z");
+  assert.equal(merged.inboundFlight.status, "enroute");
+});
+
 test("mergeRealtimeTelemetry prefers the newer live position", () => {
   const previous = {
     status: "enroute",
@@ -115,6 +164,49 @@ test("mergeRealtimeTelemetry prefers the newer live position", () => {
   assert.deepEqual(merged.trackPoints, next.trackPoints);
   assert.equal(merged.progressPercent, 44);
   assert.equal(merged.lastUpdated, "2026-03-18T10:00:30.000Z");
+});
+
+test("mergeRealtimeTelemetry appends a newer partial track batch without dropping prior breadcrumbs", () => {
+  const previous = {
+    status: "enroute",
+    trackPoints: [
+      { latitude: 41.8, longitude: 12.2, recordedAt: "2026-09-02T14:00:00.000Z" },
+      { latitude: 39.5, longitude: -20.1, recordedAt: "2026-09-02T16:00:00.000Z" },
+      { latitude: 33.2, longitude: -49.3, recordedAt: "2026-09-02T19:00:00.000Z" },
+    ],
+  };
+  const next = {
+    status: "enroute",
+    trackPoints: [
+      { latitude: 25.5, longitude: -79.8, recordedAt: "2026-09-02T22:43:00.000Z" },
+      { latitude: 25.8, longitude: -80.3, recordedAt: "2026-09-02T22:55:00.000Z" },
+    ],
+  };
+
+  const merged = mergeRealtimeTelemetry(previous, next);
+
+  assert.deepEqual(merged.trackPoints, [...previous.trackPoints, ...next.trackPoints]);
+});
+
+test("mergeRealtimeTelemetry rejects the provider zero-coordinate sentinel", () => {
+  const merged = mergeRealtimeTelemetry(
+    {
+      status: "enroute",
+      trackPoints: [
+        { latitude: 41.8, longitude: 12.2, recordedAt: "2026-09-02T14:00:00.000Z" },
+      ],
+    },
+    {
+      status: "landed",
+      trackPoints: [
+        { latitude: 0, longitude: 0, recordedAt: "2026-09-02T22:56:00.000Z" },
+        { latitude: 25.8, longitude: -80.3, recordedAt: "2026-09-02T22:57:00.000Z" },
+      ],
+    }
+  );
+
+  assert.equal(merged.trackPoints.length, 2);
+  assert.equal(merged.trackPoints.some((point) => point.latitude === 0 && point.longitude === 0), false);
 });
 
 test("mergeRealtimeTelemetry clears live position for terminal states", () => {

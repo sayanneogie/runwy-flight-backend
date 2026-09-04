@@ -1,10 +1,109 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const { getAirportCatalog } = require("../airport-catalog");
 const RUNWY_NOTIFICATION_SOUND = "RunwyNotification.caf";
 
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .filter((key) => value[key] !== undefined)
+        .map((key) => [key, stableValue(value[key])])
+    );
+  }
+  return value ?? null;
+}
+
+function firstPresent(object, keys) {
+  for (const key of keys) {
+    const value = object?.[key];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return null;
+}
+
+function notificationSemanticIdentity(event = {}) {
+  const type = String(event.event_type || "UNKNOWN").trim().toUpperCase();
+  const value = event.new_value || {};
+
+  // Provider aliases describe the same passenger-visible milestone. Keeping
+  // these identities value-free makes takeoff, landing, and taxi alerts
+  // strictly once per flight occurrence even if a provider oscillates.
+  if (["DEPARTED", "AIRBORNE"].includes(type)) return { type: "TAKEOFF" };
+  if (["LANDED", "ARRIVED"].includes(type)) return { type: "TOUCHDOWN" };
+  if (["TAXIING", "TAXI_OUT"].includes(type)) return { type: "TAXI_OUT" };
+  if (["TAKEOFF_ROLL", "TAXI_IN", "ARRIVED_AT_GATE", "TRIP_STARTING", "CANCELLED"].includes(type)) {
+    return { type };
+  }
+
+  // Repeat a change notification only when its passenger-visible destination
+  // value is genuinely different. Old values, summaries, timestamps, and
+  // provider metadata are deliberately excluded because they are noisy.
+  if (type === "GATE_CHANGED") {
+    return { type, value: firstPresent(value, ["gate", "departureGate", "arrivalGate"]) };
+  }
+  if (type === "TERMINAL_CHANGED") {
+    return { type, value: firstPresent(value, ["terminal", "departureTerminal", "arrivalTerminal"]) };
+  }
+  if (["BAGGAGE_BELT_ASSIGNED", "BAGGAGE_BELT_CHANGED"].includes(type)) {
+    return { type: "BAGGAGE_BELT", value: firstPresent(value, ["baggageBelt", "baggage_belt", "belt"]) };
+  }
+  if (["DELAYED", "RESCHEDULED"].includes(type)) {
+    return {
+      type: "SCHEDULE_CHANGE",
+      value: firstPresent(value, [
+        "estimatedDepartureAt",
+        "scheduledDepartureAt",
+        "estimatedArrivalAt",
+        "scheduledArrivalAt",
+        "delayMinutes",
+        "status",
+      ]),
+    };
+  }
+  if (type === "DIVERTED") {
+    return { type, value: firstPresent(value, ["diversionAirport", "destination", "airport"]) };
+  }
+  if (type === "AIRCRAFT_CHANGED") {
+    return {
+      type,
+      value: {
+        aircraftType: firstPresent(value, ["aircraftType", "type"]),
+        aircraftRegistration: firstPresent(value, ["aircraftRegistration", "registration"]),
+      },
+    };
+  }
+  if (type.startsWith("INBOUND_")) {
+    return {
+      type,
+      value: firstPresent(value, ["providerFlightId", "flightNumber", "status"]),
+    };
+  }
+
+  return { type, value: stableValue(value) };
+}
+
+function notificationDedupeKey(flight = {}, event = {}) {
+  const flightOccurrence = String(
+    flight.id || flight.flight_instance_id || flight.flight_key || "unknown-flight"
+  ).trim();
+  const semanticIdentity = stableValue(notificationSemanticIdentity(event));
+  const digest = crypto
+    .createHash("sha256")
+    .update(JSON.stringify({ flightOccurrence, semanticIdentity }))
+    .digest("hex");
+  return `flight-event:v1:${digest}`;
+}
+
 function createApnsSender({ send } = {}) {
   return {
+    async sendPayload({ token, payload }) {
+      if (!send) return { ok: true, skipped: true };
+      return send({ token: token.device_token || token.apnsToken, payload, environment: token.environment });
+    },
     async sendFlightEvent({ token, flight, event, context = {} }) {
       if (!send) return { ok: true, skipped: true };
       const payload = notificationPayload(flight, event, context);
@@ -253,6 +352,7 @@ function notificationTitle(flight, event, context = {}) {
   if (event.event_type === "TAXIING") return "Taxiing";
   if (event.event_type === "TAKEOFF_ROLL") return "✈️ Taking Off";
   if (event.event_type === "INBOUND_DEPARTED") return "✈️ Your Aircraft Is on the Way";
+  if (event.event_type === "INBOUND_ARRIVED") return "✈️ Your Aircraft Has Landed";
   if (event.event_type === "INBOUND_CANCELLED") return "Inbound Aircraft Cancelled";
   if (event.event_type === "INBOUND_DIVERTED") return "Inbound Aircraft Diverted";
   if (event.event_type === "TRIP_STARTING") {
@@ -288,13 +388,16 @@ function notificationBody(flight, event, context = {}) {
   if (event.event_type === "GATE_CHANGED") return `${code} gate changed from ${event.old_value?.gate || "unknown"} to ${event.new_value?.gate}.`;
   if (event.event_type === "TAXIING") return `${subject} is taxiing.`;
   if (event.event_type === "TAKEOFF_ROLL") return `${subject}${route ? `, ${route},` : ""} is about to take off.`;
-  if (["INBOUND_DEPARTED", "INBOUND_CANCELLED", "INBOUND_DIVERTED"].includes(event.event_type)) {
+  if (["INBOUND_DEPARTED", "INBOUND_ARRIVED", "INBOUND_CANCELLED", "INBOUND_DIVERTED"].includes(event.event_type)) {
     const inbound = event.new_value?.inboundFlight || flight?.normalized_data?.inboundFlight || {};
     const inboundCode = String(inbound.flightNumber || "Your inbound aircraft").trim();
     const origin = String(inbound.originAirportIata || "its previous airport").trim().toUpperCase();
     const destination = String(flight.origin_airport || inbound.destinationAirportIata || "your departure airport").trim().toUpperCase();
     if (event.event_type === "INBOUND_CANCELLED") return `${inboundCode}, the inbound aircraft for ${code}, was cancelled.`;
     if (event.event_type === "INBOUND_DIVERTED") return `${inboundCode}, the inbound aircraft for ${code}, was diverted.`;
+    if (event.event_type === "INBOUND_ARRIVED") {
+      return `${inboundCode}, the inbound aircraft for ${code}, has landed at ${destination}.`;
+    }
     const arrivalMs = new Date(inbound.estimatedArrival || "").getTime();
     const minutes = Number.isFinite(arrivalMs) ? Math.max(0, Math.round((arrivalMs - Date.now()) / 60_000)) : null;
     const eta = minutes == null
@@ -338,23 +441,97 @@ function notificationBody(flight, event, context = {}) {
 }
 
 function notificationPayload(flight, event, context = {}) {
-  return {
+  const routingFlightId = String(
+    context.trackingSessionId || context.userFlightId || flight.id
+  ).trim();
+  const normalized = flight.normalized_data || {};
+  const eventType = String(event.event_type || "").toUpperCase();
+  const notificationTypeByEvent = {
+    GATE_CHANGED: "flight_gate_change",
+    TERMINAL_CHANGED: "flight_terminal_change",
+    TAXIING: "flight_taxiing",
+    TAXI_IN: "flight_taxiing",
+    TAKEOFF_ROLL: "flight_takeoff_roll",
+    DEPARTED: "flight_departed",
+    AIRBORNE: "flight_departed",
+    LANDED: "flight_arrived",
+    ARRIVED: "flight_arrived",
+    ARRIVED_AT_GATE: "flight_arrived",
+    DELAYED: "flight_delayed",
+    RESCHEDULED: "flight_delayed",
+    CANCELLED: "flight_cancelled",
+    DIVERTED: "flight_diverted",
+    BAGGAGE_BELT_ASSIGNED: "flight_baggage_claim",
+  };
+  const departureGate = String(
+    eventType === "GATE_CHANGED"
+      ? event.new_value?.gate || ""
+      : normalized.departureGate || flight.gate || ""
+  ).trim() || null;
+  const baggageBelt = String(
+    eventType === "BAGGAGE_BELT_ASSIGNED"
+      ? event.new_value?.baggageBelt || ""
+      : normalized.baggageBelt || flight.baggage_belt || ""
+  ).trim() || null;
+  const runwy = {
+    type: notificationTypeByEvent[eventType] || "flight_status",
+    flightId: routingFlightId,
+    flightInstanceId: flight.id,
+    // APNs is the first delivery surface to learn about many lifecycle
+    // transitions. Carry the compact canonical state with the alert so the app
+    // and its local Live Activity can advance before the next database read.
+    status: event.new_value?.status || flight.status || normalized.status || null,
+    computedPhase: normalized.computedPhase || normalized.phase || null,
+    departureTerminal: normalized.departureTerminal || flight.terminal || null,
+    departureGate,
+    arrivalTerminal: normalized.arrivalTerminal || null,
+    arrivalGate: normalized.arrivalGate || null,
+    baggageBelt,
+    departureEstimatedAt: normalized.departureTimes?.estimated || flight.estimated_departure_at || null,
+    departureActualAt: normalized.departureTimes?.actual || flight.actual_departure_at || null,
+    takeoffActualAt: normalized.takeoffTimes?.actual || null,
+    arrivalEstimatedAt: normalized.arrivalTimes?.estimated || flight.estimated_arrival_at || null,
+    landingActualAt: normalized.landingTimes?.actual || null,
+    arrivalActualAt: normalized.arrivalTimes?.actual || flight.actual_arrival_at || null,
+    lastUpdatedAt: flight.last_fetched_at || flight.updated_at || event.provider_event_time || null,
+  };
+  const payload = {
     aps: {
       alert: {
         title: notificationTitle(flight, event, context),
         body: notificationBody(flight, event, context),
       },
       sound: RUNWY_NOTIFICATION_SOUND,
+      // Wake the app's remote-notification handler so the gate shown in the
+      // alert can be committed to the local flight model while suspended.
+      "content-available": 1,
     },
     flight_instance_id: flight.id,
+    ...(context.trackingSessionId ? { tracking_session_id: context.trackingSessionId } : {}),
     flight_event_id: event.id,
+    notification_dedupe_key: notificationDedupeKey(flight, event),
     event_type: event.event_type,
-    deep_link: `runwy://flights/${flight.id}`,
+    deep_link: `runwy://flights/${routingFlightId}`,
+    runwy,
   };
+
+  // Operational values in APNs close the small consistency window between
+  // delivery and the corresponding snapshot becoming visible to a client.
+  // The app still performs a canonical refresh after applying this value.
+  if (eventType === "GATE_CHANGED") {
+    const gate = String(event.new_value?.gate || "").trim();
+    if (gate) {
+      payload.gate = gate;
+      payload.runwy.gate = gate;
+    }
+  }
+
+  return payload;
 }
 
 module.exports = {
   createApnsSender,
+  notificationDedupeKey,
   notificationBody,
   notificationPayload,
   notificationTitle,

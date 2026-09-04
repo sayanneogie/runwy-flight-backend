@@ -142,6 +142,14 @@ function flightUpdateFromAlert(row, alert) {
       altitude: row.altitude,
       groundSpeed: row.ground_speed,
       heading: row.heading,
+      // Alert webhooks carry lifecycle/status changes, not a new aircraft
+      // fix. Preserve the original observation time so an old coordinate is
+      // never promoted above a newer provider-track point merely because an
+      // alert arrived later.
+      recordedAt:
+        row.normalized_data?.position?.recordedAt ||
+        row.normalized_data?.livePosition?.recordedAt ||
+        null,
     },
     provider: "flightaware",
     dataConfidence: "high",

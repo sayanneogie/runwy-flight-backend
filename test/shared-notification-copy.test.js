@@ -88,6 +88,78 @@ test("shared takeoff, landing, and baggage notifications use the requested emoji
   );
 });
 
+test("gate-change APNs carries the new gate for immediate client reconciliation", () => {
+  const payload = notificationPayload(flight, {
+    id: "gate-event",
+    event_type: "GATE_CHANGED",
+    old_value: { gate: "A4" },
+    new_value: { gate: "B7" },
+  });
+
+  assert.equal(payload.flight_instance_id, "flight-id");
+  assert.equal(payload.gate, "B7");
+  assert.equal(payload.aps["content-available"], 1);
+  assert.equal(payload.runwy.type, "flight_gate_change");
+  assert.equal(payload.runwy.flightId, "flight-id");
+  assert.equal(payload.runwy.flightInstanceId, "flight-id");
+  assert.equal(payload.runwy.status, "scheduled");
+  assert.equal(payload.runwy.departureGate, "B7");
+  assert.equal(payload.runwy.gate, "B7");
+});
+
+test("taxiing APNs carries canonical state for app and Live Activity reconciliation", () => {
+  const payload = notificationPayload(
+    {
+      ...flight,
+      status: "taxiing",
+      estimated_departure_at: "2026-08-07T10:12:00.000Z",
+      last_fetched_at: "2026-08-07T10:05:00.000Z",
+      normalized_data: {
+        status: "taxiing",
+        computedPhase: "taxi_out",
+        departureTerminal: "2",
+        departureGate: "C4",
+        takeoffTimes: { actual: null },
+      },
+    },
+    {
+      id: "taxi-event",
+      event_type: "TAXIING",
+      new_value: { status: "taxiing" },
+    }
+  );
+
+  assert.equal(payload.runwy.type, "flight_taxiing");
+  assert.equal(payload.runwy.status, "taxiing");
+  assert.equal(payload.runwy.computedPhase, "taxi_out");
+  assert.equal(payload.runwy.departureTerminal, "2");
+  assert.equal(payload.runwy.departureGate, "C4");
+  assert.equal(payload.runwy.departureEstimatedAt, "2026-08-07T10:12:00.000Z");
+  assert.equal(payload.runwy.lastUpdatedAt, "2026-08-07T10:05:00.000Z");
+  assert.equal(payload.aps["content-available"], 1);
+});
+
+test("shared APNs routes through the user's tracking session", () => {
+  const payload = notificationPayload(
+    flight,
+    {
+      id: "gate-event",
+      event_type: "GATE_CHANGED",
+      old_value: { gate: "A4" },
+      new_value: { gate: "B7" },
+    },
+    {
+      userFlightId: "user-flight-id",
+      trackingSessionId: "tracking-session-id",
+    }
+  );
+
+  assert.equal(payload.flight_instance_id, "flight-id");
+  assert.equal(payload.tracking_session_id, "tracking-session-id");
+  assert.equal(payload.runwy.flightId, "tracking-session-id");
+  assert.equal(payload.deep_link, "runwy://flights/tracking-session-id");
+});
+
 test("inbound takeoff notification names the last airport, departure city, and ETA", () => {
   const originalNow = Date.now;
   Date.now = () => Date.parse("2026-08-07T08:00:00.000Z");
@@ -110,6 +182,26 @@ test("inbound takeoff notification names the last airport, departure city, and E
   } finally {
     Date.now = originalNow;
   }
+});
+
+test("inbound landing notification names the aircraft and the traveler's departure airport", () => {
+  const event = {
+    event_type: "INBOUND_ARRIVED",
+    new_value: {
+      inboundFlight: {
+        flightNumber: "AI 202",
+        originAirportIata: "DEL",
+        destinationAirportIata: "BLR",
+        status: "landed",
+      },
+    },
+  };
+
+  assert.equal(notificationTitle(flight, event), "✈️ Your Aircraft Has Landed");
+  assert.equal(
+    notificationBody(flight, event),
+    "AI 202, the inbound aircraft for AI 101, has landed at BLR."
+  );
 });
 
 test("traveller landing notifications use the rich destination welcome format", () => {

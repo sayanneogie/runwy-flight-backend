@@ -7,9 +7,13 @@ const path = require("node:path");
 
 const { createFlightCache, createMemoryRedis } = require("../src/shared-flight/cache");
 const { airportCodesForCity } = require("../src/airport-catalog");
-const { createMemorySharedFlightRepository } = require("../src/shared-flight/repository");
+const {
+  createMemorySharedFlightRepository,
+  createPostgresSharedFlightRepository,
+} = require("../src/shared-flight/repository");
 const { createSharedFlightService, preserveKnownOperationalFields, isOlderStreamEvent } = require("../src/shared-flight/service");
 const { createProviderAdapter } = require("../src/shared-flight/provider-adapter");
+const { notificationDedupeKey } = require("../src/shared-flight/notifications");
 const {
   compareFlightState,
   deriveFlightLifecyclePhase,
@@ -255,6 +259,94 @@ test("shared refresh accumulates real provider positions into the flown breadcru
       { latitude: 12.68033, longitude: 81.78772 },
     ]
   );
+});
+
+test("shared refresh rejects a taxiing regression after takeoff is confirmed", () => {
+  const actualTakeoff = "2026-09-03T17:59:46.000Z";
+  const merged = preserveKnownOperationalFields(
+    normalizedFlight({
+      status: "taxiing",
+      actualDepartureAt: "2026-09-03T17:38:00.000Z",
+      takeoffTimes: {
+        scheduled: "2026-09-03T17:25:00.000Z",
+        estimated: null,
+        actual: null,
+      },
+      position: {
+        lat: null,
+        lon: null,
+        altitude: null,
+        groundSpeed: null,
+        recordedAt: "2026-09-04T01:06:44.000Z",
+      },
+    }),
+    {
+      status: "enroute",
+      actual_departure_at: "2026-09-03T17:38:00.000Z",
+      actual_arrival_at: null,
+      normalized_data: {
+        status: "enroute",
+        takeoffTimes: {
+          scheduled: "2026-09-03T17:25:00.000Z",
+          estimated: actualTakeoff,
+          actual: actualTakeoff,
+        },
+      },
+    }
+  );
+
+  assert.equal(merged.status, "enroute");
+  assert.equal(merged.takeoffTimes.actual, actualTakeoff);
+  assert.equal(merged.actualTakeoffAt, actualTakeoff);
+});
+
+test("airborne status aliases do not emit duplicate takeoff notifications", () => {
+  const events = compareFlightState(
+    {
+      status: "airborne",
+      normalized_data: { takeoffTimes: { actual: "2026-09-04T04:28:25.000Z" } },
+    },
+    {
+      status: "enroute",
+      normalized_data: { takeoffTimes: { actual: "2026-09-04T04:28:25.000Z" } },
+      data_confidence: "high",
+    }
+  );
+
+  assert.equal(events.some((event) => event.event_type === "AIRBORNE"), false);
+});
+
+test("shared refresh rejects a taxiing regression after confirmed arrival", () => {
+  const actualArrival = "2026-09-04T02:16:00.000Z";
+  const merged = preserveKnownOperationalFields(
+    normalizedFlight({
+      status: "taxiing",
+      actualArrivalAt: null,
+      arrivalTimes: { actual: null },
+    }),
+    {
+      status: "landed",
+      actual_arrival_at: actualArrival,
+      normalized_data: {
+        status: "landed",
+        arrivalTimes: { actual: actualArrival },
+      },
+    }
+  );
+
+  assert.equal(merged.status, "landed");
+  assert.equal(merged.actualArrivalAt, actualArrival);
+  assert.equal(merged.arrivalTimes.actual, actualArrival);
+});
+
+test("touchdown status aliases do not emit duplicate arrival notifications", () => {
+  const actualArrival = "2026-09-04T02:16:00.000Z";
+  const events = compareFlightState(
+    { status: "landed", actual_arrival_at: actualArrival },
+    { status: "arrived", actual_arrival_at: actualArrival, data_confidence: "high" }
+  );
+
+  assert.equal(events.some((event) => ["LANDED", "ARRIVED"].includes(event.event_type)), false);
 });
 
 test("shared refresh preserves resolved inbound details when the provider returns only its ID", () => {
@@ -569,6 +661,158 @@ test("cancelled flight creates critical event and no duplicate notification deli
   assert.deepEqual(sent.sort(), ["token-u1", "token-u2"]);
 });
 
+test("semantic notification keys merge provider aliases but retain real value changes", () => {
+  const flight = { id: "flight-occurrence-1" };
+  assert.equal(
+    notificationDedupeKey(flight, {
+      id: "event-1",
+      event_type: "AIRBORNE",
+      new_value: { status: "airborne" },
+    }),
+    notificationDedupeKey(flight, {
+      id: "event-2",
+      event_type: "DEPARTED",
+      new_value: { status: "enroute" },
+    })
+  );
+
+  const gateB7 = notificationDedupeKey(flight, {
+    event_type: "GATE_CHANGED",
+    old_value: { gate: "A4" },
+    new_value: { gate: "B7" },
+  });
+  assert.equal(gateB7, notificationDedupeKey(flight, {
+    event_type: "GATE_CHANGED",
+    old_value: { gate: "A5" },
+    new_value: { gate: "B7" },
+  }));
+  assert.notEqual(gateB7, notificationDedupeKey(flight, {
+    event_type: "GATE_CHANGED",
+    old_value: { gate: "B7" },
+    new_value: { gate: "C2" },
+  }));
+});
+
+test("separate takeoff event rows produce one APNs fanout per user", async () => {
+  const sent = [];
+  const { service, repository } = makeService(normalizedFlight(), {
+    apns: { sendFlightEvent: async ({ token }) => { sent.push(token.device_token); return { ok: true }; } },
+  });
+  const row = await repository.upsertFlightFromNormalized(normalizedFlight(), {
+    airline: "SQ",
+    number: "509",
+    date: "2026-05-27",
+    origin: "BLR",
+    destination: "SIN",
+    flightKey: "SQ-509-2026-05-27-BLR-SIN",
+  }, "2026-05-27T10:00:00.000Z");
+  await repository.upsertUserFlight("u1", row.id, {
+    alertPreferences: { low: true, medium: true, high: true, critical: true },
+  });
+  await repository.upsertDeviceToken("u1", { deviceToken: "token-u1", environment: "sandbox" });
+
+  const events = await repository.insertEvents(row.id, [
+    {
+      event_type: "AIRBORNE",
+      event_severity: "medium",
+      old_value: { status: "taxiing" },
+      new_value: { status: "airborne" },
+      summary: "Flight is airborne",
+      notification_required: true,
+      confidence: "high",
+    },
+    {
+      event_type: "DEPARTED",
+      event_severity: "medium",
+      old_value: { status: "airborne" },
+      new_value: { status: "enroute" },
+      summary: "Flight departed",
+      notification_required: true,
+      confidence: "high",
+    },
+  ], "test");
+
+  for (const event of events) {
+    await service.fanoutNotificationJob({ data: { flight_event_id: event.id } });
+  }
+
+  assert.deepEqual(sent, ["token-u1"]);
+  assert.equal(repository.__memory.deliveries.size, 1);
+  assert.equal(repository.__memory.appNotifications.size, 1);
+  assert.equal([...repository.__memory.appNotifications.values()][0].delivery_status, "sent");
+});
+
+test("durable APNs outbox retries a definite rejection without resending accepted events", async () => {
+  let calls = 0;
+  const { service, repository } = makeService(normalizedFlight(), {
+    apns: {
+      sendFlightEvent: async () => {
+        calls += 1;
+        return calls === 1
+          ? { ok: false, status: 503, reason: "ServiceUnavailable" }
+          : { ok: true, apnsId: "accepted-on-retry" };
+      },
+    },
+  });
+  const row = await repository.upsertFlightFromNormalized(normalizedFlight(), {
+    airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN",
+    flightKey: "SQ-509-2026-05-27-BLR-SIN",
+  }, "2026-05-27T10:00:00.000Z");
+  await repository.upsertUserFlight("u1", row.id, { alertPreferences: { medium: true } });
+  await repository.upsertDeviceToken("u1", { deviceToken: "token-u1", environment: "sandbox" });
+  const [event] = await repository.insertEvents(row.id, [{
+    event_type: "AIRBORNE",
+    event_severity: "medium",
+    old_value: { status: "taxiing" },
+    new_value: { status: "airborne" },
+    notification_required: true,
+  }], "test");
+
+  assert.equal((await service.fanoutNotificationJob({ data: { flight_event_id: event.id } })).sent, 0);
+  const tokenDelivery = [...repository.__memory.deliveryTokens.values()][0];
+  assert.equal(tokenDelivery.status, "retry");
+  tokenDelivery.next_attempt_at = new Date(Date.now() - 1_000).toISOString();
+
+  assert.equal(await service.recoverDurableApnsOutbox(), 1);
+  assert.equal(calls, 2);
+  assert.equal([...repository.__memory.deliveryTokens.values()][0].status, "accepted");
+  assert.equal([...repository.__memory.deliveries.values()][0].status, "sent");
+  assert.equal([...repository.__memory.appNotifications.values()][0].delivery_status, "sent");
+
+  await service.fanoutNotificationJob({ data: { flight_event_id: event.id } });
+  assert.equal(calls, 2);
+});
+
+test("ambiguous APNs transport failures are not retried into duplicate alerts", async () => {
+  let calls = 0;
+  const { service, repository } = makeService(normalizedFlight(), {
+    apns: {
+      sendFlightEvent: async () => {
+        calls += 1;
+        throw new Error("APNs request timed out");
+      },
+    },
+  });
+  const row = await repository.upsertFlightFromNormalized(normalizedFlight(), {
+    airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN",
+    flightKey: "SQ-509-2026-05-27-BLR-SIN",
+  }, "2026-05-27T10:00:00.000Z");
+  await repository.upsertUserFlight("u1", row.id, { alertPreferences: { medium: true } });
+  await repository.upsertDeviceToken("u1", { deviceToken: "token-u1", environment: "sandbox" });
+  const [event] = await repository.insertEvents(row.id, [{
+    event_type: "LANDED",
+    event_severity: "medium",
+    old_value: { status: "airborne" },
+    new_value: { status: "landed" },
+    notification_required: true,
+  }], "test");
+
+  await service.fanoutNotificationJob({ data: { flight_event_id: event.id } });
+  assert.equal([...repository.__memory.deliveryTokens.values()][0].status, "uncertain");
+  assert.equal(await service.recoverDurableApnsOutbox(), 0);
+  assert.equal(calls, 1);
+});
+
 test("gate change only emits on real change and respects alert preferences", async () => {
   const noChange = compareFlightState(
     { status: "scheduled", gate: "A4", scheduled_departure_at: "2026-05-27T18:30:00.000Z" },
@@ -583,6 +827,13 @@ test("gate change only emits on real change and respects alert preferences", asy
     Date.parse("2026-05-27T08:00:00.000Z")
   );
   assert.equal(changed.find((event) => event.event_type === "GATE_CHANGED").notification_required, true);
+
+  const firstAssignment = compareFlightState(
+    { status: "scheduled", gate: null, scheduled_departure_at: "2026-05-27T18:30:00.000Z" },
+    { status: "scheduled", gate: "B7", scheduled_departure_at: "2026-05-27T18:30:00.000Z", data_confidence: "high" },
+    Date.parse("2026-05-27T08:00:00.000Z")
+  );
+  assert.equal(firstAssignment.find((event) => event.event_type === "GATE_CHANGED").new_value.gate, "B7");
 
   const { service, repository } = makeService();
   const row = await repository.upsertFlightFromNormalized(normalizedFlight(), { airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" }, "2026-05-27T00:00:00.000Z");
@@ -859,6 +1110,181 @@ test("notification fanout rejects an active canonical row when a normalized dele
   assert.equal(targets.length, 0);
 });
 
+test("saving a previously deleted shared flight reactivates its notification row", async () => {
+  const { service, repository } = makeService();
+  const input = {
+    airline: "SQ",
+    number: "509",
+    date: "2026-05-27",
+    origin: "BLR",
+    destination: "SIN",
+  };
+  const first = await service.saveUserFlight("u1", input);
+  await service.deleteUserFlight("u1", first.userFlight.id);
+
+  const restored = await service.saveUserFlight("u1", input);
+
+  assert.equal(restored.userFlight.id, first.userFlight.id);
+  assert.equal(restored.userFlight.deleted_at, undefined);
+  assert.equal((await repository.listUserFlights("u1")).length, 1);
+});
+
+test("displayed-flight reconciliation removes stale tracking ownership and keeps only matching occurrences", async () => {
+  const { service, repository } = makeService();
+  const rows = repository.__memory.userFlights;
+  const base = {
+    user_id: "u1",
+    display_flight_number: "AI 101",
+    origin_iata: "DEL",
+    destination_iata: "FCO",
+    lifecycle_state: "active",
+    notification_enabled: true,
+    notifications_enabled: true,
+    deleted_at: null,
+  };
+  rows.set("current", {
+    ...base,
+    id: "current-server-row",
+    flight_instance_id: "current-flight-instance",
+    tracking_session_id: "current-tracking-session",
+    scheduled_departure: "2026-09-03T17:15:00.000Z",
+  });
+  rows.set("wrong-day", {
+    ...base,
+    id: "wrong-day-server-row",
+    flight_instance_id: "wrong-day-flight-instance",
+    tracking_session_id: "wrong-day-tracking-session",
+    scheduled_departure: "2026-09-04T17:15:00.000Z",
+  });
+  rows.set("history", {
+    ...base,
+    id: "history-row",
+    lifecycle_state: "archived",
+    flight_instance_id: "history-flight-instance",
+    scheduled_departure: "2025-09-03T17:15:00.000Z",
+  });
+  rows.set("other-user", {
+    ...base,
+    id: "other-user-row",
+    user_id: "u2",
+    flight_instance_id: "wrong-day-flight-instance",
+    scheduled_departure: "2026-09-04T17:15:00.000Z",
+  });
+
+  const result = await service.reconcileDisplayedUserFlights("u1", {
+    flights: [{
+      id: "different-local-id",
+      flightNumber: "AI101",
+      origin: "DEL",
+      destination: "FCO",
+      scheduledDeparture: "2026-09-03T17:15:00.000Z",
+    }],
+  });
+
+  assert.equal(result.displayed, 1);
+  assert.equal(result.checked, 2);
+  assert.equal(result.kept, 1);
+  assert.equal(result.removed, 1);
+  assert.deepEqual(result.removedUserFlightIds, ["wrong-day-server-row"]);
+  assert.deepEqual(result.stoppedTrackingSessionIds, ["wrong-day-tracking-session"]);
+  assert.deepEqual(result.orphanedFlightInstanceIds, []);
+  assert.equal(rows.get("current").deleted_at, null);
+  assert.ok(rows.get("wrong-day").deleted_at);
+  assert.equal(rows.get("history").deleted_at, null);
+  assert.equal(rows.get("other-user").deleted_at, null);
+});
+
+test("an empty displayed-flight manifest removes every upcoming or active subscription", async () => {
+  const { service, repository } = makeService();
+  repository.__memory.userFlights.set("stale", {
+    id: "stale-row",
+    user_id: "u1",
+    flight_instance_id: "orphaned-flight-instance",
+    tracking_session_id: "stale-tracking-session",
+    display_flight_number: "DL2307",
+    origin_iata: "MSP",
+    destination_iata: "FAR",
+    scheduled_departure: "2026-08-30T23:00:00.000Z",
+    lifecycle_state: "active",
+    notification_enabled: true,
+    notifications_enabled: true,
+    deleted_at: null,
+  });
+
+  const result = await service.reconcileDisplayedUserFlights("u1", { flights: [] });
+
+  assert.equal(result.removed, 1);
+  assert.deepEqual(result.orphanedFlightInstanceIds, ["orphaned-flight-instance"]);
+  assert.ok(repository.__memory.userFlights.get("stale").deleted_at);
+});
+
+test("displayed-flight reconciliation consolidates duplicate rows for one occurrence", async () => {
+  const { service, repository } = makeService();
+  const base = {
+    user_id: "u1",
+    display_flight_number: "AI101",
+    origin_iata: "FCO",
+    destination_iata: "JFK",
+    scheduled_departure: "2026-09-04T04:10:00.000Z",
+    lifecycle_state: "active",
+    notification_enabled: true,
+    deleted_at: null,
+  };
+  repository.__memory.userFlights.set("client", { ...base, id: "client-row", flight_instance_id: "shared-flight" });
+  repository.__memory.userFlights.set("mirror", { ...base, id: "tracked-mirror", flight_instance_id: "shared-flight", source_type: "tracked" });
+
+  const result = await service.reconcileDisplayedUserFlights("u1", {
+    flights: [{
+      id: "client-row",
+      flightNumber: "AI101",
+      origin: "FCO",
+      destination: "JFK",
+      scheduledDeparture: "2026-09-04T04:10:00.000Z",
+    }],
+  });
+
+  assert.equal(result.kept, 1);
+  assert.equal(result.removed, 1);
+  assert.equal(result.duplicatesConsolidated, 1);
+  assert.equal(repository.__memory.userFlights.get("client").deleted_at, null);
+  assert.ok(repository.__memory.userFlights.get("mirror").deleted_at);
+});
+
+test("displayed-flight reconciliation rejects an incomplete manifest before deleting anything", async () => {
+  const { service, repository } = makeService();
+  repository.__memory.userFlights.set("active", {
+    id: "active-row",
+    user_id: "u1",
+    lifecycle_state: "active",
+    deleted_at: null,
+  });
+
+  await assert.rejects(
+    service.reconcileDisplayedUserFlights("u1", { flights: [{ flightNumber: "AI101" }] }),
+    (error) => error.statusCode === 400
+  );
+  assert.equal(repository.__memory.userFlights.get("active").deleted_at, null);
+});
+
+test("Postgres shared-flight upsert clears tombstones and notification lookup follows tracking bridges", async () => {
+  const statements = [];
+  const pool = {
+    async query(sql) {
+      statements.push(String(sql));
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const repository = createPostgresSharedFlightRepository(pool);
+
+  await repository.upsertUserFlight("user-1", "flight-1", {});
+  await repository.hasActiveUserFlights("flight-1");
+  await repository.listNotificationTargets("flight-1", "high", "LANDED");
+
+  assert.match(statements[0], /on conflict[\s\S]*deleted_at = null/i);
+  assert.match(statements[1], /sharedFlightInstanceId/);
+  assert.match(statements[2], /sharedFlightInstanceId/);
+});
+
 test("stream update targets can be found by provider id or canonical flight number", async () => {
   const repository = createMemorySharedFlightRepository();
   const row = await repository.upsertFlightFromNormalized(normalizedFlight(), {
@@ -916,6 +1342,44 @@ test("provider request lease migration protects distributed call locks", () => {
   assert.match(sql, /lock_key text primary key/i);
   assert.match(sql, /expires_at timestamptz not null/i);
   assert.match(sql, /revoke all .* anon, authenticated/i);
+});
+
+test("APNs semantic dedupe migration enforces one delivery claim per user and event meaning", () => {
+  const sql = fs.readFileSync(
+    path.join(__dirname, "../supabase/migrations/20260904_add_apns_semantic_dedupe.sql"),
+    "utf8"
+  );
+
+  assert.match(sql, /add column if not exists dedupe_key text/i);
+  assert.match(sql, /create unique index if not exists notification_deliveries_user_dedupe_key_channel_uidx/i);
+  assert.match(sql, /\(user_id, dedupe_key, channel\)/i);
+  assert.match(sql, /where dedupe_key is not null/i);
+});
+
+test("durable APNs migration persists per-device work and safe recovery states", () => {
+  const sql = fs.readFileSync(
+    path.join(__dirname, "../supabase/migrations/20260904_add_durable_apns_outbox.sql"),
+    "utf8"
+  );
+
+  assert.match(sql, /create table if not exists public\.notification_delivery_tokens/i);
+  assert.match(sql, /unique \(notification_delivery_id, device_token_id\)/i);
+  assert.match(sql, /'queued', 'sending', 'retry', 'accepted', 'permanent_failed', 'uncertain'/i);
+  assert.match(sql, /create or replace function public\.cleanup_deleted_user_flight_notifications/i);
+});
+
+test("past-flight occurrence migration separates trips and enforces one history row", () => {
+  const sql = fs.readFileSync(
+    path.join(__dirname, "../supabase/migrations/20260904_deduplicate_past_flight_occurrences.sql"),
+    "utf8"
+  );
+
+  assert.match(sql, /'trip'/i);
+  assert.match(sql, /set source_type = 'trip'/i);
+  assert.match(sql, /row_number\(\) over/i);
+  assert.match(sql, /create or replace function public\.reconcile_user_flight_history_occurrence/i);
+  assert.match(sql, /create unique index if not exists user_flights_history_occurrence_unique/i);
+  assert.match(sql, /date_trunc\('minute', scheduled_departure at time zone 'UTC'\)/i);
 });
 
 test("deleted-flight cleanup removes queued notifications and pauses orphaned tracking", () => {
@@ -1274,6 +1738,49 @@ test("an active but incomplete inbound aircraft retries detail resolution with r
   assert.equal(row.normalized_data.inboundFlight.providerAlertStatus, "active");
 });
 
+test("an older active inbound alert is upgraded once to include landing events", async () => {
+  const departure = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 10 * 60 * 60_000).toISOString();
+  const changedAt = new Date(Date.now() - 60_000).toISOString();
+  let inboundAlertCalls = 0;
+  const { service, repository } = makeService(normalizedFlight({
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    inboundFlight: {
+      providerFlightId: "AI202-instance",
+      flightNumber: "AI202",
+      originAirportIata: "DEL",
+      destinationAirportIata: "BLR",
+      estimatedArrival: new Date(Date.now() + 75 * 60_000).toISOString(),
+      status: "airborne",
+      providerAlertId: "alert-inbound-ai202",
+      providerAlertStatus: "active",
+      providerAlertCreatedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    },
+  }), {
+    alertConfigurationChangedAt: changedAt,
+    ensureInboundFlightAlert: async () => {
+      inboundAlertCalls += 1;
+      return {
+        providerAlertId: "alert-inbound-ai202",
+        status: "active",
+        createdAt: new Date().toISOString(),
+      };
+    },
+  });
+
+  const saved = await service.saveUserFlight("u1", {
+    airline: "SQ", number: "509", date: departure.slice(0, 10), origin: "BLR", destination: "SIN",
+  });
+  await service.ensureInboundFlightMonitoring(saved.flight.flightInstanceId, "second-check");
+
+  const row = await repository.findFlightById(saved.flight.flightInstanceId);
+  assert.equal(inboundAlertCalls, 1);
+  assert.ok(Date.parse(row.normalized_data.inboundFlight.providerAlertCreatedAt) >= Date.parse(changedAt));
+});
+
 test("an inbound wheels-off callback creates one deduplicated parent-flight APNs event", async () => {
   const departure = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
   const arrival = new Date(Date.now() + 10 * 60 * 60_000).toISOString();
@@ -1316,6 +1823,49 @@ test("an inbound wheels-off callback creates one deduplicated parent-flight APNs
   const row = await repository.findFlightById(saved.flight.flightInstanceId);
   assert.equal(events.length, 1);
   assert.equal(row.normalized_data.inboundFlight.status, "airborne");
+});
+
+test("an inbound wheels-down callback creates one deduplicated parent-flight APNs event", async () => {
+  const departure = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 10 * 60 * 60_000).toISOString();
+  const inboundArrival = new Date().toISOString();
+  const { service, repository } = makeService(normalizedFlight({
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    inboundFlight: {
+      providerFlightId: "AI202-instance",
+      flightNumber: "AI202",
+      originAirportIata: "DEL",
+      destinationAirportIata: "BLR",
+      estimatedArrival: inboundArrival,
+      status: "airborne",
+    },
+  }), {
+    ensureInboundFlightAlert: async () => ({ providerAlertId: "alert-inbound-ai202", status: "active" }),
+  });
+  const saved = await service.saveUserFlight("u1", {
+    airline: "SQ", number: "509", date: departure.slice(0, 10), origin: "BLR", destination: "SIN",
+  });
+  const callback = {
+    event: "on",
+    fa_flight_id: "AI202-instance",
+    ident_iata: "AI202",
+    origin_iata: "DEL",
+    destination_iata: "BLR",
+    actual_on: inboundArrival,
+  };
+
+  await service.processFlightAwareAlertWebhook(callback);
+  await service.processFlightAwareAlertWebhook(callback);
+
+  const events = [...repository.__memory.events.values()].filter((event) =>
+    event.flight_instance_id === saved.flight.flightInstanceId && event.event_type === "INBOUND_ARRIVED"
+  );
+  const row = await repository.findFlightById(saved.flight.flightInstanceId);
+  assert.equal(events.length, 1);
+  assert.equal(row.normalized_data.inboundFlight.status, "landed");
 });
 
 test("lifecycle recovery upgrades an older active provider alert only once", async () => {

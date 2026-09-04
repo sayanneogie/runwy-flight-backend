@@ -6,6 +6,9 @@ process.env.PROVIDER_CALLS_ENABLED = "true";
 process.env.DISABLE_PROVIDER_CALLS = "false";
 process.env.FLIGHT_DATA_PROVIDER = "flightaware";
 process.env.FLIGHTAWARE_API_KEY = "test-flightaware-key";
+// Provider unit tests replace fetch and must never consult the developer's
+// production DATABASE_URL from .env for live daily-budget accounting.
+process.env.DATABASE_URL = "";
 
 const { __test__ } = require("../src/server.js");
 
@@ -15,11 +18,25 @@ test("only explicit final route refreshes bypass the track cache", () => {
   assert.equal(__test__.shouldForceTrackTrailRefreshMode("force"), true);
 });
 
+test("forced track refreshes use the active-flight budget reserve", () => {
+  assert.deepEqual(__test__.providerTrackTrailRefreshOptions(undefined), {
+    forceRefresh: false,
+  });
+  assert.deepEqual(__test__.providerTrackTrailRefreshOptions("force"), {
+    forceRefresh: true,
+    budgetEndpoint: "tracked_flight",
+  });
+  assert.deepEqual(__test__.providerTrackTrailRefreshOptions("final"), {
+    forceRefresh: true,
+    budgetEndpoint: "tracked_flight",
+  });
+});
+
 test("FlightAware reserves bounded capacity for user searches", () => {
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("flight_instance"), 500);
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("position"), 500);
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("inbound_flight_instance"), 600);
-  assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("tracked_flight"), 600);
+  assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("tracked_flight"), 2_000);
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("operational"), 600);
   assert.equal(__test__.flightAwareDailyBudgetLimitForEndpoint("schedules"), 600);
 });
@@ -45,6 +62,53 @@ test("FlightAware top-level track arrays produce the complete flown breadcrumb h
       { latitude: 21.68, longitude: 39.15, altitudeFeet: 12_000 },
       { latitude: 10.45, longitude: 76.24, altitudeFeet: 37_000 },
     ]
+  );
+});
+
+test("a coherent provider trail replaces stale canonical geometry", () => {
+  const canonical = [
+    { latitude: 41.8, longitude: 12.2, recordedAt: "2026-09-02T14:00:00.000Z" },
+    { latitude: 39.5, longitude: -20.1, recordedAt: "2026-09-02T16:00:00.000Z" },
+    { latitude: 0.5, longitude: 0.5, recordedAt: "2026-09-02T17:00:00.000Z" },
+  ];
+  const corrected = [
+    { latitude: 41.8, longitude: 12.2, recordedAt: "2026-09-02T14:00:00.000Z" },
+    { latitude: 38.2, longitude: -21.4, recordedAt: "2026-09-02T16:05:00.000Z" },
+  ];
+
+  const result = __test__.authoritativeProviderTrackTrail(canonical, {
+    trackPoints: corrected,
+    livePosition: corrected[1],
+  });
+
+  assert.deepEqual(
+    result.trackPoints.map(({ latitude, longitude, recordedAt }) => ({ latitude, longitude, recordedAt })),
+    corrected
+  );
+  assert.deepEqual(
+    (({ latitude, longitude, recordedAt }) => ({ latitude, longitude, recordedAt }))(result.livePosition),
+    corrected[1]
+  );
+});
+
+test("an empty provider trail preserves canonical breadcrumbs", () => {
+  const canonical = [
+    { latitude: 41.8, longitude: 12.2, recordedAt: "2026-09-02T14:00:00.000Z" },
+    { latitude: 39.5, longitude: -20.1, recordedAt: "2026-09-02T16:00:00.000Z" },
+  ];
+
+  const result = __test__.authoritativeProviderTrackTrail(canonical, {
+    trackPoints: [],
+    livePosition: null,
+  });
+
+  assert.deepEqual(
+    result.trackPoints.map(({ latitude, longitude, recordedAt }) => ({ latitude, longitude, recordedAt })),
+    canonical
+  );
+  assert.deepEqual(
+    (({ latitude, longitude, recordedAt }) => ({ latitude, longitude, recordedAt }))(result.livePosition),
+    canonical[1]
   );
 });
 
@@ -95,14 +159,14 @@ test("shared-flight tracking projection preserves diversion and aircraft metadat
   assert.equal(projected.aircraftRegistration, "N101DU");
 });
 
-test("opening flight details does not bypass FlightAware caches", () => {
+test("provider refresh bypasses FlightAware caches only when explicitly forced", () => {
   assert.deepEqual(
     __test__.trackedProviderRefreshOptions({ includeLivePosition: true }),
     { forceRefresh: false }
   );
   assert.deepEqual(
     __test__.trackedProviderRefreshOptions({ forceProviderRefresh: true }),
-    { forceRefresh: true }
+    { forceRefresh: true, budgetEndpoint: "tracked_flight" }
   );
 });
 
@@ -611,6 +675,37 @@ test("normalizeRecordFromFlightAware preserves the exact inbound aircraft identi
   assert.equal(normalized.inboundFlight.originAirportIata, "DEL");
   assert.equal(normalized.inboundFlight.destinationAirportIata, "BLR");
   assert.equal(normalized.inboundFlight.estimatedArrival, "2026-08-31T09:05:00.000Z");
+});
+
+test("an inbound provider ID is expanded into incoming-aircraft route and timing details", () => {
+  const outbound = __test__.normalizeRecordFromFlightAware({
+    fa_flight_id: "QTR18-outbound-instance",
+    ident_iata: "QR18",
+    origin: { code_iata: "DUB" },
+    destination: { code_iata: "DOH" },
+    scheduled_out: "2026-09-04T15:00:00.000Z",
+    inbound_fa_flight_id: "QTR17-inbound-instance",
+  });
+  const merged = __test__.mergeResolvedInboundFlight(outbound, {
+    fa_flight_id: "QTR17-inbound-instance",
+    ident_iata: "QR17",
+    origin: { code_iata: "DOH" },
+    destination: { code_iata: "DUB" },
+    scheduled_out: "2026-09-04T06:45:00.000Z",
+    actual_out: "2026-09-04T07:01:00.000Z",
+    estimated_in: "2026-09-04T14:10:00.000Z",
+    status: "En Route",
+  });
+
+  assert.equal(__test__.inboundFlightNeedsDetailResolution(outbound.inboundFlight), true);
+  assert.equal(merged.inboundFlight.providerFlightId, "QTR17-inbound-instance");
+  assert.equal(merged.inboundFlight.flightNumber, "QR17");
+  assert.equal(merged.inboundFlight.originAirportIata, "DOH");
+  assert.equal(merged.inboundFlight.destinationAirportIata, "DUB");
+  assert.equal(merged.inboundFlight.actualDeparture, "2026-09-04T07:01:00.000Z");
+  assert.equal(merged.inboundFlight.estimatedArrival, "2026-09-04T14:10:00.000Z");
+  assert.equal(merged.inboundFlight.status, "enroute");
+  assert.equal(__test__.inboundFlightNeedsDetailResolution(merged.inboundFlight), false);
 });
 
 test("normalizeRecordFromFlightAware converts AeroAPI altitude hundreds to feet", () => {

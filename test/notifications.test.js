@@ -290,7 +290,7 @@ test("FlightAware alert payload prefers the exact provider flight id", () => {
   assert.equal(payload.events.in, true);
 });
 
-test("inbound FlightAware alert requests wheels-off without paid countdown callbacks", () => {
+test("inbound FlightAware alert requests wheels-off and wheels-down without paid countdown callbacks", () => {
   const payload = __test__.buildFlightAwareAlertPayload({
     targetUrl: "https://example.com/v1/webhooks/flightaware",
     context: {
@@ -303,7 +303,7 @@ test("inbound FlightAware alert requests wheels-off without paid countdown callb
       impendingArrivalMinutes: [],
       events: {
         arrival: false, cancelled: true, departure: false, diverted: true,
-        filed: false, out: false, off: true, on: false, in: false,
+        filed: false, out: false, off: true, on: true, in: false,
         hold_start: false, hold_end: false,
       },
     },
@@ -314,7 +314,7 @@ test("inbound FlightAware alert requests wheels-off without paid countdown callb
   assert.deepEqual(payload.impending_arrival, []);
   assert.deepEqual(payload.events, {
     arrival: false, cancelled: true, departure: false, diverted: true,
-    filed: false, out: false, off: true, on: false, in: false,
+    filed: false, out: false, off: true, on: true, in: false,
     hold_start: false, hold_end: false,
   });
   assert.equal(payload.start, undefined);
@@ -625,6 +625,8 @@ test("landing and baggage assignment create separate notification events", () =>
   );
   assert.equal(events[1].title, "🧳 Baggage Claim Assigned");
   assert.equal(events[1].body, "Your luggage for flight 6E 123, Delhi to Bengaluru will be on belt 3.");
+  assert.equal(events[0].payload.aps["content-available"], 1);
+  assert.equal(events[1].payload.aps["content-available"], 1);
   assert.equal(
     __test__.notificationDedupeKey("flight-id", events[0]),
     "arrival-welcome:flight-id"

@@ -53,7 +53,10 @@ function normalizedTrackPoints(trackPoints) {
       point &&
       typeof point === "object" &&
       Number.isFinite(Number(point.latitude)) &&
-      Number.isFinite(Number(point.longitude))
+      Number.isFinite(Number(point.longitude)) &&
+      Math.abs(Number(point.latitude)) <= 90 &&
+      Math.abs(Number(point.longitude)) <= 180 &&
+      !(Math.abs(Number(point.latitude)) < 0.0001 && Math.abs(Number(point.longitude)) < 0.0001)
     )
     .sort(
       (left, right) =>
@@ -73,14 +76,75 @@ function choosePreferredTrackPoints(nextTrackPoints, previousTrackPoints) {
     return next;
   }
 
-  const nextLastRecordedAt = toEpochMillisOrZero(next[next.length - 1]?.recordedAt);
-  const previousLastRecordedAt = toEpochMillisOrZero(previous[previous.length - 1]?.recordedAt);
+  // Provider refreshes and Firehose batches are frequently incremental rather
+  // than complete. Replacing the prior trail merely because a shorter batch has
+  // a newer timestamp discards the already-flown path at exactly the moment a
+  // flight lands. Treat the trail as append-only and reconcile overlapping
+  // points instead.
+  const merged = [...previous, ...next].sort(
+    (left, right) =>
+      toEpochMillisOrZero(left?.recordedAt) - toEpochMillisOrZero(right?.recordedAt)
+  );
+  const seen = new Set();
+  const deduplicated = [];
+  for (const point of merged) {
+    const latitude = Number(point.latitude);
+    const longitude = Number(point.longitude);
+    const recordedAt = String(point.recordedAt || "");
+    const key = `${recordedAt}|${latitude.toFixed(5)}|${longitude.toFixed(5)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduplicated.push(point);
+  }
+  return deduplicated;
+}
 
-  if (nextLastRecordedAt >= previousLastRecordedAt || next.length >= previous.length) {
-    return next;
+function mergeInboundFlightTelemetry(nextInbound, previousInbound) {
+  if (!nextInbound || typeof nextInbound !== "object") {
+    return previousInbound || null;
+  }
+  if (!previousInbound || typeof previousInbound !== "object") {
+    return nextInbound;
   }
 
-  return previous;
+  const normalizedIdentity = (value) => String(value || "").trim().toUpperCase();
+  const nextProviderId = normalizedIdentity(nextInbound.providerFlightId);
+  const previousProviderId = normalizedIdentity(previousInbound.providerFlightId);
+  const nextFlightNumber = normalizedIdentity(nextInbound.flightNumber);
+  const previousFlightNumber = normalizedIdentity(previousInbound.flightNumber);
+  const assignmentChanged =
+    (nextProviderId && previousProviderId && nextProviderId !== previousProviderId) ||
+    (!nextProviderId && !previousProviderId && nextFlightNumber && previousFlightNumber &&
+      nextFlightNumber !== previousFlightNumber);
+
+  if (assignmentChanged) {
+    return nextInbound;
+  }
+
+  return {
+    ...previousInbound,
+    ...nextInbound,
+    flightNumber: nextInbound.flightNumber || previousInbound.flightNumber || null,
+    providerFlightId: nextInbound.providerFlightId || previousInbound.providerFlightId || null,
+    originAirportIata:
+      nextInbound.originAirportIata || previousInbound.originAirportIata || null,
+    destinationAirportIata:
+      nextInbound.destinationAirportIata || previousInbound.destinationAirportIata || null,
+    estimatedArrival:
+      nextInbound.estimatedArrival || previousInbound.estimatedArrival || null,
+    estimatedDeparture:
+      nextInbound.estimatedDeparture || previousInbound.estimatedDeparture || null,
+    actualDeparture: nextInbound.actualDeparture || previousInbound.actualDeparture || null,
+    status: nextInbound.status || previousInbound.status || null,
+    livePosition: choosePreferredLivePosition(
+      nextInbound.livePosition,
+      previousInbound.livePosition
+    ),
+    trackPoints: choosePreferredTrackPoints(
+      nextInbound.trackPoints,
+      previousInbound.trackPoints
+    ),
+  };
 }
 
 function mergeRealtimeTelemetry(previousNormalized, nextNormalized) {
@@ -106,6 +170,13 @@ function mergeRealtimeTelemetry(previousNormalized, nextNormalized) {
     arrivalGate: nextNormalized.arrivalGate || previousNormalized.arrivalGate || null,
     baggageClaim: nextNormalized.baggageClaim || previousNormalized.baggageClaim || null,
     baggageBelt: nextNormalized.baggageBelt || previousNormalized.baggageBelt || null,
+    // The provider can omit the inbound assignment from otherwise valid
+    // operational snapshots. Keep the last known assignment so a background
+    // poll cannot make the inbound-aircraft card and map route disappear.
+    inboundFlight: mergeInboundFlightTelemetry(
+      nextNormalized.inboundFlight,
+      previousNormalized.inboundFlight
+    ),
   };
   if (
     isTerminalStatus(nextStatus) ||
