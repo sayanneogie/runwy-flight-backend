@@ -783,6 +783,25 @@ test("durable APNs outbox retries a definite rejection without resending accepte
   assert.equal(calls, 2);
 });
 
+test("notification recovery skips stale events instead of replaying an alert burst", async () => {
+  const repository = createMemorySharedFlightRepository();
+  const stale = await repository.insertEvents("flight-1", [{
+    event_type: "AIRBORNE",
+    notification_required: true,
+    created_at: new Date(Date.now() - 31 * 60_000).toISOString(),
+  }], "test");
+  const fresh = await repository.insertEvents("flight-1", [{
+    event_type: "LANDED",
+    notification_required: true,
+    created_at: new Date(Date.now() - 29 * 60_000).toISOString(),
+  }], "test");
+
+  const pending = await repository.listPendingNotificationEventIds();
+
+  assert.deepEqual(pending, [fresh[0].id]);
+  assert.ok(!pending.includes(stale[0].id));
+});
+
 test("ambiguous APNs transport failures are not retried into duplicate alerts", async () => {
   let calls = 0;
   const { service, repository } = makeService(normalizedFlight(), {

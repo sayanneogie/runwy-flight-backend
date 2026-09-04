@@ -11,6 +11,11 @@ const DEFAULT_ALERT_PREFERENCES = Object.freeze({
   critical: true,
 });
 
+// Events that never reached fanout are safe to recover after a short outage or
+// deploy, but replaying older operational changes creates a misleading burst of
+// takeoff, delay, baggage, and arrival alerts for flights that are already over.
+const NOTIFICATION_EVENT_RECOVERY_WINDOW_MS = 30 * 60_000;
+
 function normalizedFlightNumber(value) {
   return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
@@ -131,7 +136,7 @@ function createMemorySharedFlightRepository() {
     },
     async listPendingNotificationEventIds() {
       const deliveredEventIds = new Set([...deliveries.values()].map((row) => row.flight_event_id));
-      const cutoff = Date.now() - 48 * 60 * 60_000;
+      const cutoff = Date.now() - NOTIFICATION_EVENT_RECOVERY_WINDOW_MS;
       return [...events.values()]
         .filter((event) =>
           event.notification_required === true &&
@@ -825,7 +830,7 @@ function createPostgresSharedFlightRepository(pool) {
         `select fe.id
          from public.flight_events fe
          where fe.notification_required = true
-           and fe.created_at >= now() - interval '48 hours'
+           and fe.created_at >= now() - interval '30 minutes'
            and (
              not exists (
                select 1
