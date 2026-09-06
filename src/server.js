@@ -1880,6 +1880,41 @@ function flightNumberSuffix(input) {
   return normalizeFlightCode(input).match(/(\d+[A-Z]?)$/)?.[1] || null;
 }
 
+function flightAwareRecordCompletenessScore(record) {
+  const normalized = normalizeRecordFromFlightAware(record);
+  let score = 0;
+  if (normalized.aircraftRegistration) score += 16;
+  if (normalized.aircraftType) score += 8;
+  if (normalized.livePosition) score += 8;
+  if (normalized.departureTimes?.actual) score += 4;
+  if (normalized.takeoffTimes?.actual) score += 4;
+  if (normalized.landingTimes?.actual) score += 4;
+  if (normalized.arrivalTimes?.actual) score += 4;
+  if (!["scheduled", "unknown"].includes(String(normalized.status || "").toLowerCase())) score += 2;
+  return score;
+}
+
+function mergeDuplicateFlightAwareRecords(existingRecord, incomingRecord, requestedFlightNumber) {
+  const existingScore = flightAwareRecordCompletenessScore(existingRecord);
+  const incomingScore = flightAwareRecordCompletenessScore(incomingRecord);
+  const preferred = incomingScore > existingScore ? incomingRecord : existingRecord;
+  const merged = { ...preferred };
+
+  const exactIataIdent = [existingRecord?.ident_iata, incomingRecord?.ident_iata]
+    .find((value) => normalizeFlightCode(value) === requestedFlightNumber);
+  if (exactIataIdent) merged.ident_iata = exactIataIdent;
+
+  for (const key of ["codeshares", "codeshares_iata"]) {
+    const values = [
+      ...(Array.isArray(existingRecord?.[key]) ? existingRecord[key] : []),
+      ...(Array.isArray(incomingRecord?.[key]) ? incomingRecord[key] : []),
+    ];
+    if (values.length > 0) merged[key] = Array.from(new Set(values));
+  }
+
+  return merged;
+}
+
 function dedupeFlightAwareRecords(records, query = {}) {
   const deduped = [];
   const requestedFlightNumber = normalizeFlightCode(query?.flightNumber);
@@ -1926,8 +1961,24 @@ function dedupeFlightAwareRecords(records, query = {}) {
       const existingNormalized = normalizeRecordFromFlightAware(deduped[duplicateIndex]);
       const incomingIsExactRequest = normalizedFlightNumber === requestedFlightNumber;
       const existingIsExactRequest = normalizeFlightCode(existingNormalized.flightNumber) === requestedFlightNumber;
-      if (incomingIsExactRequest && !existingIsExactRequest) {
-        deduped[duplicateIndex] = record;
+      const mergedRecord = mergeDuplicateFlightAwareRecords(
+        deduped[duplicateIndex],
+        record,
+        requestedFlightNumber
+      );
+      if (
+        flightAwareRecordCompletenessScore(record) ===
+          flightAwareRecordCompletenessScore(deduped[duplicateIndex]) &&
+        incomingIsExactRequest &&
+        !existingIsExactRequest
+      ) {
+        deduped[duplicateIndex] = mergeDuplicateFlightAwareRecords(
+          record,
+          deduped[duplicateIndex],
+          requestedFlightNumber
+        );
+      } else {
+        deduped[duplicateIndex] = mergedRecord;
       }
       continue;
     }
@@ -2306,13 +2357,7 @@ async function fetchFlightAwareScheduleFlights(query) {
   return fetchSchedulePage(false);
 }
 
-async function fetchFlightAwareHistoricalFlights(query) {
-  const ident = normalizeFlightCode(query.flightNumber);
-  const bounds = flightAwareHistoryBounds(query.date, query.timezoneOffsetMinutes);
-  if (!ident || !bounds) {
-    return [];
-  }
-
+async function fetchFlightAwareHistoricalFlightsForIdent(ident, bounds) {
   const params = new URLSearchParams({
     ident_type: "designator",
     start: bounds.start,
@@ -2342,6 +2387,69 @@ async function fetchFlightAwareHistoricalFlights(query) {
 
   const payload = await response.json();
   return extractFlightAwareSearchRows(payload);
+}
+
+function historicalOperatingIdent(records, query) {
+  const requestedIdent = normalizeFlightCode(query?.flightNumber);
+  const requestedSuffix = flightNumberSuffix(requestedIdent);
+  if (!requestedIdent || !requestedSuffix) return null;
+
+  for (const record of Array.isArray(records) ? records : []) {
+    if (!flightAwareRecordMatchesRequestedFlight(record, query)) continue;
+    const candidates = [
+      record?.actual_ident_icao,
+      record?.ident_icao,
+      record?.actual_ident,
+      record?.ident,
+    ];
+    for (const candidate of candidates) {
+      const normalized = normalizeFlightCode(candidate);
+      if (
+        normalized &&
+        normalized !== requestedIdent &&
+        /^[A-Z]{3}\d{1,4}[A-Z]?$/.test(normalized) &&
+        flightNumberSuffix(normalized) === requestedSuffix
+      ) {
+        return normalized;
+      }
+    }
+  }
+  return null;
+}
+
+async function fetchFlightAwareHistoricalFlights(query) {
+  const ident = normalizeFlightCode(query.flightNumber);
+  const bounds = flightAwareHistoryBounds(query.date, query.timezoneOffsetMinutes);
+  if (!ident || !bounds) {
+    return [];
+  }
+
+  const initialRows = await fetchFlightAwareHistoricalFlightsForIdent(ident, bounds);
+  const matchingRows = initialRows.filter((record) =>
+    flightAwareRecordMatchesRequestedFlight(record, query)
+  );
+  const needsAircraftMetadata = matchingRows.some((record) => {
+    const normalized = normalizeRecordFromFlightAware(record);
+    return !normalized.aircraftType || !normalized.aircraftRegistration;
+  });
+  const operatingIdent = needsAircraftMetadata
+    ? historicalOperatingIdent(matchingRows, query)
+    : null;
+  if (!operatingIdent) {
+    return dedupeFlightAwareRecords(initialRows, query);
+  }
+
+  try {
+    const operatingRows = await fetchFlightAwareHistoricalFlightsForIdent(operatingIdent, bounds);
+    return dedupeFlightAwareRecords([...initialRows, ...operatingRows], query);
+  } catch (error) {
+    console.warn("FlightAware historical ICAO retry failed; using IATA results", {
+      requestedIdent: ident,
+      operatingIdent,
+      error: error?.message || String(error),
+    });
+    return dedupeFlightAwareRecords(initialRows, query);
+  }
 }
 
 let providerAuthHealthCache = null;
@@ -8038,6 +8146,7 @@ module.exports = {
     normalizeFlightAwareTrackPoint,
     flightAwareScheduleQueryItems,
     flightAwareRecordMatchesRequestedFlight,
+    fetchFlightAwareHistoricalFlights,
     fetchFlightAwareSearchSources,
     healthBuildInfo,
     isFutureFlightAwareQueryDate,

@@ -307,6 +307,114 @@ test("FlightAware IATA and ICAO copies collapse into one real occurrence", () =>
   assert.equal(deduped[0].ident_iata, "DL2307");
 });
 
+test("a richer Lufthansa ICAO occurrence supplies aircraft data to its IATA copy", () => {
+  const records = [
+    {
+      fa_flight_id: "DLH447-sparse-iata",
+      ident: "DLH447",
+      ident_iata: "LH447",
+      origin_iata: "DEN",
+      destination_iata: "FRA",
+      scheduled_out: "2026-09-03T23:40:00Z",
+      scheduled_in: "2026-09-04T09:15:00Z",
+      status: "Scheduled",
+    },
+    {
+      fa_flight_id: "DLH447-operational",
+      ident: "DLH447",
+      ident_icao: "DLH447",
+      origin_iata: "DEN",
+      destination_iata: "FRA",
+      scheduled_out: "2026-09-03T23:40:00Z",
+      scheduled_in: "2026-09-04T09:15:00Z",
+      actual_out: "2026-09-03T23:55:00Z",
+      actual_in: "2026-09-04T08:39:00Z",
+      aircraft_type: "A359",
+      registration: "D-AIXF",
+      status: "Arrived",
+    },
+  ];
+
+  const deduped = __test__.dedupeFlightAwareRecords(records, { flightNumber: "LH447" });
+  assert.equal(deduped.length, 1);
+  assert.equal(deduped[0].ident_iata, "LH447");
+  assert.equal(deduped[0].fa_flight_id, "DLH447-operational");
+  assert.equal(deduped[0].aircraft_type, "A359");
+  assert.equal(deduped[0].registration, "D-AIXF");
+});
+
+test("historical Lufthansa search retries the provider ICAO ident for aircraft metadata", async () => {
+  const originalFetch = global.fetch;
+  const requestedIdents = [];
+  global.fetch = async (url) => {
+    const requestedURL = new URL(url);
+    const ident = decodeURIComponent(requestedURL.pathname.split("/").at(-1));
+    requestedIdents.push(ident);
+    const common = {
+      ident: "DLH447",
+      ident_icao: "DLH447",
+      ident_iata: "LH447",
+      origin: { code_iata: "DEN" },
+      destination: { code_iata: "FRA" },
+      scheduled_out: "2026-09-03T23:40:00Z",
+      scheduled_in: "2026-09-04T09:15:00Z",
+    };
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return ident === "DLH447"
+          ? {
+              flights: [{
+                ...common,
+                fa_flight_id: "DLH447-operational",
+                actual_out: "2026-09-03T23:55:00Z",
+                actual_in: "2026-09-04T08:39:00Z",
+                aircraft_type: "A359",
+                registration: "D-AIXF",
+                status: "Arrived",
+              }],
+            }
+          : {
+              flights: [{
+                ...common,
+                fa_flight_id: "DLH447-sparse-iata",
+                status: "Arrived",
+              }],
+            };
+      },
+    };
+  };
+
+  try {
+    const query = {
+      flightNumber: "LH447",
+      date: "2026-09-03",
+      departureIata: "DEN",
+      arrivalIata: "FRA",
+      timezoneOffsetMinutes: -360,
+      historical: true,
+    };
+    const rows = await __test__.fetchFlightAwareHistoricalFlights(query);
+    const normalized = __test__.normalizeWithContext(
+      rows[0],
+      rows,
+      query,
+      __test__.normalizeRecordFromFlightAware,
+      null
+    );
+
+    assert.deepEqual(requestedIdents, ["LH447", "DLH447"]);
+    assert.equal(rows.length, 1);
+    assert.equal(normalized.flightNumber, "LH447");
+    assert.equal(normalized.providerFlightId, "DLH447-operational");
+    assert.equal(normalized.aircraftType, "A359");
+    assert.equal(normalized.aircraftRegistration, "D-AIXF");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test("IndiGo operating and marketing aliases collapse despite one-minute estimate drift", () => {
   const records = [
     {
