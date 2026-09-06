@@ -65,6 +65,36 @@ test("FlightAware top-level track arrays produce the complete flown breadcrumb h
   );
 });
 
+test("track compaction preserves ordered provider points when timestamps are absent", () => {
+  const points = __test__.compactTrackPoints([
+    { latitude: 13.69, longitude: 100.75 },
+    { latitude: 16.80, longitude: 96.16 },
+    { latitude: 21.17, longitude: 79.08 },
+  ]);
+
+  assert.deepEqual(
+    points.map(({ latitude, longitude }) => ({ latitude, longitude })),
+    [
+      { latitude: 13.69, longitude: 100.75 },
+      { latitude: 16.80, longitude: 96.16 },
+      { latitude: 21.17, longitude: 79.08 },
+    ]
+  );
+});
+
+test("nested provider track envelopes expose every breadcrumb candidate", () => {
+  const payload = {
+    data: {
+      positions: [
+        { timestamp: "2026-09-06T18:30:00Z", latitude: 13.69, longitude: 100.75 },
+        { timestamp: "2026-09-06T20:15:00Z", latitude: 21.17, longitude: 79.08 },
+      ],
+    },
+  };
+
+  assert.equal(__test__.flightAwareTrackCandidatesFromPayload(payload).length, 2);
+});
+
 test("a coherent provider trail replaces stale canonical geometry", () => {
   const canonical = [
     { latitude: 41.8, longitude: 12.2, recordedAt: "2026-09-02T14:00:00.000Z" },

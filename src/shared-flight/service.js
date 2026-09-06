@@ -492,6 +492,25 @@ function createSharedFlightService({
         ? await provider.fetchFlightByProviderId(row.provider_flight_id, providerOptions)
         : null;
 
+      // AeroAPI can keep a schedule-only record addressable after takeoff.
+      // When detail view is opened during the flight and that record still has
+      // no tail, resolve the flight number again to find the live occurrence.
+      const expectedDepartureMs = new Date(
+        row.estimated_departure_at || row.scheduled_departure_at || ""
+      ).getTime();
+      const expectedArrivalMs = new Date(
+        row.estimated_arrival_at || row.scheduled_arrival_at || ""
+      ).getTime();
+      const isInsideExpectedFlightWindow =
+        Number.isFinite(expectedDepartureMs) &&
+        Number.isFinite(expectedArrivalMs) &&
+        Date.now() >= expectedDepartureMs - 15 * 60_000 &&
+        Date.now() <= expectedArrivalMs + 30 * 60_000;
+      const shouldResolveMissingAircraftAssignment =
+        reason === "detail_open" &&
+        isInsideExpectedFlightWindow &&
+        !String(providerNormalized?.aircraftRegistration || "").trim();
+
       // FlightAware can publish the schedule and the eventual operating flight
       // under different provider IDs (for example 6E481 later operating with
       // callsign IGO23EC). Once the saved schedule is overdue, an exact lookup
@@ -502,6 +521,7 @@ function createSharedFlightService({
       const shouldResolveOperationalReplacement =
         !providerNormalized ||
         isOperationallyPastArrivalWithoutFinalState(row) ||
+        shouldResolveMissingAircraftAssignment ||
         (
           isOperationallyOverdueWithoutTakeoff(row) &&
           !hasOperationalDepartureEvidence(providerNormalized)

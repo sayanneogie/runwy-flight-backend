@@ -65,6 +65,40 @@ test("canonical stream ordering rejects replayed events but accepts equal or new
   assert.equal(isOlderStreamEvent(current, "2026-09-01T12:30:01.000Z"), false);
 });
 
+test("provider track trails are durable in the canonical in-memory flight", async () => {
+  const repository = createMemorySharedFlightRepository();
+  const flightKey = "TG-960-2026-09-06-BKK-ARN";
+  repository.__memory.flights.set(flightKey, {
+    id: "flight-tg960",
+    flight_key: flightKey,
+    provider_flight_id: "THA960-instance",
+    normalized_data: {
+      position: { lat: 24.97, lon: 83.11, recordedAt: "2026-09-06T20:16:43Z" },
+      trackPoints: [],
+    },
+    position_lat: 24.97,
+    position_lon: 83.11,
+    state_revision: 4,
+  });
+  const trail = [
+    { latitude: 13.69, longitude: 100.75, recordedAt: "2026-09-06T18:35:00Z" },
+    { latitude: 19.08, longitude: 88.24, recordedAt: "2026-09-06T19:45:00Z" },
+    { latitude: 24.97, longitude: 83.11, recordedAt: "2026-09-06T20:16:43Z" },
+  ];
+
+  const updated = await repository.persistTrackTrailForProviderFlightId(
+    "THA960-instance",
+    trail
+  );
+  const restored = await repository.listTrackPointsForProviderFlightId("THA960-instance");
+
+  assert.equal(updated.length, 1);
+  assert.deepEqual(updated[0].normalized_data.trackPoints, trail);
+  assert.deepEqual(restored.slice(0, trail.length), trail);
+  assert.equal(updated[0].normalized_data.position.lat, 24.97);
+  assert.equal(updated[0].state_revision, 5);
+});
+
 test("diversion and aircraft swaps emit actionable events without ending airborne lifecycle", () => {
   const now = Date.parse("2026-08-31T00:30:00.000Z");
   const oldState = {
@@ -2817,6 +2851,61 @@ test("overdue schedule provider ID rebinds to the live operating occurrence", as
   assert.equal(row.status, "enroute");
   assert.equal(row.actual_departure_at, departure);
   assert.equal(row.altitude, 37_025);
+});
+
+test("active detail refresh replaces an airborne schedule object missing its tail", async () => {
+  const departure = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 5 * 60 * 60_000).toISOString();
+  const scheduleOnly = normalizedFlight({
+    providerFlightId: "DLH722-schedule",
+    airlineCode: "LH",
+    flightNumber: "722",
+    origin: "MUC",
+    destination: "PEK",
+    status: "enroute",
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    aircraftRegistration: null,
+  });
+  const { service, repository, providerCalls } = makeService((calls) => calls === 1
+    ? scheduleOnly
+    : normalizedFlight({
+        providerFlightId: "DLH722-operational",
+        airlineCode: "LH",
+        flightNumber: "722",
+        origin: "MUC",
+        destination: "PEK",
+        status: "enroute",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        aircraftType: "A359",
+        aircraftRegistration: "D-AIXL",
+        position: { lat: 55.2, lon: 44.1, altitude: 39_000, groundSpeed: 485, heading: 70 },
+      }), {
+    fetchFlightByProviderId: async () => scheduleOnly,
+  });
+
+  const flight = await service.searchFlight({
+    airline: "LH",
+    number: "722",
+    date: departure.slice(0, 10),
+    origin: "MUC",
+    destination: "PEK",
+  });
+  await service.refreshFlightJob({
+    data: { flight_instance_id: flight.flightInstanceId, reason: "detail_open" },
+  });
+
+  const row = await repository.findFlightById(flight.flightInstanceId);
+  assert.equal(providerCalls(), 2);
+  assert.equal(row.provider_flight_id, "DLH722-operational");
+  assert.equal(row.normalized_data.aircraftRegistration, "D-AIXL");
+  assert.equal(row.normalized_data.aircraftType, "A359");
 });
 
 test("overdue tracked flight refresh uses reserved FlightAware capacity", async () => {

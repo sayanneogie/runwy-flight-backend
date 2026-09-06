@@ -111,6 +111,25 @@ function createMemorySharedFlightRepository() {
         ])
         .filter(Boolean);
     },
+    async persistTrackTrailForProviderFlightId(providerFlightId, trackPoints) {
+      const points = Array.isArray(trackPoints) ? trackPoints : [];
+      const updated = [];
+      for (const [key, row] of flights.entries()) {
+        if (row.provider_flight_id !== providerFlightId) continue;
+        const saved = {
+          ...row,
+          normalized_data: {
+            ...(row.normalized_data || {}),
+            trackPoints: points,
+          },
+          state_revision: Number(row.state_revision || 0) + 1,
+          updated_at: new Date().toISOString(),
+        };
+        flights.set(key, saved);
+        updated.push(saved);
+      }
+      return updated;
+    },
     async listInboundUpdateTargets({ providerFlightId, flightNumber }) {
       const normalizedFlightNumber = String(flightNumber || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
       return [...flights.values()].filter((row) => {
@@ -772,7 +791,8 @@ function createPostgresSharedFlightRepository(pool) {
     },
     async listTrackPointsForProviderFlightId(providerFlightId) {
       if (!providerFlightId) return [];
-      const result = await pool.query(
+      const [snapshotResult, embeddedResult] = await Promise.all([
+        pool.query(
         `select latitude, longitude, "headingDegrees", "groundSpeedKnots", "altitudeFeet", "recordedAt"
          from (
            select distinct on (round(fs.position_lat::numeric, 4), round(fs.position_lon::numeric, 4))
@@ -793,6 +813,39 @@ function createPostgresSharedFlightRepository(pool) {
          order by created_at asc
          limit 5000`,
         [providerFlightId]
+        ),
+        pool.query(
+          `select normalized_data->'trackPoints' as track_points
+           from public.flight_instances
+           where provider_flight_id = $1`,
+          [providerFlightId]
+        ),
+      ]);
+      const embeddedPoints = embeddedResult.rows.flatMap((row) =>
+        Array.isArray(row.track_points) ? row.track_points : []
+      );
+      return [...snapshotResult.rows, ...embeddedPoints].sort((left, right) => {
+        const leftMs = Date.parse(left?.recordedAt || "");
+        const rightMs = Date.parse(right?.recordedAt || "");
+        if (!Number.isFinite(leftMs) || !Number.isFinite(rightMs)) return 0;
+        return leftMs - rightMs;
+      });
+    },
+    async persistTrackTrailForProviderFlightId(providerFlightId, trackPoints) {
+      if (!providerFlightId || !Array.isArray(trackPoints) || trackPoints.length === 0) return [];
+      const result = await pool.query(
+        `update public.flight_instances
+         set normalized_data = jsonb_set(
+               coalesce(normalized_data, '{}'::jsonb),
+               '{trackPoints}',
+               $2::jsonb,
+               true
+             ),
+             state_revision = state_revision + 1,
+             updated_at = now()
+         where provider_flight_id = $1
+         returning *`,
+        [providerFlightId, JSON.stringify(trackPoints)]
       );
       return result.rows;
     },

@@ -1237,8 +1237,12 @@ function compactTrackPoints(trackPoints) {
     }
 
     const previousPoint = compacted[compacted.length - 1];
-    const previousRecordedAtMs = new Date(previousPoint.recordedAt || 0).getTime();
-    const nextRecordedAtMs = new Date(point.recordedAt || 0).getTime();
+    const previousRecordedAtMs = previousPoint.recordedAt
+      ? new Date(previousPoint.recordedAt).getTime()
+      : Number.NaN;
+    const nextRecordedAtMs = point.recordedAt
+      ? new Date(point.recordedAt).getTime()
+      : Number.NaN;
     const distanceMeters = distanceBetweenCoordinatesMeters(previousPoint, point);
 
     const hasComparableTimestamps =
@@ -2617,10 +2621,12 @@ function normalizeFlightAwareTrackPoint(record) {
     recordedAt:
       record.timestamp ??
       record.recorded_at ??
+      record.time ??
       record.date ??
       record.observed ??
       properties.timestamp ??
       properties.recorded_at ??
+      properties.time ??
       properties.date,
   });
 }
@@ -2633,13 +2639,17 @@ function flightAwareTrackCandidatesFromPayload(payload) {
   if (Array.isArray(payload)) return payload;
 
   const candidates = [];
+  const containers = [payload, payload.data, payload.result, payload.flight]
+    .filter((candidate) => candidate && typeof candidate === "object");
 
-  if (Array.isArray(payload.positions)) candidates.push(...payload.positions);
-  if (Array.isArray(payload.track)) candidates.push(...payload.track);
-  if (payload.position && typeof payload.position === "object") candidates.push(payload.position);
-  if (payload.last_position && typeof payload.last_position === "object") candidates.push(payload.last_position);
-  if (Array.isArray(payload.features)) candidates.push(...payload.features);
-  if (payload.geometry && payload.properties) candidates.push(payload);
+  for (const container of containers) {
+    if (Array.isArray(container.positions)) candidates.push(...container.positions);
+    if (Array.isArray(container.track)) candidates.push(...container.track);
+    if (container.position && typeof container.position === "object") candidates.push(container.position);
+    if (container.last_position && typeof container.last_position === "object") candidates.push(container.last_position);
+    if (Array.isArray(container.features)) candidates.push(...container.features);
+    if (container.geometry && container.properties) candidates.push(container);
+  }
 
   return candidates;
 }
@@ -7767,14 +7777,44 @@ app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req,
       providerFlightId,
       providerRefreshOptions
     );
+    const providerTrackPointCount = compactTrackPoints([
+      ...(Array.isArray(providerTrackTrail.trackPoints) ? providerTrackTrail.trackPoints : []),
+      providerTrackTrail.livePosition || null,
+    ]).length;
     const trackTrail = authoritativeProviderTrackTrail(
       canonicalTrackPoints,
       providerTrackTrail
     );
+    let persisted = false;
+    if (
+      providerTrackPointCount > 0 &&
+      typeof sharedFlightRepository?.persistTrackTrailForProviderFlightId === "function"
+    ) {
+      try {
+        const updatedRows = await sharedFlightRepository.persistTrackTrailForProviderFlightId(
+          providerFlightId,
+          trackTrail.trackPoints
+        );
+        persisted = Array.isArray(updatedRows) && updatedRows.length > 0;
+      } catch (persistError) {
+        console.warn("FlightAware track persistence failed", {
+          providerFlightId,
+          error: persistError?.message || String(persistError),
+        });
+      }
+    }
     return res.json({
       providerFlightId,
       trackPoints: Array.isArray(trackTrail.trackPoints) ? trackTrail.trackPoints : [],
       livePosition: trackTrail.livePosition || null,
+      source: providerTrackPointCount >= 2
+        ? "provider_track"
+        : canonicalTrackPoints.length > 0
+          ? "canonical_with_provider_position"
+          : "provider_position_only",
+      providerTrackPointCount,
+      canonicalTrackPointCount: canonicalTrackPoints.length,
+      persisted,
     });
   } catch (error) {
     console.error("FlightAware track fetch failed", {
@@ -7973,6 +8013,7 @@ module.exports = {
   usesDatabase,
   __test__: {
     coalesceFlightAwareTrackTrail,
+    compactTrackPoints,
     authoritativeProviderTrackTrail,
     buildFlightAwareAlertPayload,
     circleNotificationPreferenceConditionForEventType,
