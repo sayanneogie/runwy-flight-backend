@@ -99,6 +99,33 @@ test("provider track trails are durable in the canonical in-memory flight", asyn
   assert.equal(updated[0].state_revision, 5);
 });
 
+test("canonical aircraft type is copied to saved flights and follows later aircraft changes", async () => {
+  const repository = createMemorySharedFlightRepository();
+  const row = await repository.upsertFlightFromNormalized(
+    normalizedFlight({ aircraftType: "A359", aircraftRegistration: "D-AIXD" }),
+    {
+      airline: "LH",
+      number: "447",
+      date: "2026-09-06",
+      origin: "DEN",
+      destination: "FRA",
+      flightKey: "LH-447-2026-09-06-DEN-FRA",
+    },
+    "2026-09-06T23:00:00.000Z"
+  );
+
+  const savedUserFlight = await repository.upsertUserFlight("traveler", row.id, {});
+  assert.equal(savedUserFlight.aircraft_type, "A359");
+
+  await repository.updateFlight({
+    ...row,
+    normalized_data: { ...row.normalized_data, aircraftType: "A35K" },
+  });
+
+  const [refreshedUserFlight] = await repository.listActiveUserFlightRows("traveler");
+  assert.equal(refreshedUserFlight.aircraft_type, "A35K");
+});
+
 test("diversion and aircraft swaps emit actionable events without ending airborne lifecycle", () => {
   const now = Date.parse("2026-08-31T00:30:00.000Z");
   const oldState = {

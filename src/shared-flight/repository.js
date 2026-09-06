@@ -20,6 +20,18 @@ function normalizedFlightNumber(value) {
   return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
+function canonicalAircraftType(flight) {
+  const value =
+    flight?.normalized_data?.aircraftType ||
+    flight?.normalized_data?.aircraft_type ||
+    flight?.aircraft_type ||
+    null;
+  const cleaned = String(value || "").trim();
+  return cleaned && !["unknown", "tbd", "n/a"].includes(cleaned.toLowerCase())
+    ? cleaned
+    : null;
+}
+
 function hasNewerDeletedOccurrence(rows, candidate) {
   const candidateDeparture = Date.parse(candidate.scheduled_departure || "");
   const candidateCreatedAt = Date.parse(candidate.created_at || candidate.added_at || "");
@@ -54,6 +66,24 @@ function createMemorySharedFlightRepository() {
   const providerRequestLeases = new Map();
   let idCounter = 0;
   const nextId = () => `00000000-0000-4000-8000-${String(++idCounter).padStart(12, "0")}`;
+  const syncUserFlightAircraftType = (flight) => {
+    const aircraftType = canonicalAircraftType(flight);
+    if (!aircraftType || !flight?.id) return;
+    for (const [key, userFlight] of userFlights.entries()) {
+      if (
+        userFlight.flight_instance_id === flight.id &&
+        !userFlight.deleted_at &&
+        userFlight.lifecycle_state !== "deleted" &&
+        userFlight.aircraft_type !== aircraftType
+      ) {
+        userFlights.set(key, {
+          ...userFlight,
+          aircraft_type: aircraftType,
+          updated_at: new Date().toISOString(),
+        });
+      }
+    }
+  };
 
   return {
     async acquireProviderRequestLease(lockKey, ttlMs) {
@@ -175,6 +205,7 @@ function createMemorySharedFlightRepository() {
       saved.streaming_status = saved.streaming_status || "disabled";
       saved.refresh_priority = saved.refresh_priority || "normal";
       flights.set(saved.flight_key, saved);
+      syncUserFlightAircraftType(saved);
       if (params.flightKey && params.flightKey !== saved.flight_key) aliases.set(params.flightKey, saved.id);
       return saved;
     },
@@ -193,6 +224,7 @@ function createMemorySharedFlightRepository() {
         updated_at: new Date().toISOString(),
       };
       flights.set(saved.flight_key, saved);
+      syncUserFlightAircraftType(saved);
       return saved;
     },
     async commitCanonicalState(row, eventRows, provider) {
@@ -298,6 +330,7 @@ function createMemorySharedFlightRepository() {
         actual_arrival: flight.actual_arrival_at || null,
         departure_terminal: flight.terminal || null,
         departure_gate: flight.gate || null,
+        aircraft_type: canonicalAircraftType(flight),
         status: flight.status || null,
         provider_name: flight.provider || null,
         provider_flight_id: flight.provider_flight_id || null,
@@ -370,6 +403,7 @@ function createMemorySharedFlightRepository() {
         notification_enabled: patch.notificationEnabled ?? row.notification_enabled ?? row.notifications_enabled ?? true,
         notifications_enabled: patch.notificationEnabled ?? row.notifications_enabled ?? row.notification_enabled ?? true,
         alert_preferences: patch.alertPreferences || row.alert_preferences || DEFAULT_ALERT_PREFERENCES,
+        aircraft_type: canonicalAircraftType(flight) || row.aircraft_type || null,
         status: flight.status || row.status || null,
         provider_name: flight.provider || row.provider_name || null,
         provider_flight_id: flight.provider_flight_id || row.provider_flight_id || null,
@@ -637,6 +671,21 @@ function createMemorySharedFlightRepository() {
 function createPostgresSharedFlightRepository(pool) {
   const one = (result) => result.rows[0] || null;
 
+  async function syncCanonicalAircraftType(executor, flight) {
+    const aircraftType = canonicalAircraftType(flight);
+    if (!aircraftType || !flight?.id) return;
+    await executor.query(
+      `update public.user_flights
+       set aircraft_type = $2,
+           updated_at = now()
+       where flight_instance_id = $1
+         and deleted_at is null
+         and coalesce(lifecycle_state, '') <> 'deleted'
+         and aircraft_type is distinct from $2`,
+      [flight.id, aircraftType]
+    );
+  }
+
   async function updateCanonicalFlight(executor, row) {
     const incomingStreamEventAt = row.last_stream_event_at || null;
     const result = await executor.query(
@@ -670,7 +719,10 @@ function createPostgresSharedFlightRepository(pool) {
         row.needs_revalidation, row.is_final, incomingStreamEventAt,
       ]
     );
-    if (result.rows[0]) return { flight: result.rows[0], applied: true };
+    if (result.rows[0]) {
+      await syncCanonicalAircraftType(executor, result.rows[0]);
+      return { flight: result.rows[0], applied: true };
+    }
     const current = one(await executor.query(
       `select * from public.flight_instances where id=$1 limit 1`,
       [row.id]
@@ -984,6 +1036,7 @@ function createPostgresSharedFlightRepository(pool) {
           [params.flightKey, saved.id]
         );
       }
+      await syncCanonicalAircraftType(pool, saved);
       return saved;
     },
     async updateFlight(row) {
@@ -1131,6 +1184,7 @@ function createPostgresSharedFlightRepository(pool) {
            actual_arrival,
            departure_terminal,
            departure_gate,
+           aircraft_type,
            status,
            provider_name,
            provider_flight_id,
@@ -1167,6 +1221,7 @@ function createPostgresSharedFlightRepository(pool) {
            fi.actual_arrival_at,
            fi.terminal,
            fi.gate,
+           nullif(trim(coalesce(fi.normalized_data->>'aircraftType', fi.normalized_data->>'aircraft_type', '')), ''),
            fi.status,
            fi.provider,
            fi.provider_flight_id,
@@ -1195,6 +1250,7 @@ function createPostgresSharedFlightRepository(pool) {
            actual_arrival = excluded.actual_arrival,
            departure_terminal = excluded.departure_terminal,
            departure_gate = excluded.departure_gate,
+           aircraft_type = coalesce(excluded.aircraft_type, public.user_flights.aircraft_type),
            status = excluded.status,
            provider_name = excluded.provider_name,
            provider_flight_id = excluded.provider_flight_id,
@@ -1287,6 +1343,10 @@ function createPostgresSharedFlightRepository(pool) {
           notification_enabled = coalesce($4, uf.notification_enabled, uf.notifications_enabled, true),
           notifications_enabled = coalesce($4, uf.notifications_enabled, uf.notification_enabled, true),
           alert_preferences = coalesce($5, uf.alert_preferences, $6::jsonb),
+          aircraft_type = coalesce(
+            nullif(trim(coalesce(fi.normalized_data->>'aircraftType', fi.normalized_data->>'aircraft_type', '')), ''),
+            uf.aircraft_type
+          ),
           status = coalesce(fi.status, uf.status),
           provider_name = coalesce(fi.provider, uf.provider_name),
           provider_flight_id = coalesce(fi.provider_flight_id, uf.provider_flight_id),
