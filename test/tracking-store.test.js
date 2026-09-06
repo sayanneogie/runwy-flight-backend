@@ -191,6 +191,14 @@ test("tracking bridge persists canonical landed, arrival, and baggage state for 
 
   const bridgeUpsert = queries.find(({ sql }) => sql.includes("insert into public.user_flights"));
   assert.ok(bridgeUpsert, "expected tracking bridge upsert");
+  assert.match(
+    bridgeUpsert.sql,
+    /on conflict \(user_id, flight_instance_id\) where flight_instance_id is not null/
+  );
+  assert.match(
+    bridgeUpsert.sql,
+    /tracking_session_id = excluded\.tracking_session_id/
+  );
   assert.match(bridgeUpsert.sql, /flight_instance_id/);
   assert.match(bridgeUpsert.sql, /arrival_terminal/);
   assert.match(bridgeUpsert.sql, /arrival_gate/);

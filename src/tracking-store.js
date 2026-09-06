@@ -917,6 +917,15 @@ function createTrackingStore({
       normalized?.arrivalTimes?.estimated ||
       normalized?.arrivalTimes?.actual ||
       null;
+    const hasCanonicalFlightInstance = Boolean(
+      String(normalized?.flightInstanceId || "").trim()
+    );
+    const userFlightConflictTarget = hasCanonicalFlightInstance
+      ? "(user_id, flight_instance_id) where flight_instance_id is not null"
+      : "(user_id, tracking_session_id)";
+    const attachTrackingSessionOnConflict = hasCanonicalFlightInstance
+      ? "tracking_session_id = excluded.tracking_session_id,"
+      : "";
 
     await pool.query(
       `
@@ -1016,13 +1025,14 @@ function createTrackingStore({
         $23,
         $24
       )
-      on conflict (user_id, tracking_session_id)
+      on conflict ${userFlightConflictTarget}
       do update set
         -- A tracking bridge can reuse a row that the user previously deleted.
         -- Once the flight has been saved/tracked again, that tombstone must not
         -- survive the upsert or the deletion trigger will immediately pause the
         -- newly active tracking session.
         deleted_at = null,
+        ${attachTrackingSessionOnConflict}
         flight_instance_id = coalesce(excluded.flight_instance_id, public.user_flights.flight_instance_id),
         source_type = excluded.source_type,
         lifecycle_state = excluded.lifecycle_state,
