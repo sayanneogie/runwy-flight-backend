@@ -189,6 +189,26 @@ test("shared-flight tracking projection preserves diversion and aircraft metadat
   assert.equal(projected.aircraftRegistration, "N101DU");
 });
 
+test("shared detail responses accept canonical aircraft metadata over a newer sparse preview", () => {
+  const responseAt = "2026-09-06T22:30:00.000Z";
+  const projected = __test__.detailTrackedPayloadFromSharedFlight({
+    airlineCode: "LH",
+    flightNumber: "447",
+    origin: "DEN",
+    destination: "FRA",
+    aircraftType: "A359",
+    aircraftRegistration: "D-AIXD",
+    status: "scheduled",
+    scheduledDepartureAt: "2026-09-06T23:40:00.000Z",
+    scheduledArrivalAt: "2026-09-07T08:43:00.000Z",
+    lastUpdatedAt: "2026-09-06T22:06:51.817Z",
+  }, responseAt);
+
+  assert.equal(projected.aircraftType, "A359");
+  assert.equal(projected.aircraftRegistration, "D-AIXD");
+  assert.equal(projected.lastUpdated, responseAt);
+});
+
 test("provider refresh bypasses FlightAware caches only when explicitly forced", () => {
   assert.deepEqual(
     __test__.trackedProviderRefreshOptions({ includeLivePosition: true }),

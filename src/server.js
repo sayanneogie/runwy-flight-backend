@@ -7366,6 +7366,19 @@ function trackedPayloadFromSharedFlight(flight) {
   };
 }
 
+function detailTrackedPayloadFromSharedFlight(flight, responseAt = new Date()) {
+  const payload = trackedPayloadFromSharedFlight(flight);
+  const responseTimestamp = isoOrNull(responseAt) || new Date().toISOString();
+  return {
+    ...payload,
+    // `lastUpdated` is the detail snapshot envelope timestamp used by the iOS
+    // monotonic merge. The provider observation remains on livePosition and
+    // each track point. Advancing only this envelope lets a freshly retrieved
+    // canonical tail/type enrich a newer sparse search preview.
+    lastUpdated: responseTimestamp,
+  };
+}
+
 function sharedFlightForDetailID(sharedRows, requestedID) {
   const rows = Array.isArray(sharedRows) ? sharedRows : [];
   const exact = rows.find((item) => item?.flight?.flightInstanceId === requestedID);
@@ -7704,7 +7717,7 @@ app.get("/v1/flights/:flightId", async (req, res) => {
       const weatherAwareFlight = await sharedFlightService.flightWithWeatherInsight(flightId, { userId, cacheStatus: "detail_view" }) || shared.flight;
       return res.json({
         flightId,
-        normalized: trackedPayloadFromSharedFlight(weatherAwareFlight),
+        normalized: detailTrackedPayloadFromSharedFlight(weatherAwareFlight),
         lastUpdated: weatherAwareFlight.lastUpdatedAt || shared.flight.lastUpdatedAt || new Date().toISOString(),
       });
     }
@@ -7731,7 +7744,7 @@ app.get("/v1/flights/:flightId", async (req, res) => {
         const weatherAwareFlight = await sharedFlightService.flightWithWeatherInsight(tracked.metadata.sharedFlightInstanceId, { userId, cacheStatus: "detail_view" }) || shared.flight;
         return res.json({
           flightId,
-          normalized: trackedPayloadFromSharedFlight(weatherAwareFlight),
+          normalized: detailTrackedPayloadFromSharedFlight(weatherAwareFlight),
           lastUpdated: weatherAwareFlight.lastUpdatedAt || shared.flight.lastUpdatedAt || new Date().toISOString(),
         });
       }
@@ -8207,6 +8220,7 @@ module.exports = {
     shouldRefreshTrackedRecordFromWebhook,
     testPushNotificationPayload,
     trackedPayloadFromSharedFlight,
+    detailTrackedPayloadFromSharedFlight,
     sharedFlightForDetailID,
     trackedProviderRefreshOptions,
     updateFlightAwareAlert,
