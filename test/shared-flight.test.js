@@ -3032,6 +3032,69 @@ test("Lufthansa detail refresh retries DLH ident when LH lookup stays schedule-o
   assert.equal(row.normalized_data.aircraftType, "A359");
 });
 
+test("Lufthansa detail refresh resolves its tail during the three-hour inbound window", async () => {
+  const departure = new Date(Date.now() + 90 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 10 * 60 * 60_000).toISOString();
+  const scheduleOnly = normalizedFlight({
+    providerFlightId: "DLH447-schedule",
+    airlineCode: "LH",
+    flightNumber: "447",
+    origin: "DEN",
+    destination: "FRA",
+    status: "scheduled",
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    aircraftType: null,
+    aircraftRegistration: null,
+    rawProviderResponse: {
+      fa_flight_id: "DLH447-schedule",
+      ident: "DLH447",
+      ident_iata: "LH447",
+    },
+  });
+  const operatingLookups = [];
+  const { service, repository, providerCalls } = makeService(scheduleOnly, {
+    fetchFlightByProviderId: async () => scheduleOnly,
+    fetchFlightByIdent: async (ident, params) => {
+      operatingLookups.push(ident);
+      return normalizedFlight({
+        providerFlightId: "DLH447-assigned",
+        airlineCode: params.airline,
+        flightNumber: params.number,
+        origin: "DEN",
+        destination: "FRA",
+        status: "scheduled",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        aircraftType: "A359",
+        aircraftRegistration: "D-AIXD",
+      });
+    },
+  });
+
+  const flight = await service.searchFlight({
+    airline: "LH",
+    number: "447",
+    date: departure.slice(0, 10),
+    origin: "DEN",
+    destination: "FRA",
+  });
+  await service.refreshFlightJob({
+    data: { flight_instance_id: flight.flightInstanceId, reason: "detail_open" },
+  });
+
+  const row = await repository.findFlightById(flight.flightInstanceId);
+  assert.equal(providerCalls(), 2);
+  assert.deepEqual(operatingLookups, ["DLH447"]);
+  assert.equal(row.status, "scheduled");
+  assert.equal(row.normalized_data.aircraftType, "A359");
+  assert.equal(row.normalized_data.aircraftRegistration, "D-AIXD");
+});
+
 test("overdue tracked flight refresh uses reserved FlightAware capacity", async () => {
   const departure = new Date(Date.now() - 30 * 60_000).toISOString();
   const arrival = new Date(Date.now() + 90 * 60_000).toISOString();

@@ -504,7 +504,7 @@ function createSharedFlightService({
       const isInsideExpectedFlightWindow =
         Number.isFinite(expectedDepartureMs) &&
         Number.isFinite(expectedArrivalMs) &&
-        Date.now() >= expectedDepartureMs - 15 * 60_000 &&
+        Date.now() >= expectedDepartureMs - INBOUND_MONITOR_WINDOW_MS &&
         Date.now() <= expectedArrivalMs + 30 * 60_000;
       const shouldResolveMissingAircraftAssignment =
         reason === "detail_open" &&
