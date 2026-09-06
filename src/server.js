@@ -7539,7 +7539,15 @@ app.post("/v1/track", async (req, res) => {
       const sharedInput = sharedTrackInputFromQuery(query);
       if (sharedInput) {
         try {
-          const shared = await sharedFlightService.saveUserFlight(userId, sharedInput);
+          // Establish the personal tracking bridge before slower provider-alert,
+          // lifecycle, and weather coverage work. The iOS add flow has a bounded
+          // timeout; previously a coverage failure could leave a canonical
+          // user_flight row behind without ever creating its tracking session.
+          const shared = await sharedFlightService.saveUserFlight(
+            userId,
+            sharedInput,
+            { deferCoverage: true }
+          );
           if (shared?.flight?.flightInstanceId && shared.flight.freshness !== "pending") {
             const tracked = await createTrackingSessionFromSharedFlight({
               sharedFlight: shared.flight,

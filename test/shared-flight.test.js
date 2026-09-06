@@ -1822,6 +1822,36 @@ test("saving a flight creates one shared provider alert when the adapter support
   assert.equal(row.provider_alert_id, "alert-sq509");
 });
 
+test("manual tracking can defer slow live coverage until after the canonical save", async () => {
+  let releaseCoverage;
+  let coverageStarted = false;
+  const coverageBlocker = new Promise((resolve) => {
+    releaseCoverage = resolve;
+  });
+  const { service } = makeService(normalizedFlight(), {
+    ensureFlightAlert: async () => {
+      coverageStarted = true;
+      await coverageBlocker;
+      return { providerAlertId: "alert-sq509", status: "active" };
+    },
+  });
+
+  const saved = await Promise.race([
+    service.saveUserFlight("u1", {
+      airline: "SQ",
+      number: "509",
+      date: "2026-05-27",
+      origin: "BLR",
+      destination: "SIN",
+    }, { deferCoverage: true }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("save waited for live coverage")), 100)),
+  ]);
+
+  assert.ok(saved.flight.flightInstanceId);
+  assert.equal(coverageStarted, true);
+  releaseCoverage();
+});
+
 test("a flight inside three hours registers one exact inbound aircraft alert", async () => {
   const departure = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
   const arrival = new Date(Date.now() + 10 * 60 * 60_000).toISOString();

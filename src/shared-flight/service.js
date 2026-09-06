@@ -810,14 +810,26 @@ function createSharedFlightService({
     return refreshFlightJob({ data: { flight_key: row.flight_key, flight_instance_id: row.id, reason: "forced" } });
   }
 
-  async function saveUserFlight(userId, input) {
+  async function saveUserFlight(userId, input, options = {}) {
     const flight = await searchFlight(input, { userId });
     if (!flight.flightInstanceId) return { flight, userFlight: null };
     const userFlight = await repository.upsertUserFlight(userId, flight.flightInstanceId, input);
-    await ensureLiveSource(flight.flightInstanceId, "user_saved");
-    await scheduleLifecycleCatchups(flight.flightInstanceId, "user_saved");
-    await scheduleApiPoll(flight.flightInstanceId, "user_saved");
-    await scheduleWeatherInsight(flight.flightInstanceId, "user_saved");
+    const ensureCoverage = async () => {
+      await ensureLiveSource(flight.flightInstanceId, "user_saved");
+      await scheduleLifecycleCatchups(flight.flightInstanceId, "user_saved");
+      await scheduleApiPoll(flight.flightInstanceId, "user_saved");
+      await scheduleWeatherInsight(flight.flightInstanceId, "user_saved");
+    };
+    if (options.deferCoverage === true) {
+      ensureCoverage().catch((error) => {
+        console.warn("Deferred saved-flight coverage failed", {
+          flightInstanceId: flight.flightInstanceId,
+          error: error?.message || String(error),
+        });
+      });
+    } else {
+      await ensureCoverage();
+    }
     const updatedRow = await repository.findFlightById(flight.flightInstanceId);
     const updatedFlight = updatedRow
       ? rowToFlightResponse(updatedRow, {
