@@ -531,14 +531,59 @@ function createSharedFlightService({
           ...providerOptions,
           forceRefresh: true,
         });
+        const resolvesMissingAircraftDetails = Boolean(
+          resolvedByNumber &&
+          (
+            (!String(providerNormalized?.aircraftRegistration || "").trim() &&
+              String(resolvedByNumber.aircraftRegistration || "").trim()) ||
+            (!String(providerNormalized?.aircraftType || "").trim() &&
+              String(resolvedByNumber.aircraftType || "").trim())
+          )
+        );
         if (
           resolvedByNumber &&
           (
             !providerNormalized ||
-            hasOperationalDepartureEvidence(resolvedByNumber)
+            hasOperationalDepartureEvidence(resolvedByNumber) ||
+            resolvesMissingAircraftDetails
           )
         ) {
           providerNormalized = resolvedByNumber;
+        }
+
+        // Lufthansa is one provider where an IATA lookup such as LH722 can
+        // remain attached to a sparse schedule while the live occurrence is
+        // indexed under its ICAO ident (DLH722). Retry only an ident already
+        // present in the matched provider payload, then keep the user's saved
+        // marketing identity and run the normal route/date validation below.
+        const operatingIdent = operationalLookupIdentForRow(row, params, providerNormalized);
+        if (
+          operatingIdent &&
+          typeof provider.fetchFlightByIdent === "function" &&
+          shouldResolveMissingAircraftAssignment &&
+          !String(providerNormalized?.aircraftRegistration || "").trim()
+        ) {
+          const resolvedByOperatingIdent = await provider.fetchFlightByIdent(
+            operatingIdent,
+            params,
+            {
+              ...providerOptions,
+              forceRefresh: true,
+            }
+          );
+          const operatingIdentHasUsefulAircraftData = Boolean(
+            String(resolvedByOperatingIdent?.aircraftRegistration || "").trim() ||
+            String(resolvedByOperatingIdent?.aircraftType || "").trim()
+          );
+          if (
+            resolvedByOperatingIdent &&
+            (
+              hasOperationalDepartureEvidence(resolvedByOperatingIdent) ||
+              operatingIdentHasUsefulAircraftData
+            )
+          ) {
+            providerNormalized = resolvedByOperatingIdent;
+          }
         }
       }
       if (!providerNormalized) {
@@ -2045,6 +2090,42 @@ function hasOperationalDepartureEvidence(normalized) {
   const groundSpeed = Number(position.groundSpeed ?? position.groundSpeedKnots);
   return (Number.isFinite(altitude) && altitude > 300) ||
     (Number.isFinite(altitude) && altitude > 150 && Number.isFinite(groundSpeed) && groundSpeed > 80);
+}
+
+function operationalLookupIdentForRow(row, params = {}, providerNormalized = null) {
+  const raw = row?.raw_provider_response || row?.normalized_data?.rawProviderResponse || {};
+  const refreshedRaw = providerNormalized?.rawProviderResponse || {};
+  const requestedCode = `${params.airline || row?.airline_code || ""}${params.number || row?.flight_number || ""}`
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+  const requestedNumber = String(params.number || row?.flight_number || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+  const candidates = [
+    refreshedRaw.actual_ident,
+    refreshedRaw.actual_ident_icao,
+    refreshedRaw.ident,
+    refreshedRaw.ident_icao,
+    raw.actual_ident,
+    raw.actual_ident_icao,
+    raw.ident,
+    raw.ident_icao,
+    row?.normalized_data?.actualIdent,
+    row?.normalized_data?.ident,
+  ];
+
+  for (const candidate of candidates) {
+    const ident = String(candidate || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!ident || ident === requestedCode) continue;
+    const match = ident.match(/^([A-Z]{3})(\d{1,4}[A-Z]?)$/);
+    if (!match) continue;
+    const operatingNumber = match[2];
+    const sameNumber = operatingNumber === requestedNumber;
+    const callsignSuffixOnly = operatingNumber.startsWith(requestedNumber) &&
+      /^[A-Z]$/.test(operatingNumber.slice(requestedNumber.length));
+    if (sameNumber || callsignSuffixOnly) return ident;
+  }
+  return null;
 }
 
 function shouldRecoverMissedDeparture(row, nowMs = Date.now()) {

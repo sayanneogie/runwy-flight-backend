@@ -179,6 +179,9 @@ function makeService(providerFlight = normalizedFlight(), options = {}) {
     provider.supportsProviderId = true;
     provider.fetchFlightByProviderId = options.fetchFlightByProviderId;
   }
+  if (typeof options.fetchFlightByIdent === "function") {
+    provider.fetchFlightByIdent = options.fetchFlightByIdent;
+  }
   const service = createSharedFlightService({
     repository,
     provider,
@@ -520,6 +523,47 @@ test("provider adapter preserves separate gate-out and wheels-off timestamps", a
 
   assert.equal(result.departureTimes.actual, "2026-08-28T10:53:00.000Z");
   assert.equal(result.takeoffTimes.actual, "2026-08-28T11:07:35.000Z");
+});
+
+test("provider operating-ident lookup preserves the saved marketing identity", async () => {
+  let providerQuery = null;
+  const adapter = createProviderAdapter({
+    providerName: "flightaware",
+    fetchFlights: async (query) => {
+      providerQuery = query;
+      return [{ fa_flight_id: "DLH722-operational", ident: "DLH722", ident_iata: "LH722" }];
+    },
+    normalizeRecord: () => normalizedFlight({
+      providerFlightId: "DLH722-operational",
+      airlineCode: "DLH",
+      flightNumber: "DLH722",
+      origin: "MUC",
+      destination: "PEK",
+      status: "enroute",
+    }),
+    normalizeSelected: async () => normalizedFlight({
+      providerFlightId: "DLH722-operational",
+      airlineCode: "DLH",
+      flightNumber: "DLH722",
+      origin: "MUC",
+      destination: "PEK",
+      status: "enroute",
+    }),
+    selectRecord: (records) => records[0],
+  });
+
+  const result = await adapter.fetchFlightByIdent("dlh722", {
+    airline: "LH",
+    number: "722",
+    date: "2026-09-06",
+    origin: "MUC",
+    destination: "PEK",
+  });
+
+  assert.equal(providerQuery.flightNumber, "DLH722");
+  assert.equal(result.airlineCode, "LH");
+  assert.equal(result.flightNumber, "722");
+  assert.equal(result.providerFlightId, "DLH722-operational");
 });
 
 test("shared flight search preserves the origin timezone offset for the provider query", async () => {
@@ -2903,6 +2947,78 @@ test("active detail refresh replaces an airborne schedule object missing its tai
 
   const row = await repository.findFlightById(flight.flightInstanceId);
   assert.equal(providerCalls(), 2);
+  assert.equal(row.provider_flight_id, "DLH722-operational");
+  assert.equal(row.normalized_data.aircraftRegistration, "D-AIXL");
+  assert.equal(row.normalized_data.aircraftType, "A359");
+});
+
+test("Lufthansa detail refresh retries DLH ident when LH lookup stays schedule-only", async () => {
+  const departure = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+  const arrival = new Date(Date.now() + 5 * 60 * 60_000).toISOString();
+  const scheduleOnly = normalizedFlight({
+    providerFlightId: "DLH722-schedule",
+    airlineCode: "LH",
+    flightNumber: "722",
+    origin: "MUC",
+    destination: "PEK",
+    status: "scheduled",
+    scheduledDepartureAt: departure,
+    estimatedDepartureAt: departure,
+    scheduledArrivalAt: arrival,
+    estimatedArrivalAt: arrival,
+    aircraftType: "A359",
+    aircraftRegistration: null,
+    rawProviderResponse: {
+      fa_flight_id: "DLH722-schedule",
+      ident: "DLH722",
+      ident_iata: "LH722",
+    },
+  });
+  const operatingLookups = [];
+  const { service, repository, providerCalls } = makeService(scheduleOnly, {
+    fetchFlightByProviderId: async () => normalizedFlight({
+      ...scheduleOnly,
+      aircraftType: null,
+    }),
+    fetchFlightByIdent: async (ident, params, fetchOptions) => {
+      operatingLookups.push({ ident, params, fetchOptions });
+      return normalizedFlight({
+        providerFlightId: "DLH722-operational",
+        airlineCode: "LH",
+        flightNumber: "722",
+        origin: "MUC",
+        destination: "PEK",
+        status: "enroute",
+        scheduledDepartureAt: departure,
+        estimatedDepartureAt: departure,
+        actualDepartureAt: departure,
+        scheduledArrivalAt: arrival,
+        estimatedArrivalAt: arrival,
+        aircraftType: "A359",
+        aircraftRegistration: "D-AIXL",
+        position: { lat: 55.2, lon: 44.1, altitude: 39_000, groundSpeed: 485, heading: 70 },
+      });
+    },
+  });
+
+  const flight = await service.searchFlight({
+    airline: "LH",
+    number: "722",
+    date: departure.slice(0, 10),
+    origin: "MUC",
+    destination: "PEK",
+  });
+  await service.refreshFlightJob({
+    data: { flight_instance_id: flight.flightInstanceId, reason: "detail_open" },
+  });
+
+  const row = await repository.findFlightById(flight.flightInstanceId);
+  assert.equal(providerCalls(), 2);
+  assert.equal(operatingLookups.length, 1);
+  assert.equal(operatingLookups[0].ident, "DLH722");
+  assert.equal(operatingLookups[0].params.airline, "LH");
+  assert.equal(row.airline_code, "LH");
+  assert.equal(row.flight_number, "722");
   assert.equal(row.provider_flight_id, "DLH722-operational");
   assert.equal(row.normalized_data.aircraftRegistration, "D-AIXL");
   assert.equal(row.normalized_data.aircraftType, "A359");

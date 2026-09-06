@@ -1,25 +1,42 @@
 "use strict";
 
 function createProviderAdapter({ providerName, fetchFlights, fetchByProviderId, normalizeRecord, normalizeSelected, enrichNormalized, selectRecord, ensureFlightAlert, ensureInboundFlightAlert, ensureFlightStream, alertConfigurationChangedAt }) {
+  async function fetchFlightByQuery(params, queryFlightNumber, options = {}) {
+    const query = {
+      flightNumber: queryFlightNumber,
+      date: params.date,
+      departureIata: params.origin === "UNKNOWN" ? null : params.origin,
+      arrivalIata: params.destination === "UNKNOWN" ? null : params.destination,
+      timezoneOffsetMinutes: params.timezoneOffsetMinutes ?? null,
+    };
+    const records = await fetchFlights(query, options);
+    const selected = selectRecord ? selectRecord(records, query, normalizeRecord) : records?.[0];
+    if (!selected) return null;
+    const normalized = normalizeSelected
+      ? await normalizeSelected(selected, records, query, params)
+      : normalizeRecord(selected);
+    const enriched = enrichNormalized ? await enrichNormalized(normalized, selected, query, params, options) : normalized;
+    return normalizeProviderRecord(selected, () => enriched, providerName, params);
+  }
+
   const adapter = {
     name: providerName,
     supportsProviderId: Boolean(fetchByProviderId),
     async fetchFlightByNumber(params, options = {}) {
-      const query = {
-        flightNumber: `${params.airline}${params.number}`,
-        date: params.date,
-        departureIata: params.origin === "UNKNOWN" ? null : params.origin,
-        arrivalIata: params.destination === "UNKNOWN" ? null : params.destination,
-        timezoneOffsetMinutes: params.timezoneOffsetMinutes ?? null,
+      return fetchFlightByQuery(params, `${params.airline}${params.number}`, options);
+    },
+    async fetchFlightByIdent(ident, params, options = {}) {
+      const normalizedIdent = String(ident || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+      if (!normalizedIdent) return null;
+      const result = await fetchFlightByQuery(params, normalizedIdent, options);
+      if (!result) return null;
+      return {
+        ...result,
+        // This is only a provider lookup alias. Keep the marketing identity
+        // the user saved while the service still validates route and date.
+        airlineCode: String(params.airline || result.airlineCode || "").toUpperCase(),
+        flightNumber: String(params.number || result.flightNumber || "").toUpperCase(),
       };
-      const records = await fetchFlights(query, options);
-      const selected = selectRecord ? selectRecord(records, query, normalizeRecord) : records?.[0];
-      if (!selected) return null;
-      const normalized = normalizeSelected
-        ? await normalizeSelected(selected, records, query, params)
-        : normalizeRecord(selected);
-      const enriched = enrichNormalized ? await enrichNormalized(normalized, selected, query, params, options) : normalized;
-      return normalizeProviderRecord(selected, () => enriched, providerName, params);
     },
     async fetchFlightByProviderId(providerFlightId, options = {}) {
       if (!fetchByProviderId) throw new Error("fetchFlightByProviderId is not configured");
