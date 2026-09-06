@@ -1863,6 +1863,8 @@ test("an active but incomplete inbound aircraft retries detail resolution with r
         origin: "FAR",
         destination: "MSP",
         estimatedArrivalAt: new Date(Date.now() + 20 * 60_000).toISOString(),
+        aircraftType: "A359",
+        aircraftRegistration: "D-AIXD",
       });
     },
     ensureInboundFlightAlert: async () => {
@@ -1882,6 +1884,12 @@ test("an active but incomplete inbound aircraft retries detail resolution with r
   assert.ok(saved.flight.inboundFlight.estimatedArrival);
   assert.equal(row.normalized_data.inboundFlight.originAirportIata, "FAR");
   assert.ok(row.normalized_data.inboundFlight.estimatedArrival);
+  assert.equal(row.normalized_data.inboundFlight.aircraftType, "A359");
+  assert.equal(row.normalized_data.inboundFlight.aircraftRegistration, "D-AIXD");
+  assert.equal(row.normalized_data.aircraftType, "A359");
+  assert.equal(row.normalized_data.aircraftRegistration, "D-AIXD");
+  assert.equal(saved.flight.aircraftType, "A359");
+  assert.equal(saved.flight.aircraftRegistration, "D-AIXD");
   assert.equal(row.normalized_data.inboundFlight.providerAlertStatus, "active");
 });
 

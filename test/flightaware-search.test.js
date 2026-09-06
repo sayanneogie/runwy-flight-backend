@@ -806,6 +806,8 @@ test("normalizeRecordFromFlightAware preserves the exact inbound aircraft identi
     inbound_origin_iata: "DEL",
     inbound_estimated_in: "2026-08-31T09:05:00.000Z",
     inbound_status: "Scheduled",
+    inbound_aircraft_type: "A359",
+    inbound_registration: "D-AIXD",
   });
 
   assert.equal(normalized.inboundFlight.providerFlightId, "AI202-instance");
@@ -813,6 +815,8 @@ test("normalizeRecordFromFlightAware preserves the exact inbound aircraft identi
   assert.equal(normalized.inboundFlight.originAirportIata, "DEL");
   assert.equal(normalized.inboundFlight.destinationAirportIata, "BLR");
   assert.equal(normalized.inboundFlight.estimatedArrival, "2026-08-31T09:05:00.000Z");
+  assert.equal(normalized.inboundFlight.aircraftType, "A359");
+  assert.equal(normalized.inboundFlight.aircraftRegistration, "D-AIXD");
 });
 
 test("an inbound provider ID is expanded into incoming-aircraft route and timing details", () => {
@@ -833,6 +837,8 @@ test("an inbound provider ID is expanded into incoming-aircraft route and timing
     actual_out: "2026-09-04T07:01:00.000Z",
     estimated_in: "2026-09-04T14:10:00.000Z",
     status: "En Route",
+    aircraft_type: "A359",
+    registration: "D-AIXD",
   });
 
   assert.equal(__test__.inboundFlightNeedsDetailResolution(outbound.inboundFlight), true);
@@ -843,7 +849,31 @@ test("an inbound provider ID is expanded into incoming-aircraft route and timing
   assert.equal(merged.inboundFlight.actualDeparture, "2026-09-04T07:01:00.000Z");
   assert.equal(merged.inboundFlight.estimatedArrival, "2026-09-04T14:10:00.000Z");
   assert.equal(merged.inboundFlight.status, "enroute");
+  assert.equal(merged.inboundFlight.aircraftType, "A359");
+  assert.equal(merged.inboundFlight.aircraftRegistration, "D-AIXD");
+  assert.equal(merged.aircraftType, "A359");
+  assert.equal(merged.aircraftRegistration, "D-AIXD");
   assert.equal(__test__.inboundFlightNeedsDetailResolution(merged.inboundFlight), false);
+});
+
+test("a direct outbound aircraft assignment outranks its inbound aircraft", () => {
+  const outbound = __test__.normalizeRecordFromFlightAware({
+    ident_iata: "LH447",
+    origin: { code_iata: "DEN" },
+    destination: { code_iata: "FRA" },
+    aircraft_type: "A359",
+    registration: "D-AIXL",
+    inbound_fa_flight_id: "DLH446-inbound-instance",
+  });
+  const merged = __test__.mergeResolvedInboundFlight(outbound, {
+    ident_iata: "LH446",
+    aircraft_type: "A359",
+    registration: "D-AIXD",
+  });
+
+  assert.equal(merged.aircraftType, "A359");
+  assert.equal(merged.aircraftRegistration, "D-AIXL");
+  assert.equal(merged.inboundFlight.aircraftRegistration, "D-AIXD");
 });
 
 test("normalizeRecordFromFlightAware converts AeroAPI altitude hundreds to feet", () => {

@@ -981,7 +981,11 @@ function createSharedFlightService({
     let inbound = flight?.normalized_data?.inboundFlight;
     const departureMs = new Date(flight?.estimated_departure_at || flight?.scheduled_departure_at || 0).getTime();
     const untilDepartureMs = departureMs - Date.now();
-    const needsDetails = !inbound?.originAirportIata || !inbound?.estimatedArrival;
+    const needsDetails =
+      !inbound?.originAirportIata ||
+      !inbound?.estimatedArrival ||
+      !inbound?.aircraftType ||
+      !inbound?.aircraftRegistration;
     const needsAlertUpgrade = needsInboundProviderAlertConfigurationUpgrade(inbound, provider);
     if (
       !flight ||
@@ -1014,11 +1018,27 @@ function createSharedFlightService({
           estimatedDeparture: resolved?.estimatedDepartureAt || resolved?.scheduledDepartureAt || inbound.estimatedDeparture || null,
           actualDeparture: resolved?.actualDepartureAt || inbound.actualDeparture || null,
           status: resolved?.status || inbound.status || null,
+          aircraftType: resolved?.aircraftType || inbound.aircraftType || null,
+          aircraftRegistration:
+            resolved?.aircraftRegistration || inbound.aircraftRegistration || null,
           detailsLookupAttemptedAt: new Date().toISOString(),
+        };
+        const normalizedData = {
+          ...(flight.normalized_data || {}),
+          // AeroAPI can assign the tail to the inbound instance before it
+          // appears on the outbound schedule. Promote that assignment for the
+          // booked-flight card, while preserving any direct outbound value.
+          aircraftType:
+            flight.normalized_data?.aircraftType || inbound.aircraftType || null,
+          aircraftRegistration:
+            flight.normalized_data?.aircraftRegistration ||
+            inbound.aircraftRegistration ||
+            null,
+          inboundFlight: inbound,
         };
         flight = await repository.updateFlight({
           ...flight,
-          normalized_data: { ...(flight.normalized_data || {}), inboundFlight: inbound },
+          normalized_data: normalizedData,
         });
         await repository.logApiUsage({
           provider: provider.name,

@@ -1436,6 +1436,20 @@ function normalizeRecordFromFlightAware(record) {
       record?.inbound_origin ||
       record?.inbound_origin_airport
   );
+  const inboundAircraftType = normalizeAircraftType(
+    record?.inbound_aircraft_type ||
+      record?.inbound_aircraftType ||
+      record?.inbound_equipment ||
+      record?.inbound_aircraft?.type ||
+      record?.inbound_aircraft?.iata ||
+      record?.inbound_aircraft?.icao
+  );
+  const inboundAircraftRegistration = normalizeAircraftRegistration(
+    record?.inbound_registration ||
+      record?.inbound_aircraft_registration ||
+      record?.inbound_tail_number ||
+      record?.inbound_aircraft?.registration
+  );
 
   const inboundFlight = inboundFlightNumber || inboundOrigin || inboundProviderFlightId
     ? {
@@ -1455,6 +1469,8 @@ function normalizeRecordFromFlightAware(record) {
         ),
         actualDeparture: isoOrNull(record?.inbound_actual_out || record?.inbound_actual_off),
         status: record?.inbound_status ? normalizeStatus(record?.inbound_status) : null,
+        aircraftType: inboundAircraftType,
+        aircraftRegistration: inboundAircraftRegistration,
       }
     : null;
 
@@ -3768,7 +3784,9 @@ function inboundFlightNeedsDetailResolution(inboundFlight) {
         !inboundFlight.originAirportIata ||
         !inboundFlight.destinationAirportIata ||
         !inboundFlight.estimatedArrival ||
-        !inboundFlight.status
+        !inboundFlight.status ||
+        !inboundFlight.aircraftType ||
+        !inboundFlight.aircraftRegistration
       )
   );
 }
@@ -3795,8 +3813,20 @@ function mergeResolvedInboundFlight(normalized, resolvedRecord) {
     resolved.takeoffTimes?.scheduled ||
     null;
 
+  const resolvedAircraftType = resolved.aircraftType || inboundFlight.aircraftType || null;
+  const resolvedAircraftRegistration =
+    resolved.aircraftRegistration || inboundFlight.aircraftRegistration || null;
+
   return {
     ...normalized,
+    // Before departure AeroAPI often puts the operating airframe only on the
+    // exact inbound instance (Flighty's "Where's My Plane?"). That is the
+    // aircraft assigned to this outbound flight, so expose it on the parent
+    // until the outbound instance publishes its own assignment. A direct
+    // outbound value always wins, including after an aircraft swap.
+    aircraftType: normalized.aircraftType || resolvedAircraftType,
+    aircraftRegistration:
+      normalized.aircraftRegistration || resolvedAircraftRegistration,
     inboundFlight: {
       ...inboundFlight,
       flightNumber: resolved.flightNumber || inboundFlight.flightNumber || null,
@@ -3816,6 +3846,8 @@ function mergeResolvedInboundFlight(normalized, resolvedRecord) {
         inboundFlight.actualDeparture ||
         null,
       status: resolved.status || inboundFlight.status || null,
+      aircraftType: resolvedAircraftType,
+      aircraftRegistration: resolvedAircraftRegistration,
     },
   };
 }
