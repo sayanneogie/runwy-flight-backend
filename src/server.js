@@ -7259,7 +7259,10 @@ async function syncBridgedTrackingStateFromSharedFlight(flight) {
       and uf.user_id = ts.owner_user_id
       and uf.deleted_at is null
       and coalesce(uf.lifecycle_state, '') <> 'deleted'
-     where ts.metadata_json->>'sharedFlightInstanceId' = $1
+     where (
+       ts.metadata_json->>'sharedFlightInstanceId' = $1
+       or uf.flight_instance_id = $1::uuid
+     )
      order by ts.id, uf.updated_at desc`,
     [flightInstanceId]
   );

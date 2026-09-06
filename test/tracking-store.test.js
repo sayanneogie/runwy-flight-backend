@@ -165,6 +165,46 @@ test("tracking snapshot upserts reactivate a previously deleted bridge row", asy
   assert.match(bridgeUpsert.sql, /on conflict \(user_id, tracking_session_id\)[\s\S]*deleted_at = null/);
 });
 
+test("tracking bridge persists canonical landed, arrival, and baggage state for app sync", async () => {
+  const { store, queries } = makeStore();
+  const flightInstanceId = "33333333-3333-4333-8333-333333333333";
+  await store.persistTrackingSnapshot({
+    flightId: "11111111-1111-1111-1111-111111111111",
+    userId: "22222222-2222-2222-2222-222222222222",
+    query: { flightNumber: "UA769", date: "2026-09-05", departureIata: "ORD", arrivalIata: "BCN" },
+    normalized: makeNormalized({
+      flightInstanceId,
+      airlineCode: "UA",
+      flightNumber: "UA769",
+      departureAirportIata: "ORD",
+      arrivalAirportIata: "BCN",
+      arrivalTimes: { actual: "2026-09-06T13:10:55.000Z" },
+      arrivalTerminal: "1",
+      arrivalGate: "A12",
+      baggageClaim: "15",
+      status: "landed",
+    }),
+    provider: "flightaware",
+    providerFlightId: "UAL769-test",
+    rawProviderPayload: {},
+  });
+
+  const bridgeUpsert = queries.find(({ sql }) => sql.includes("insert into public.user_flights"));
+  assert.ok(bridgeUpsert, "expected tracking bridge upsert");
+  assert.match(bridgeUpsert.sql, /flight_instance_id/);
+  assert.match(bridgeUpsert.sql, /arrival_terminal/);
+  assert.match(bridgeUpsert.sql, /arrival_gate/);
+  assert.match(bridgeUpsert.sql, /baggage_claim/);
+  assert.match(bridgeUpsert.sql, /flight_instance_id = coalesce/);
+  assert.equal(bridgeUpsert.params[2], flightInstanceId);
+  assert.equal(bridgeUpsert.params[3], "landed");
+  assert.equal(bridgeUpsert.params[13], "2026-09-06T13:10:55.000Z");
+  assert.equal(bridgeUpsert.params[16], "1");
+  assert.equal(bridgeUpsert.params[17], "A12");
+  assert.equal(bridgeUpsert.params[18], "15");
+  assert.equal(bridgeUpsert.params[20], "landed");
+});
+
 test("terminal snapshots expose actual breadcrumbs for archive persistence", () => {
   const points = [
     { latitude: 41.8, longitude: 12.2 },
