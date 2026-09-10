@@ -64,6 +64,8 @@ function mountSharedFlightRoutes(app, service) {
     if ("notificationEnabled" in body) patch.notification_enabled = body.notificationEnabled === true;
     if ("alert_preferences" in body) patch.alert_preferences = body.alert_preferences;
     if ("alertPreferences" in body) patch.alert_preferences = body.alertPreferences;
+    if ("alert_settings_json" in body) patch.alert_settings_json = body.alert_settings_json;
+    if ("alertSettings" in body) patch.alert_settings_json = body.alertSettings;
     if ("user_label" in body) patch.user_label = body.user_label;
     if ("userLabel" in body) patch.user_label = body.userLabel;
     if ("visibility" in body) patch.visibility = body.visibility;

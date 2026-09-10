@@ -11,6 +11,56 @@ const DEFAULT_ALERT_PREFERENCES = Object.freeze({
   critical: true,
 });
 
+// Product notification categories are independent from legacy severity buckets.
+// Prefer the detailed per-category setting whenever it is present, falling back
+// to severity only for older rows that predate detailed settings.
+function ownerAlertSettingForEventType(eventType) {
+  switch (String(eventType || "").toUpperCase()) {
+    case "DELAYED":
+    case "RESCHEDULED":
+    case "CANCELLED":
+    case "DIVERTED":
+      return "delayUpdates";
+    case "GATE_CHANGED":
+    case "TERMINAL_CHANGED":
+      return "gateChange";
+    case "BOARDING":
+    case "TRIP_STARTING":
+    case "TAXIING":
+    case "TAKEOFF_ROLL":
+    case "DEPARTED":
+    case "AIRBORNE":
+      return "boardingTime";
+    case "LANDED":
+    case "ARRIVED":
+    case "TAXI_IN":
+    case "ARRIVED_AT_GATE":
+      return "takeoffLanding";
+    case "BAGGAGE_BELT_ASSIGNED":
+    case "BAGGAGE_BELT_CHANGED":
+      return "baggageClaim";
+    case "INBOUND_DEPARTED":
+    case "INBOUND_ARRIVED":
+    case "INBOUND_CANCELLED":
+    case "INBOUND_DIVERTED":
+    case "AIRCRAFT_CHANGED":
+    case "WEATHER_ADVISORY":
+      return "inboundAircraft";
+    case "FLIGHT_PLAN_AVAILABLE":
+    case "FLIGHT_PLAN_CHANGED":
+      return "flightPlans";
+    default:
+      return null;
+  }
+}
+
+function ownerAlertIsEnabled(userFlight, severity, eventType) {
+  const setting = ownerAlertSettingForEventType(eventType);
+  const detailedValue = setting ? userFlight.alert_settings_json?.[setting] : undefined;
+  if (typeof detailedValue === "boolean") return detailedValue;
+  return userFlight.alert_preferences?.[severity] !== false;
+}
+
 // Events that never reached fanout are safe to recover after a short outage or
 // deploy, but replaying older operational changes creates a misleading burst of
 // takeoff, delay, baggage, and arrival alerts for flights that are already over.
@@ -335,7 +385,12 @@ function createMemorySharedFlightRepository() {
         provider_name: flight.provider || null,
         provider_flight_id: flight.provider_flight_id || null,
         notifications_enabled: input.notificationEnabled ?? true,
-        alert_settings_json: input.alertPreferences || DEFAULT_ALERT_PREFERENCES,
+        alert_settings_json:
+          input.alertSettings ||
+          input.alertSettingsJson ||
+          input.alert_settings_json ||
+          input.alertPreferences ||
+          DEFAULT_ALERT_PREFERENCES,
         added_at: userFlights.get(key)?.added_at || new Date().toISOString(),
         created_at: userFlights.get(key)?.created_at || new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -495,9 +550,8 @@ function createMemorySharedFlightRepository() {
           row.lifecycle_state !== "deleted" &&
           !hasNewerDeletedOccurrence([...userFlights.values()], row) &&
           row.notification_enabled !== false &&
-          row.alert_preferences?.[severity] !== false &&
-          (eventType !== "TRIP_STARTING" || row.source_type !== "tracked") &&
-          (!String(eventType || "").startsWith("INBOUND_") || row.alert_settings_json?.takeoffLanding !== false)
+          ownerAlertIsEnabled(row, severity, eventType) &&
+          (eventType !== "TRIP_STARTING" || row.source_type !== "tracked")
         )
         .map((userFlight) => ({
           userFlight,
@@ -1226,7 +1280,7 @@ function createPostgresSharedFlightRepository(pool) {
            fi.provider,
            fi.provider_flight_id,
            $3,
-           $4
+           coalesce($13::jsonb, $4::jsonb)
          from public.flight_instances fi
          where fi.id = $2
          on conflict (user_id, flight_instance_id) where flight_instance_id is not null do update set
@@ -1271,6 +1325,7 @@ function createPostgresSharedFlightRepository(pool) {
           input.destination || null,
           [input.airline, input.number || input.flightNumber].filter(Boolean).join(" ").trim() || null,
           input.scheduledDeparture || input.date || null,
+          input.alertSettings || input.alertSettingsJson || input.alert_settings_json || null,
         ]
       ));
     },
@@ -1306,10 +1361,19 @@ function createPostgresSharedFlightRepository(pool) {
           alert_preferences = coalesce($4, alert_preferences),
           user_label = coalesce($5, user_label),
           visibility = coalesce($6, visibility),
+          alert_settings_json = coalesce($7, alert_settings_json),
           updated_at = now()
          where user_id = $1 and id = $2
          returning *`,
-        [userId, id, patch.notification_enabled, patch.alert_preferences, patch.user_label, patch.visibility]
+        [
+          userId,
+          id,
+          patch.notification_enabled,
+          patch.alert_preferences,
+          patch.user_label,
+          patch.visibility,
+          patch.alert_settings_json,
+        ]
       ));
     },
     async markUserFlightsDisplayed(userId, ids) {
@@ -1462,9 +1526,10 @@ function createPostgresSharedFlightRepository(pool) {
     },
     async listNotificationTargets(flightInstanceId, severity, eventType) {
       const circleCondition = circleNotificationPreferenceConditionForEventType(eventType);
-      const ownerCondition = String(eventType || "").startsWith("INBOUND_")
-        ? "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true"
-        : "true";
+      const ownerSetting = ownerAlertSettingForEventType(eventType);
+      const ownerCondition = ownerSetting
+        ? `coalesce((uf.alert_settings_json ->> '${ownerSetting}')::boolean, (uf.alert_preferences ->> $2)::boolean, false) = true`
+        : "coalesce((uf.alert_preferences ->> $2)::boolean, false) = true";
       const tripStartingCondition = eventType === "TRIP_STARTING"
         ? "and coalesce(uf.source_type, 'tracked') <> 'tracked'"
         : "";
@@ -1505,7 +1570,6 @@ function createPostgresSharedFlightRepository(pool) {
                  and upper(coalesce(deleted_uf.destination_iata, '')) = upper(coalesce(uf.destination_iata, ''))
                  and abs(extract(epoch from (deleted_uf.scheduled_departure - uf.scheduled_departure))) <= 1800
              )
-             and coalesce((uf.alert_preferences ->> $2)::boolean, false) = true
              and ${ownerCondition}
              ${tripStartingCondition}
          ),
@@ -1950,6 +2014,7 @@ function circleNotificationPreferenceConditionForEventType(eventType) {
     case "RESCHEDULED":
       return "fp.notify_delay = true";
     case "GATE_CHANGED":
+    case "TERMINAL_CHANGED":
       return "fp.notify_gate_change = true";
     case "DEPARTED":
     case "AIRBORNE":

@@ -1352,6 +1352,11 @@ function normalizeRecordFromAviationstack(record) {
         record?.tailNumber ||
         record?.aircraft?.registration
     ),
+    flightPlanRoute: firstNonBlank(
+      record?.route,
+      record?.flight_plan,
+      record?.filed_route
+    ),
     status: normalizeStatus(record?.flight_status),
     departureTerminal: firstNonBlank(departure.terminal, departure.terminal_name),
     departureGate: firstNonBlank(departure.gate, departure.gate_name),
@@ -1516,6 +1521,11 @@ function normalizeRecordFromFlightAware(record) {
         record?.tail_number ||
         record?.tailNumber ||
         record?.aircraft?.registration
+    ),
+    flightPlanRoute: firstNonBlank(
+      record?.route,
+      record?.flight_plan,
+      record?.filed_route
     ),
     status: normalizeStatus(record?.status || record?.flight_status),
     departureTerminal: firstNonBlank(
@@ -1742,6 +1752,11 @@ function pseudoFlightAwareRecordFromFirehoseMessage(message, previousNormalized)
     ident: message?.ident,
     ident_iata: message?.ident,
     fa_flight_id: firehoseMessageProviderFlightId(message),
+    route:
+      message?.route ||
+      message?.flightplan ||
+      message?.flight_plan ||
+      null,
     origin_iata: normalizeFirehoseAirportCode(message?.orig, fallbackDepartureIata),
     destination_iata: normalizeFirehoseAirportCode(message?.dest, fallbackArrivalIata),
     scheduled_out: message?.scheduled_out || message?.fdt || message?.scheduled_departure_time,
@@ -5079,20 +5094,32 @@ function shouldOfferReliableBaggageNotification(normalized) {
 function ownerNotificationPreferenceConditionForEventType(eventType) {
   switch (eventType) {
     case "flight_delayed":
+    case "flight_cancelled":
+    case "flight_diverted":
       return "coalesce((uf.alert_settings_json ->> 'delayUpdates')::boolean, true) = true";
     case "flight_gate_change":
+    case "flight_terminal_change":
       return "coalesce((uf.alert_settings_json ->> 'gateChange')::boolean, true) = true";
     case "flight_departed":
-    case "flight_arrived":
     case "flight_takeoff_roll":
     case "flight_taxiing":
+    case "flight_boarding":
+    case "flight_trip_starting":
+      return "coalesce((uf.alert_settings_json ->> 'boardingTime')::boolean, true) = true";
+    case "flight_arrived":
+      return "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true";
     case "flight_inbound_arrived":
     case "flight_inbound_departed":
     case "flight_inbound_cancelled":
     case "flight_inbound_diverted":
-      return "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true";
+    case "flight_aircraft_changed":
+    case "flight_weather_advisory":
+      return "coalesce((uf.alert_settings_json ->> 'inboundAircraft')::boolean, true) = true";
     case "flight_baggage_claim":
       return "coalesce((uf.alert_settings_json ->> 'baggageClaim')::boolean, true) = true";
+    case "flight_plan_available":
+    case "flight_plan_changed":
+      return "coalesce((uf.alert_settings_json ->> 'flightPlans')::boolean, true) = true";
     default:
       return "true";
   }

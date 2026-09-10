@@ -83,6 +83,14 @@ function minutesBetween(a, b) {
   return Math.round((right - left) / 60000);
 }
 
+function normalizedFlightPlanRoute(state) {
+  const normalized = state?.normalized_data || state?.normalizedData || state || {};
+  return String(normalized.flightPlanRoute || normalized.filedRoute || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toUpperCase();
+}
+
 function isFinalStatus(status) {
   return FINAL_STATUSES.has(String(status || "").toLowerCase());
 }
@@ -633,6 +641,7 @@ function compareFlightState(oldState, newState, nowMs = Date.now()) {
   if (newStatus !== oldStatus && changedOperationalPhase) {
     if (newStatus === "cancelled") push("CANCELLED", "critical", { status: oldStatus }, { status: newStatus }, "Flight has been cancelled", true);
     else if (newStatus === "diverted") push("DIVERTED", "critical", { status: oldStatus }, { status: newStatus, originalDestination, diversionAirport: newDiversion === "UNKNOWN" ? null : newDiversion }, newDiversion !== "UNKNOWN" ? `Flight diverted to ${newDiversion}` : "Flight has been diverted", true);
+    else if (newStatus === "boarding") push("BOARDING", "low", { status: oldStatus }, { status: newStatus }, "Boarding has started", within24h);
     else if (["taxiing", "taxi_out"].includes(newStatus)) push("TAXIING", "medium", { status: oldStatus }, { status: newStatus }, "Flight is taxiing", true);
     else if (newStatus === "takeoff_roll") push("TAKEOFF_ROLL", "high", { status: oldStatus }, { status: newStatus }, "Flight is about to take off", true);
     else if (newStatus === "taxi_in") push("TAXI_IN", "low", { status: oldStatus }, { status: newStatus }, "Flight is taxiing to the gate", true);
@@ -726,6 +735,20 @@ function compareFlightState(oldState, newState, nowMs = Date.now()) {
       { baggageBelt: null },
       { baggageBelt: newBaggageBelt },
       `Baggage belt assigned: ${newBaggageBelt}`,
+      true
+    );
+  }
+
+  const oldFlightPlanRoute = normalizedFlightPlanRoute(oldState);
+  const newFlightPlanRoute = normalizedFlightPlanRoute(newState);
+  if (newFlightPlanRoute && newFlightPlanRoute !== oldFlightPlanRoute) {
+    const isChange = Boolean(oldFlightPlanRoute);
+    push(
+      isChange ? "FLIGHT_PLAN_CHANGED" : "FLIGHT_PLAN_AVAILABLE",
+      isChange ? "medium" : "low",
+      { flightPlanRoute: oldFlightPlanRoute || null },
+      { flightPlanRoute: newFlightPlanRoute },
+      isChange ? "Filed flight plan changed" : "Filed flight plan is available",
       true
     );
   }

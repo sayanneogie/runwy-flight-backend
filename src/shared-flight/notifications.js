@@ -35,7 +35,7 @@ function notificationSemanticIdentity(event = {}) {
   if (["DEPARTED", "AIRBORNE"].includes(type)) return { type: "TAKEOFF" };
   if (["LANDED", "ARRIVED"].includes(type)) return { type: "TOUCHDOWN" };
   if (["TAXIING", "TAXI_OUT"].includes(type)) return { type: "TAXI_OUT" };
-  if (["TAKEOFF_ROLL", "TAXI_IN", "ARRIVED_AT_GATE", "TRIP_STARTING", "CANCELLED"].includes(type)) {
+  if (["BOARDING", "TAKEOFF_ROLL", "TAXI_IN", "ARRIVED_AT_GATE", "TRIP_STARTING", "CANCELLED"].includes(type)) {
     return { type };
   }
 
@@ -74,6 +74,12 @@ function notificationSemanticIdentity(event = {}) {
         aircraftType: firstPresent(value, ["aircraftType", "type"]),
         aircraftRegistration: firstPresent(value, ["aircraftRegistration", "registration"]),
       },
+    };
+  }
+  if (["FLIGHT_PLAN_AVAILABLE", "FLIGHT_PLAN_CHANGED"].includes(type)) {
+    return {
+      type,
+      value: firstPresent(value, ["flightPlanRoute", "filedRoute", "route"]),
     };
   }
   if (type.startsWith("INBOUND_")) {
@@ -348,6 +354,9 @@ function notificationTitle(flight, event, context = {}) {
   if (event.event_type === "CANCELLED") return "Flight Cancelled";
   if (event.event_type === "DIVERTED") return "Flight Diverted";
   if (event.event_type === "AIRCRAFT_CHANGED") return "Aircraft Changed";
+  if (event.event_type === "BOARDING") return "Boarding Started";
+  if (event.event_type === "FLIGHT_PLAN_AVAILABLE") return "Flight Plan Available";
+  if (event.event_type === "FLIGHT_PLAN_CHANGED") return "Flight Plan Changed";
   if (event.event_type === "GATE_CHANGED") return "Gate Changed";
   if (event.event_type === "TAXIING") return "Taxiing";
   if (event.event_type === "TAKEOFF_ROLL") return "✈️ Taking Off";
@@ -384,6 +393,13 @@ function notificationBody(flight, event, context = {}) {
   if (event.event_type === "AIRCRAFT_CHANGED") {
     const aircraft = event.new_value?.aircraftType || flight?.normalized_data?.aircraftType;
     return aircraft ? `${code} is now scheduled with ${aircraft}.` : `${code}'s aircraft has changed.`;
+  }
+  if (event.event_type === "BOARDING") return `${subject} has started boarding.`;
+  if (["FLIGHT_PLAN_AVAILABLE", "FLIGHT_PLAN_CHANGED"].includes(event.event_type)) {
+    const filedRoute = String(event.new_value?.flightPlanRoute || "").trim();
+    return filedRoute
+      ? `${code}'s filed route is ${filedRoute}.`
+      : `${code}'s filed flight plan is now available.`;
   }
   if (event.event_type === "GATE_CHANGED") return `${code} gate changed from ${event.old_value?.gate || "unknown"} to ${event.new_value?.gate}.`;
   if (event.event_type === "TAXIING") return `${subject} is taxiing.`;
@@ -447,10 +463,11 @@ function notificationPayload(flight, event, context = {}) {
   const normalized = flight.normalized_data || {};
   const eventType = String(event.event_type || "").toUpperCase();
   const notificationTypeByEvent = {
+    BOARDING: "flight_boarding",
     GATE_CHANGED: "flight_gate_change",
     TERMINAL_CHANGED: "flight_terminal_change",
     TAXIING: "flight_taxiing",
-    TAXI_IN: "flight_taxiing",
+    TAXI_IN: "flight_arrived",
     TAKEOFF_ROLL: "flight_takeoff_roll",
     DEPARTED: "flight_departed",
     AIRBORNE: "flight_departed",
@@ -461,6 +478,14 @@ function notificationPayload(flight, event, context = {}) {
     RESCHEDULED: "flight_delayed",
     CANCELLED: "flight_cancelled",
     DIVERTED: "flight_diverted",
+    AIRCRAFT_CHANGED: "flight_aircraft_changed",
+    INBOUND_DEPARTED: "flight_inbound_departed",
+    INBOUND_ARRIVED: "flight_inbound_arrived",
+    INBOUND_CANCELLED: "flight_inbound_cancelled",
+    INBOUND_DIVERTED: "flight_inbound_diverted",
+    FLIGHT_PLAN_AVAILABLE: "flight_plan_available",
+    FLIGHT_PLAN_CHANGED: "flight_plan_changed",
+    WEATHER_ADVISORY: "flight_weather_advisory",
     BAGGAGE_BELT_ASSIGNED: "flight_baggage_claim",
   };
   const departureGate = String(

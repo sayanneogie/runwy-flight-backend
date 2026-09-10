@@ -122,22 +122,22 @@ test("delay notifications are suppressed for landed flights", () => {
   assert.equal(alerts.arrivedNow, true);
 });
 
-test("owner arrival notifications honor takeoff and landing alert preferences", () => {
+test("owner flight milestones honor their visible alert categories", () => {
   assert.equal(
     __test__.ownerNotificationPreferenceConditionForEventType("flight_arrived"),
     "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true"
   );
   assert.equal(
     __test__.ownerNotificationPreferenceConditionForEventType("flight_departed"),
-    "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true"
+    "coalesce((uf.alert_settings_json ->> 'boardingTime')::boolean, true) = true"
   );
   assert.equal(
     __test__.ownerNotificationPreferenceConditionForEventType("flight_takeoff_roll"),
-    "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true"
+    "coalesce((uf.alert_settings_json ->> 'boardingTime')::boolean, true) = true"
   );
   assert.equal(
     __test__.ownerNotificationPreferenceConditionForEventType("flight_taxiing"),
-    "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true"
+    "coalesce((uf.alert_settings_json ->> 'boardingTime')::boolean, true) = true"
   );
 });
 
@@ -160,10 +160,29 @@ test("flight circle recipients honor departure and arrival alert toggles", () =>
   );
 });
 
-test("owner inbound-aircraft notifications honor takeoff and landing alert preferences", () => {
+test("owner inbound-aircraft notifications honor Above & Beyond preferences", () => {
   assert.equal(
     __test__.ownerNotificationPreferenceConditionForEventType("flight_inbound_arrived"),
-    "coalesce((uf.alert_settings_json ->> 'takeoffLanding')::boolean, true) = true"
+    "coalesce((uf.alert_settings_json ->> 'inboundAircraft')::boolean, true) = true"
+  );
+});
+
+test("owner operational alert types map to the remaining visible categories", () => {
+  assert.equal(
+    __test__.ownerNotificationPreferenceConditionForEventType("flight_cancelled"),
+    "coalesce((uf.alert_settings_json ->> 'delayUpdates')::boolean, true) = true"
+  );
+  assert.equal(
+    __test__.ownerNotificationPreferenceConditionForEventType("flight_aircraft_changed"),
+    "coalesce((uf.alert_settings_json ->> 'inboundAircraft')::boolean, true) = true"
+  );
+  assert.equal(
+    __test__.ownerNotificationPreferenceConditionForEventType("flight_plan_available"),
+    "coalesce((uf.alert_settings_json ->> 'flightPlans')::boolean, true) = true"
+  );
+  assert.equal(
+    __test__.ownerNotificationPreferenceConditionForEventType("flight_baggage_claim"),
+    "coalesce((uf.alert_settings_json ->> 'baggageClaim')::boolean, true) = true"
   );
 });
 

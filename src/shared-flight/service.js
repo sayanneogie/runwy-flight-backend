@@ -273,6 +273,7 @@ function preserveKnownOperationalFields(normalized, row) {
     ),
     arrivalGate: preferred(normalized?.arrivalGate, previous.arrivalGate),
     arrivalTerminal: preferred(normalized?.arrivalTerminal, previous.arrivalTerminal),
+    flightPlanRoute: preferred(normalized?.flightPlanRoute, previous.flightPlanRoute),
     baggageBelt: preferred(
       normalized?.baggageBelt,
       row?.baggage_belt ?? previous.baggageBelt
@@ -2289,6 +2290,8 @@ function apnsRetryAt(attemptCount) {
 
 function sharedNotificationType(eventType) {
   switch (String(eventType || "").toUpperCase()) {
+    case "BOARDING":
+      return "flight_boarding";
     case "DELAYED":
     case "RESCHEDULED":
       return "flight_delayed";
@@ -2298,10 +2301,15 @@ function sharedNotificationType(eventType) {
       return "flight_diverted";
     case "AIRCRAFT_CHANGED":
       return "flight_aircraft_changed";
+    case "FLIGHT_PLAN_AVAILABLE":
+      return "flight_plan_available";
+    case "FLIGHT_PLAN_CHANGED":
+      return "flight_plan_changed";
     case "GATE_CHANGED":
       return "flight_gate_change";
+    case "TERMINAL_CHANGED":
+      return "flight_terminal_change";
     case "TAXIING":
-    case "TAXI_IN":
       return "flight_taxiing";
     case "TAKEOFF_ROLL":
       return "flight_takeoff_roll";
@@ -2321,6 +2329,7 @@ function sharedNotificationType(eventType) {
     case "LANDED":
     case "ARRIVED":
     case "ARRIVED_AT_GATE":
+    case "TAXI_IN":
       return "flight_arrived";
     case "BAGGAGE_BELT_ASSIGNED":
       return "flight_baggage_claim";

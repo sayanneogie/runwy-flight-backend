@@ -58,6 +58,40 @@ test("diversion keeps the booked route identity and records the operational airp
   assert.equal(db.normalized_data.diversionAirport, "FAR");
 });
 
+test("boarding and filed-route changes emit their dedicated alert events", () => {
+  const now = Date.parse("2026-09-10T08:00:00.000Z");
+  const boardingEvents = compareFlightState(
+    {
+      status: "scheduled",
+      scheduled_departure_at: "2026-09-10T12:00:00.000Z",
+      normalized_data: {},
+    },
+    {
+      status: "boarding",
+      scheduled_departure_at: "2026-09-10T12:00:00.000Z",
+      normalized_data: { flightPlanRoute: "DCT ALPHA BRAVO" },
+    },
+    now
+  );
+
+  assert.equal(boardingEvents.find((event) => event.event_type === "BOARDING")?.notification_required, true);
+  assert.equal(boardingEvents.find((event) => event.event_type === "FLIGHT_PLAN_AVAILABLE")?.event_severity, "low");
+
+  const changedEvents = compareFlightState(
+    {
+      status: "scheduled",
+      normalized_data: { flightPlanRoute: "DCT ALPHA BRAVO" },
+    },
+    {
+      status: "scheduled",
+      normalized_data: { flightPlanRoute: "DCT ALPHA CHARLIE" },
+    },
+    now
+  );
+
+  assert.equal(changedEvents.find((event) => event.event_type === "FLIGHT_PLAN_CHANGED")?.notification_required, true);
+});
+
 test("canonical stream ordering rejects replayed events but accepts equal or newer events", () => {
   const current = "2026-09-01T12:30:00.000Z";
   assert.equal(isOlderStreamEvent(current, "2026-09-01T12:29:59.000Z"), true);
@@ -968,6 +1002,41 @@ test("gate change only emits on real change and respects alert preferences", asy
   assert.equal(repository.__memory.deliveries.size, 0);
 });
 
+test("owner alert categories do not leak through shared severity buckets", async () => {
+  const repository = createMemorySharedFlightRepository();
+  const row = await repository.upsertFlightFromNormalized(
+    normalizedFlight(),
+    { airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" },
+    "2026-05-27T00:00:00.000Z"
+  );
+  const userFlight = await repository.upsertUserFlight("u1", row.id, {
+    alertPreferences: { low: true, medium: true, high: true, critical: true },
+    alertSettings: {
+      gateChange: false,
+      delayUpdates: false,
+      boardingTime: false,
+      takeoffLanding: true,
+      baggageClaim: false,
+      inboundAircraft: false,
+      flightPlans: false,
+    },
+  });
+
+  assert.equal((await repository.listNotificationTargets(row.id, "medium", "LANDED")).length, 1);
+  assert.equal((await repository.listNotificationTargets(row.id, "medium", "GATE_CHANGED")).length, 0);
+  assert.equal((await repository.listNotificationTargets(row.id, "critical", "CANCELLED")).length, 0);
+  assert.equal((await repository.listNotificationTargets(row.id, "medium", "INBOUND_ARRIVED")).length, 0);
+  assert.equal((await repository.listNotificationTargets(row.id, "low", "FLIGHT_PLAN_AVAILABLE")).length, 0);
+
+  userFlight.alert_settings_json.takeoffLanding = false;
+  userFlight.alert_settings_json.inboundAircraft = true;
+  userFlight.alert_settings_json.flightPlans = true;
+
+  assert.equal((await repository.listNotificationTargets(row.id, "medium", "LANDED")).length, 0);
+  assert.equal((await repository.listNotificationTargets(row.id, "medium", "INBOUND_ARRIVED")).length, 1);
+  assert.equal((await repository.listNotificationTargets(row.id, "low", "FLIGHT_PLAN_AVAILABLE")).length, 1);
+});
+
 test("newly saved user flights receive low severity travel notifications by default", async () => {
   const sent = [];
   const { service, repository } = makeService(normalizedFlight(), {
@@ -1455,6 +1524,7 @@ test("Postgres shared-flight upsert clears tombstones and notification lookup fo
   assert.match(statements[0], /on conflict[\s\S]*deleted_at = null/i);
   assert.match(statements[1], /sharedFlightInstanceId/);
   assert.match(statements[2], /sharedFlightInstanceId/);
+  assert.match(statements[2], /alert_settings_json[\s\S]*takeoffLanding/);
   assert.match(statements[2], /deleted_uf\.deleted_at > greatest/);
   assert.match(statements[3], /set updated_at = clock_timestamp\(\)/);
 });
