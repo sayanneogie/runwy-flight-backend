@@ -266,7 +266,7 @@ const FLIGHTAWARE_AUTO_ALERT_EVENTS = Object.freeze({
   // airborne while it is still taxiing.
   departure: false,
   diverted: true,
-  filed: true,
+  filed: false,
   out: true,
   off: true,
   on: true,
@@ -274,9 +274,11 @@ const FLIGHTAWARE_AUTO_ALERT_EVENTS = Object.freeze({
   hold_start: false,
   hold_end: false,
 });
-const FLIGHTAWARE_AUTO_ALERT_IMPENDING_DEPARTURE_MINUTES = Object.freeze([120, 60, 15]);
+// Runwy owns the durable three-hour reminder; provider countdown callbacks
+// would incur charges even when notification deduplication suppresses them.
+const FLIGHTAWARE_AUTO_ALERT_IMPENDING_DEPARTURE_MINUTES = Object.freeze([]);
 const FLIGHTAWARE_AUTO_ALERT_IMPENDING_ARRIVAL_MINUTES = Object.freeze([30]);
-const FLIGHTAWARE_ALERT_CONFIGURATION_CHANGED_AT = "2026-09-03T09:05:12.000Z";
+const FLIGHTAWARE_ALERT_CONFIGURATION_CHANGED_AT = "2026-09-13T23:15:14.000Z";
 let flightAwareAlertEndpointReadyURL = null;
 let flightAwareAlertEndpointPromise = null;
 

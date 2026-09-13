@@ -288,6 +288,12 @@ test("FlightAware alert payload uses canonical ident/origin/destination keys", (
   assert.ok(!("destination_iata" in payload));
   assert.equal(payload.events.out, true);
   assert.equal(payload.events.in, true);
+  assert.deepEqual(payload.impending_departure, []);
+  assert.deepEqual(payload.impending_arrival, [30]);
+  assert.equal(payload.events.filed, false);
+  for (const event of ["arrival", "cancelled", "diverted", "off", "on"]) {
+    assert.equal(payload.events[event], true, `${event} coverage must remain enabled`);
+  }
 });
 
 test("FlightAware alert payload prefers the exact provider flight id", () => {
