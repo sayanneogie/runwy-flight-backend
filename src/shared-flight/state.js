@@ -119,7 +119,9 @@ function reconcileDiversionContext(normalized, requested = {}, existingRow = nul
   const providerSaysDiverted = String(
     normalized.providerStatus || normalized.status || normalized.statusDetail || ""
   ).toLowerCase().includes("divert");
-  const destinationChangedAfterDeparture = Boolean(existingRow) &&
+  const sameProviderOccurrence = Boolean(existingRow?.provider_flight_id) &&
+    normalized.providerFlightId === existingRow.provider_flight_id;
+  const destinationChangedAfterDeparture = sameProviderOccurrence &&
     bookedDestination !== "UNKNOWN" &&
     incomingDestination !== "UNKNOWN" &&
     incomingDestination !== bookedDestination &&
@@ -576,6 +578,15 @@ function validateProviderFlight(normalized, requested, existingRow = null) {
   if (scheduledDate) {
     const dayDelta = Math.abs((Date.parse(`${scheduledDate}T00:00:00Z`) - Date.parse(`${requested.date}T00:00:00Z`)) / 864e5);
     if (dayDelta > 1) problems.push("departure_date_mismatch");
+    // A replacement provider ID must refer to the same scheduled occurrence,
+    // not tomorrow's service with the same number and route. Estimates may
+    // move freely; the original scheduled departure anchors identity.
+    const previousDeparture = Date.parse(existingRow?.scheduled_departure_at || "");
+    if (existingRow && normalized.providerFlightId !== existingRow.provider_flight_id &&
+        Number.isFinite(previousDeparture) &&
+        Math.abs(Date.parse(normalized.scheduledDepartureAt) - previousDeparture) > 6 * 60 * 60_000) {
+      problems.push("occurrence_mismatch");
+    }
   }
   if (requested.origin !== "UNKNOWN" && normalizeAirport(normalized.origin) !== requested.origin) problems.push("origin_mismatch");
   if (requested.destination !== "UNKNOWN" && normalizeAirport(normalized.destination) !== requested.destination && normalized.isDiverted !== true) problems.push("destination_mismatch");
@@ -584,7 +595,7 @@ function validateProviderFlight(normalized, requested, existingRow = null) {
   }
 
   const suspicious = problems.some((problem) =>
-    ["airline_mismatch", "flight_number_mismatch", "departure_date_mismatch", "provider_error_payload", "arrival_before_departure"].includes(problem)
+    ["airline_mismatch", "flight_number_mismatch", "departure_date_mismatch", "provider_error_payload", "arrival_before_departure", "origin_mismatch", "destination_mismatch", "weak_identifiers", "occurrence_mismatch"].includes(problem)
   );
   const downgraded = problems.some((problem) => ["origin_mismatch", "destination_mismatch", "weak_identifiers"].includes(problem));
   return {

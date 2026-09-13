@@ -63,6 +63,7 @@ function normalizeProviderRecord(record, normalizeRecord, providerName, params) 
     : rawFlightNumber.replace(/^[A-Z]+/, "");
   return {
     flightKey: null,
+    providerObservedAt: record?.__runwyFetchedAt || normalized.providerObservedAt || null,
     providerFlightId: normalized.providerFlightId || record?.fa_flight_id || record?.flight_id || null,
     airlineCode,
     flightNumber,

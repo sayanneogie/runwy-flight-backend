@@ -243,8 +243,13 @@ function preserveKnownOperationalFields(normalized, row) {
     ? previousStatus
     : normalized?.status;
 
+  const oldPosition = previous.position || previous.livePosition;
+  const newPosition = normalized?.position || normalized?.livePosition;
+  const useOldPosition = oldPosition?.recordedAt &&
+    (!newPosition?.recordedAt || Date.parse(newPosition.recordedAt) < Date.parse(oldPosition.recordedAt));
   return {
     ...normalized,
+    ...(useOldPosition ? { position: oldPosition, livePosition: oldPosition } : {}),
     status: stableStatus,
     trackPoints,
     ...(takeoffTimes ? { takeoffTimes } : {}),
@@ -459,7 +464,7 @@ function createSharedFlightService({
   }
 
   async function refreshFlightJob(job) {
-    const row = job.data.flight_instance_id
+    let row = job.data.flight_instance_id
       ? await repository.findFlightById(job.data.flight_instance_id)
       : await repository.findFlightByKeyOrAlias(job.data.flight_key);
     if (!row || (row.is_final && job.data.reason !== "forced" && !isArrivalDetailsRefreshReason(job.data.reason))) return null;
@@ -468,6 +473,8 @@ function createSharedFlightService({
     if (!lock) return null;
     const startedAt = Date.now();
     try {
+      row = await repository.findFlightById(row.id);
+      if (!row) return null;
       const params = { airline: row.airline_code, number: row.flight_number, date: dateOnly(row.departure_date), origin: row.origin_airport || "UNKNOWN", destination: row.destination_airport || "UNKNOWN", flightKey: row.flight_key };
       params.timezoneOffsetMinutes = row.normalized_data?.timezoneOffsetMinutes ?? null;
       const reason = String(job.data.reason || "");
@@ -485,9 +492,9 @@ function createSharedFlightService({
       const providerOptions = {
         forceRefresh:
           reason === "forced" ||
-          reason === "detail_open" ||
           reason.startsWith("provider_alert_position"),
         skipLivePosition: isOperationalDetailsRefreshReason(job.data.reason),
+        reason,
         ...(usesTrackedFlightReserve ? { budgetEndpoint: "tracked_flight" } : {}),
       };
       let providerNormalized = row.provider_flight_id && provider.supportsProviderId && provider.fetchFlightByProviderId
@@ -590,6 +597,12 @@ function createSharedFlightService({
       }
       if (!providerNormalized) {
         await repository.logApiUsage({ provider: provider.name, endpoint: "refreshFlightJob", flight_key: row.flight_key, response_time_ms: Date.now() - startedAt, error: "no_match" });
+        return row;
+      }
+      // Cached API data cannot undo an event received after that request began.
+      if (providerNormalized.providerObservedAt && row.last_stream_event_at &&
+          Date.parse(providerNormalized.providerObservedAt) < Date.parse(row.last_stream_event_at)) {
+        await repository.logApiUsage({ provider: provider.name, endpoint: "refreshFlightJob", flight_key: row.flight_key, cache_status: "older_than_confirmed_event" });
         return row;
       }
       const normalized = reconcileDiversionContext(

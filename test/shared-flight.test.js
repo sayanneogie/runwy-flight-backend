@@ -27,6 +27,7 @@ const {
 test("diversion keeps the booked route identity and records the operational airport", () => {
   const existing = {
     flight_key: "DL-2307-2026-08-30-MSP-BIS",
+    provider_flight_id: "provider-sq509",
     airline_code: "DL",
     flight_number: "2307",
     departure_date: "2026-08-30",
@@ -3441,4 +3442,59 @@ test("WeatherKit response is normalized into a conservative flight weather insig
   assert.equal(insight.severity, "low");
   assert.equal(insight.notificationRequired, true);
   assert.match(insight.summary, /weather at BLR looks favorable/i);
+});
+
+test("route mismatches and next-day replacements cannot enter shared state", () => {
+  const { validateProviderFlight } = require("../src/shared-flight/state");
+  const params = normalizeSearchParams({ airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" });
+  const existing = mapNormalizedToDb(normalizedFlight(), params);
+  for (const candidate of [
+    normalizedFlight({ origin: "DEL" }),
+    normalizedFlight({ destination: "FCO" }),
+    normalizedFlight({ providerFlightId: "tomorrow", scheduledDepartureAt: "2026-05-28T18:30:00Z", scheduledArrivalAt: "2026-05-29T02:00:00Z" }),
+  ]) assert.equal(validateProviderFlight(candidate, params, existing).ok, false);
+  assert.equal(validateProviderFlight(normalizedFlight({ providerFlightId: "live-replacement" }), params, existing).ok, true);
+});
+
+test("late API result cannot overwrite a newer canonical revision or emit alerts", async () => {
+  const repository = createMemorySharedFlightRepository();
+  const params = normalizeSearchParams({ airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" });
+  const original = await repository.upsertFlightFromNormalized(normalizedFlight(), params, new Date().toISOString());
+  const newer = await repository.commitCanonicalState({ ...original, gate: "A16" }, [], "test");
+  const stale = await repository.commitCanonicalState({ ...original, gate: "A12" }, [{ event_type: "GATE_CHANGED", notification_required: true }], "test");
+  assert.equal(stale.applied, false);
+  assert.equal(stale.flight.gate, "A16");
+  assert.equal(stale.flight.state_revision, newer.flight.state_revision);
+  assert.deepEqual(stale.events, []);
+});
+
+test("queued APNs event retains its confirmed data after another flight update", async () => {
+  const repository = createMemorySharedFlightRepository();
+  const params = normalizeSearchParams({ airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" });
+  const original = await repository.upsertFlightFromNormalized(normalizedFlight(), params, new Date().toISOString());
+  const first = await repository.commitCanonicalState({ ...original, gate: "A16" }, [{ event_type: "GATE_CHANGED", notification_required: true }], "test");
+  await repository.commitCanonicalState({ ...first.flight, gate: "A20" }, [], "test");
+  const notification = await repository.getEventWithFlight(first.events[0].id);
+  assert.equal(notification.flight.gate, "A16");
+  assert.equal((await repository.findFlightById(original.id)).gate, "A20");
+});
+
+test("older telemetry cannot move the shared aircraft backwards", () => {
+  const oldPosition = { lat: 20, lon: 30, recordedAt: "2026-09-14T12:10:00Z" };
+  const merged = preserveKnownOperationalFields(normalizedFlight({ position: { lat: 19, lon: 29, recordedAt: "2026-09-14T12:00:00Z" } }), {
+    normalized_data: { position: oldPosition },
+  });
+  assert.deepEqual(merged.position, oldPosition);
+});
+
+test("cached provider data older than a confirmed event cannot produce new alerts", async () => {
+  const { service, repository } = makeService(normalizedFlight(), {
+    fetchFlightByProviderId: async () => normalizedFlight({ gate: "WRONG", providerObservedAt: "2026-05-27T15:00:00Z" }),
+  });
+  const params = normalizeSearchParams({ airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" });
+  const flight = await repository.upsertFlightFromNormalized(normalizedFlight(), params, new Date().toISOString());
+  await repository.updateFlight({ ...flight, last_stream_event_at: "2026-05-27T15:01:00Z" });
+  const result = await service.refreshFlightJob({ data: { flight_instance_id: flight.id, reason: "api_poll" } });
+  assert.equal(result.gate, "A4");
+  assert.equal(service.queue.jobs.some((job) => job.name === "fanoutNotificationJob"), false);
 });

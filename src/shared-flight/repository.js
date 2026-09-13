@@ -261,6 +261,7 @@ function createMemorySharedFlightRepository() {
     },
     async updateFlight(row) {
       const current = [...flights.values()].find((item) => item.id === row.id);
+      if (current && Number(current.state_revision || 0) !== Number(row.state_revision || 0)) return current;
       const currentStreamMs = new Date(current?.last_stream_event_at || 0).getTime();
       const incomingStreamMs = new Date(row.last_stream_event_at || 0).getTime();
       if (Number.isFinite(currentStreamMs) && currentStreamMs > 0 &&
@@ -278,6 +279,11 @@ function createMemorySharedFlightRepository() {
       return saved;
     },
     async commitCanonicalState(row, eventRows, provider) {
+      const current = [...flights.values()].find((item) => item.id === row.id);
+      if (current && (Number(current.state_revision || 0) !== Number(row.state_revision || 0) ||
+          Date.parse(current.last_stream_event_at || 0) > Date.parse(row.last_stream_event_at || 0))) {
+        return { flight: current, events: [], applied: false };
+      }
       const saved = await this.updateFlight(row);
       const savedEvents = await this.insertEvents(saved.id, eventRows, provider);
       return { flight: saved, events: savedEvents, applied: true };
@@ -312,7 +318,8 @@ function createMemorySharedFlightRepository() {
     async insertSnapshot(_row) {},
     async insertEvents(flightInstanceId, eventRows, provider) {
       return eventRows.map((event) => {
-        const saved = { id: nextId(), flight_instance_id: flightInstanceId, provider, created_at: new Date().toISOString(), ...event };
+        const flight = [...flights.values()].find((item) => item.id === flightInstanceId);
+        const saved = { id: nextId(), flight_instance_id: flightInstanceId, provider, created_at: new Date().toISOString(), ...event, flight_snapshot: flight ? structuredClone(flight) : null };
         events.set(saved.id, saved);
         return saved;
       });
@@ -540,7 +547,7 @@ function createMemorySharedFlightRepository() {
       const event = events.get(eventId);
       if (!event) return null;
       const flight = [...flights.values()].find((row) => row.id === event.flight_instance_id);
-      return { event, flight };
+      return { event, flight: event.flight_snapshot || flight };
     },
     async listNotificationTargets(flightInstanceId, severity, eventType) {
       return [...userFlights.values()]
@@ -740,7 +747,7 @@ function createPostgresSharedFlightRepository(pool) {
     );
   }
 
-  async function updateCanonicalFlight(executor, row) {
+  async function updateCanonicalFlight(executor, row, checkRevision = true) {
     const incomingStreamEventAt = row.last_stream_event_at || null;
     const result = await executor.query(
       `update public.flight_instances set
@@ -758,6 +765,7 @@ function createPostgresSharedFlightRepository(pool) {
         end,
         state_revision=state_revision + 1, updated_at=now()
       where id=$1
+        and ($28::boolean = false or state_revision = $29::bigint)
         and (
           $27::timestamptz is null
           or last_stream_event_at is null
@@ -770,7 +778,7 @@ function createPostgresSharedFlightRepository(pool) {
         row.status, row.status_detail, row.gate, row.terminal, row.baggage_belt, row.position_lat,
         row.position_lon, row.altitude, row.ground_speed, row.heading, row.provider, row.data_confidence,
         row.normalized_data, row.raw_provider_response, row.last_fetched_at, row.fresh_until,
-        row.needs_revalidation, row.is_final, incomingStreamEventAt,
+        row.needs_revalidation, row.is_final, incomingStreamEventAt, checkRevision, Number(row.state_revision || 0),
       ]
     );
     if (result.rows[0]) {
@@ -803,9 +811,10 @@ function createPostgresSharedFlightRepository(pool) {
         `insert into public.flight_events (
           flight_instance_id, event_type, event_severity, old_value, new_value,
           summary, provider, provider_event_time, confidence, notification_required,
-          state_revision
+          state_revision, flight_snapshot
         ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-          coalesce((select state_revision from public.flight_instances where id=$1), 0)
+          coalesce((select state_revision from public.flight_instances where id=$1), 0),
+          (select to_jsonb(fi) from public.flight_instances fi where id=$1)
         ) returning *`,
         [flightInstanceId, event.event_type, event.event_severity, event.old_value || null, event.new_value || null, event.summary || null, provider || null, event.provider_event_time || null, event.confidence || "medium", event.notification_required === true]
       )));
@@ -1100,7 +1109,7 @@ function createPostgresSharedFlightRepository(pool) {
       const client = await pool.connect();
       try {
         await client.query("begin");
-        const committed = await updateCanonicalFlight(client, row);
+        const committed = await updateCanonicalFlight(client, row, true);
         if (!committed.applied || !committed.flight) {
           await client.query("commit");
           return { flight: committed.flight, events: [], applied: false };
@@ -1516,7 +1525,7 @@ function createPostgresSharedFlightRepository(pool) {
     },
     async getEventWithFlight(eventId) {
       const row = one(await pool.query(
-        `select to_jsonb(fe) as event, to_jsonb(fi) as flight
+        `select to_jsonb(fe) as event, coalesce(fe.flight_snapshot, to_jsonb(fi)) as flight
          from public.flight_events fe
          join public.flight_instances fi on fi.id = fe.flight_instance_id
          where fe.id = $1`,

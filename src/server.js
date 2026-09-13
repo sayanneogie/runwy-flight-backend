@@ -1,3 +1,4 @@
+const { createProviderRequestCoordinator, createResponseStore } = require("./provider-request-coordinator");
 require("dotenv").config();
 
 const crypto = require("node:crypto");
@@ -406,6 +407,8 @@ const pool = DATABASE_URL
     })
   : null;
 
+const providerRequestCoordinator = createProviderRequestCoordinator({ store: createResponseStore(pool) });
+
 function flightAwareDailyBudgetLimitForEndpoint(endpoint) {
   if (String(endpoint || "") === "tracked_flight") {
     return FLIGHTAWARE_DAILY_TRACKED_FLIGHT_CALL_LIMIT;
@@ -420,7 +423,23 @@ function flightAwareDailyBudgetLimitForEndpoint(endpoint) {
     (isReservedRequest ? FLIGHTAWARE_DAILY_SEARCH_RESERVE : 0);
 }
 
-async function flightAwareFlightFetch(url, options, { endpoint, units = 1 } = {}) {
+async function flightAwareFlightFetch(url, options, metadata = {}) {
+  const { sharedTtlMs = 0, forceRefresh = false, reason = null, ...usage } = metadata;
+  if (sharedTtlMs > 0 && (options.method || "GET") === "GET") {
+    return providerRequestCoordinator.request(url, {
+      ttlMs: sharedTtlMs, forceRefresh,
+      load: () => flightAwareFlightFetchUncached(url, options, { ...usage, reason }),
+      onReuse: async () => {
+        if (pool) await pool.query(`insert into public.api_usage_logs
+          (provider,endpoint,cache_status,cost_estimate,provider_path,request_reason)
+          values ('flightaware','shared_response','hit',0,$1,$2)`, [new URL(url).pathname, reason]);
+      },
+    });
+  }
+  return flightAwareFlightFetchUncached(url, options, { ...usage, reason });
+}
+
+async function flightAwareFlightFetchUncached(url, options, { endpoint, units = 1, reason = null } = {}) {
   const usageEndpoint = `aeroapi:flight:${String(endpoint || "unknown")}`;
   const estimatedUnits = Math.max(1, Math.round(Number(units) || 1));
   const isSearchRequest = ["operational", "schedules", "historical"].includes(String(endpoint || ""));
@@ -456,7 +475,7 @@ async function flightAwareFlightFetch(url, options, { endpoint, units = 1 } = {}
   let response = null;
   let requestError = null;
   try {
-    response = await fetch(url, options);
+    response = await fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(25_000) });
     return response;
   } catch (error) {
     requestError = error;
@@ -465,14 +484,16 @@ async function flightAwareFlightFetch(url, options, { endpoint, units = 1 } = {}
     if (pool) {
       pool.query(
         `insert into public.api_usage_logs
-           (provider, endpoint, status_code, response_time_ms, cache_status, cost_estimate, error)
-         values ('flightaware', $1, $2, $3, 'outbound', $4, $5)`,
+           (provider, endpoint, status_code, response_time_ms, cache_status, cost_estimate, error, provider_path, request_reason)
+         values ('flightaware', $1, $2, $3, 'outbound', $4, $5, $6, $7)`,
         [
           usageEndpoint,
           response?.status || null,
           Date.now() - startedAt,
           estimatedUnits,
           requestError?.message || null,
+          new URL(url).pathname,
+          reason,
         ]
       ).catch((error) => {
         console.warn("Failed to record FlightAware outbound usage", error?.message || String(error));
@@ -2937,14 +2958,14 @@ async function fetchFlightAwareTrackTrail(providerFlightId, options = {}) {
           Accept: "application/json",
         },
       },
-      { endpoint: flightAwareTelemetryBudgetEndpoint(options, "track") }
+      { endpoint: flightAwareTelemetryBudgetEndpoint(options, "track"), sharedTtlMs: FLIGHTAWARE_POSITION_CACHE_TTL_MS, forceRefresh, reason: options.reason }
     );
 
     if ([400, 401, 403, 404].includes(response.status)) {
       const emptyData = { trackPoints: [], livePosition: null };
       providerCache.set(cacheKey, {
         data: emptyData,
-        expiresAt: now + FLIGHTAWARE_POSITION_CACHE_TTL_MS,
+        expiresAt: Math.min(now + FLIGHTAWARE_POSITION_CACHE_TTL_MS, Date.parse(response.headers.get("x-runwy-cache-expires-at")) || Infinity),
       });
       enforceMapSizeLimit(providerCache, MAX_PROVIDER_CACHE_ENTRIES);
       return emptyData;
@@ -2973,7 +2994,7 @@ async function fetchFlightAwareTrackTrail(providerFlightId, options = {}) {
 
     providerCache.set(cacheKey, {
       data,
-      expiresAt: now + FLIGHTAWARE_POSITION_CACHE_TTL_MS,
+      expiresAt: Math.min(now + FLIGHTAWARE_POSITION_CACHE_TTL_MS, Date.parse(response.headers.get("x-runwy-cache-expires-at")) || Infinity),
     });
     enforceMapSizeLimit(providerCache, MAX_PROVIDER_CACHE_ENTRIES);
     return data;
@@ -3102,6 +3123,7 @@ async function fetchFlightAwareLivePosition(providerFlightId, options = {}) {
           Accept: "application/json",
         },
       }, {
+        sharedTtlMs: FLIGHTAWARE_POSITION_CACHE_TTL_MS, forceRefresh, reason: options.reason,
         endpoint: flightAwareTelemetryBudgetEndpoint(options, (
           path.endsWith("/track")
             ? "track_fallback"
@@ -3136,7 +3158,7 @@ async function fetchFlightAwareLivePosition(providerFlightId, options = {}) {
       if (latestPosition) {
         providerCache.set(cacheKey, {
           data: latestPosition,
-          expiresAt: now + FLIGHTAWARE_POSITION_CACHE_TTL_MS,
+          expiresAt: Math.min(now + FLIGHTAWARE_POSITION_CACHE_TTL_MS, Date.parse(response.headers.get("x-runwy-cache-expires-at")) || Infinity),
         });
         enforceMapSizeLimit(providerCache, MAX_PROVIDER_CACHE_ENTRIES);
         return latestPosition;
@@ -3606,7 +3628,7 @@ async function fetchFlightAwareFlightByProviderId(providerFlightId, options = {}
           Accept: "application/json",
         },
       },
-      { endpoint: options.budgetEndpoint || "flight_instance" }
+      { endpoint: options.budgetEndpoint || "flight_instance", sharedTtlMs: CACHE_TTL_MS, forceRefresh: options.forceRefresh, reason: options.reason }
     );
 
     if (response.status === 404) {
@@ -3621,11 +3643,12 @@ async function fetchFlightAwareFlightByProviderId(providerFlightId, options = {}
     const exact = candidates.find(
       (record) => String(record?.fa_flight_id || "").trim() === normalizedFlightId
     );
-    const data = exact || (String(payload?.fa_flight_id || "").trim() === normalizedFlightId ? payload : null);
+    const matched = exact || (String(payload?.fa_flight_id || "").trim() === normalizedFlightId ? payload : null);
+    const data = matched ? { ...matched, __runwyFetchedAt: response.headers.get("x-runwy-requested-at") || new Date(now).toISOString() } : null;
 
     providerCache.set(cacheKey, {
       data,
-      expiresAt: now + CACHE_TTL_MS,
+      expiresAt: Math.min(now + CACHE_TTL_MS, Date.parse(response.headers.get("x-runwy-cache-expires-at")) || Infinity),
     });
     enforceMapSizeLimit(providerCache, MAX_PROVIDER_CACHE_ENTRIES);
     return data;
@@ -6808,7 +6831,7 @@ function shouldRetryMissingFinalRoute(groupRows) {
   return Date.now() - latestArrivalMs < FINAL_TRAVEL_ROUTE_CAPTURE_AFTER_ARRIVAL_MS;
 }
 
-async function captureFinalTravelRoutes(limit = POLLER_BATCH_SIZE) {
+async function captureFinalTravelRoutes(limit = POLLER_BATCH_SIZE, { allowProviderFetch = PROVIDER_CALLS_ENABLED } = {}) {
   const rows = await claimDueFinalTravelRouteRows(limit);
   if (!rows.length) {
     return { claimed: 0, captured: 0, noTrack: 0, failed: 0, providerCalls: 0 };
@@ -6822,11 +6845,16 @@ async function captureFinalTravelRoutes(limit = POLLER_BATCH_SIZE) {
 
   for (const [providerFlightId, groupRows] of groups.entries()) {
     try {
-      providerCalls += 1;
-      const providerTrackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(
-        providerFlightId,
-        { forceRefresh: true, budgetEndpoint: "tracked_flight" }
-      );
+      // The API inherits the disabled-provider poller's stored-route behavior.
+      // Do not introduce a paid track download merely by moving this job.
+      let providerTrackTrail = { trackPoints: [], livePosition: null };
+      if (allowProviderFetch && PROVIDER_CALLS_ENABLED) {
+        providerCalls += 1;
+        providerTrackTrail = await fetchFlightAwareTrackTrailWithLiveFallback(
+          providerFlightId,
+          { forceRefresh: true, budgetEndpoint: "tracked_flight", reason: "final_route" }
+        );
+      }
       const canonicalTrackPoints = typeof sharedFlightRepository?.listTrackPointsForProviderFlightId === "function"
         ? await sharedFlightRepository.listTrackPointsForProviderFlightId(providerFlightId)
         : [];
@@ -8117,6 +8145,25 @@ async function startApiServer() {
     );
   });
 
+  let finalRouteRunning = false;
+  const runFinalRouteCapture = async () => {
+    if (finalRouteRunning || !usesDatabase() || !FINAL_TRAVEL_ROUTE_CAPTURE_ENABLED) return;
+    finalRouteRunning = true;
+    try {
+      const result = await captureFinalTravelRoutes(POLLER_BATCH_SIZE, { allowProviderFetch: false });
+      if (result.claimed) console.log(`API final routes claimed=${result.claimed} captured=${result.captured} failed=${result.failed} providerCalls=${result.providerCalls}`);
+    } catch (error) {
+      console.warn("API final route capture failed", error?.message || String(error));
+    } finally { finalRouteRunning = false; }
+  };
+  const finalRouteTimer = setInterval(runFinalRouteCapture, 30_000);
+  finalRouteTimer.unref();
+  setImmediate(runFinalRouteCapture);
+  const responseCleanupTimer = setInterval(() => providerRequestCoordinator.cleanup().catch((error) => {
+    console.warn("Provider response cache cleanup failed", error?.message || String(error));
+  }), 60 * 60_000);
+  responseCleanupTimer.unref();
+
   let lifecycleRecoveryRunning = false;
   const runLifecycleRecovery = async (reason) => {
     if (lifecycleRecoveryRunning) return;
@@ -8149,6 +8196,12 @@ async function startApiServer() {
   const apnsOutboxRecoveryTimer = setInterval(runApnsOutboxRecovery, 30_000);
   if (typeof apnsOutboxRecoveryTimer.unref === "function") apnsOutboxRecoveryTimer.unref();
 
+  server.on("close", () => {
+    clearInterval(finalRouteTimer);
+    clearInterval(responseCleanupTimer);
+    clearInterval(lifecycleRecoveryTimer);
+    clearInterval(apnsOutboxRecoveryTimer);
+  });
   return server;
 }
 
