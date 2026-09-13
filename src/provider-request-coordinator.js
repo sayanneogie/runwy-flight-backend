@@ -27,18 +27,19 @@ function createResponseStore(pool = null) {
     },
     async write(key, token, record) {
       if (!pool) {
-        if (leases.get(key)?.token !== token || leases.get(key).expiresAt <= Date.now()) return;
+        if (leases.get(key)?.token !== token || leases.get(key).expiresAt <= Date.now()) return false;
         records.set(key, record);
         // Bounded memory for non-database development mode.
         if (records.size > 2000) records.delete(records.keys().next().value);
-        return;
+        return true;
       }
-      await pool.query(`insert into public.provider_response_cache (cache_key,response,requested_at,expires_at)
+      const result = await pool.query(`insert into public.provider_response_cache (cache_key,response,requested_at,expires_at)
         select $1,$3::jsonb,$4::timestamptz,$5::timestamptz
         where exists (select 1 from public.provider_request_leases where lock_key=$1 and lease_token=$2::uuid and expires_at>now())
         on conflict (cache_key) do update set response=excluded.response, requested_at=excluded.requested_at, expires_at=excluded.expires_at
-        where public.provider_response_cache.requested_at <= excluded.requested_at`,
+        where public.provider_response_cache.requested_at <= excluded.requested_at returning cache_key`,
       [key, token, record.response, record.requested_at, record.expires_at]);
+      return result.rows.length === 1;
     },
     async release(key, token) {
       if (!pool) {
@@ -55,11 +56,15 @@ function createResponseStore(pool = null) {
 
 function createProviderRequestCoordinator({ store = createResponseStore(), wait = sleep, waitMs = 35_000 } = {}) {
   async function request(url, { ttlMs, forceRefresh = false, load, onReuse = async () => {} }) {
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new RangeError("A positive provider response TTL is required");
     const key = `response:${createHash("sha256").update(url).digest("hex")}`;
     const requestedAfter = forceRefresh ? Date.now() : 0;
     const deadline = Date.now() + waitMs;
-    const reusable = (record) => record && Date.parse(record.expires_at) > Date.now() && Date.parse(record.requested_at) >= requestedAfter;
-    const restore = (record) => new Response(record.response.body, { status: record.response.status, headers: { "content-type": "application/json", "x-runwy-cache-expires-at": record.expires_at, "x-runwy-requested-at": record.requested_at } });
+    const reusable = (record) => record &&
+      new Date(record.expires_at).getTime() > Date.now() &&
+      new Date(record.requested_at).getTime() + ttlMs > Date.now() &&
+      new Date(record.requested_at).getTime() >= requestedAfter;
+    const restore = (record) => new Response(record.response.body, { status: record.response.status, headers: { "content-type": "application/json", "x-runwy-cache-expires-at": new Date(Math.min(new Date(record.expires_at).getTime(), new Date(record.requested_at).getTime() + ttlMs)).toISOString(), "x-runwy-requested-at": new Date(record.requested_at).toISOString() } });
     while (true) {
       const cached = await store.read(key);
       if (reusable(cached)) { await onReuse(); return restore(cached); }
@@ -77,9 +82,10 @@ function createProviderRequestCoordinator({ store = createResponseStore(), wait 
             try {
               const parsed = JSON.parse(body);
               if (parsed && !parsed.error && !parsed.errors) {
-                await store.write(key, token, { response: { body, status: response.status },
+                const stored = await store.write(key, token, { response: { body, status: response.status },
                   requested_at: new Date(startedAt).toISOString(),
                   expires_at: new Date(startedAt + ttlMs).toISOString() });
+                if (!stored) throw new Error("Provider response lease was lost; refusing an unfenced result");
               }
             } catch (error) {
               if (!(error instanceof SyntaxError)) throw error;

@@ -632,3 +632,11 @@ test("providerFlightIdentifier prefers FlightAware ICAO ident when fa_flight_id 
     "IGO6383"
   );
 });
+
+test("startup rejects missing shared-tracking schema before accepting traffic", async () => {
+  const { store } = makeStore({ queryHandler(sql) {
+    if (sql.includes("provider_response_cache")) throw new Error("relation does not exist");
+    return { rows: [] };
+  } });
+  await assert.rejects(store.ensureDatabaseSchema(), /20260914_shared_provider_responses.sql/);
+});

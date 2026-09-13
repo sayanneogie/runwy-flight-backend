@@ -1,3 +1,4 @@
+const { reserveProviderBudget } = require("./provider-budget");
 const { createProviderRequestCoordinator, createResponseStore } = require("./provider-request-coordinator");
 require("dotenv").config();
 
@@ -432,7 +433,7 @@ async function flightAwareFlightFetch(url, options, metadata = {}) {
       onReuse: async () => {
         if (pool) await pool.query(`insert into public.api_usage_logs
           (provider,endpoint,cache_status,cost_estimate,provider_path,request_reason)
-          values ('flightaware','shared_response','hit',0,$1,$2)`, [new URL(url).pathname, reason]);
+          values ('flightaware','shared_response','hit',0,$1,$2)`, [new URL(url).pathname, reason]).catch((error) => console.warn('Failed to record provider cache reuse', error?.message || String(error)));
       },
     });
   }
@@ -442,34 +443,13 @@ async function flightAwareFlightFetch(url, options, metadata = {}) {
 async function flightAwareFlightFetchUncached(url, options, { endpoint, units = 1, reason = null } = {}) {
   const usageEndpoint = `aeroapi:flight:${String(endpoint || "unknown")}`;
   const estimatedUnits = Math.max(1, Math.round(Number(units) || 1));
-  const isSearchRequest = ["operational", "schedules", "historical"].includes(String(endpoint || ""));
   const isTrackedFlightRequest = String(endpoint || "") === "tracked_flight";
   const effectiveLimit = flightAwareDailyBudgetLimitForEndpoint(endpoint);
 
-  if (pool) {
-    const usage = await pool.query(
-      `select coalesce(sum(coalesce(cost_estimate, 1)), 0)::int as units
-       from public.api_usage_logs
-       where provider = 'flightaware'
-         and endpoint like 'aeroapi:flight:%'
-         and (
-           ($1::boolean = true and endpoint = 'aeroapi:flight:tracked_flight')
-           or ($1::boolean = false and endpoint <> 'aeroapi:flight:tracked_flight')
-         )
-         and created_at >= date_trunc('day', now() at time zone 'UTC') at time zone 'UTC'`
-      ,
-      [isTrackedFlightRequest]
-    );
-    const usedUnits = Number(usage.rows[0]?.units || 0);
-    if (usedUnits + estimatedUnits > effectiveLimit) {
-      const error = new Error(
-        `FlightAware daily ${isTrackedFlightRequest ? "tracked-flight" : isSearchRequest ? "search reserve" : "Flight-call"} budget exhausted (${usedUnits}/${effectiveLimit})`
-      );
-      error.code = "FLIGHTAWARE_DAILY_BUDGET_EXHAUSTED";
-      error.statusCode = 429;
-      throw error;
-    }
-  }
+  const reservationId = pool ? await reserveProviderBudget(pool, {
+    endpoint: usageEndpoint, tracked: isTrackedFlightRequest, limit: effectiveLimit,
+    units: estimatedUnits, path: new URL(url).pathname, reason,
+  }) : null;
 
   const startedAt = Date.now();
   let response = null;
@@ -483,18 +463,9 @@ async function flightAwareFlightFetchUncached(url, options, { endpoint, units = 
   } finally {
     if (pool) {
       pool.query(
-        `insert into public.api_usage_logs
-           (provider, endpoint, status_code, response_time_ms, cache_status, cost_estimate, error, provider_path, request_reason)
-         values ('flightaware', $1, $2, $3, 'outbound', $4, $5, $6, $7)`,
-        [
-          usageEndpoint,
-          response?.status || null,
-          Date.now() - startedAt,
-          estimatedUnits,
-          requestError?.message || null,
-          new URL(url).pathname,
-          reason,
-        ]
+        `update public.api_usage_logs set status_code=$2, response_time_ms=$3,
+          cache_status='outbound', error=$4 where id=$1`,
+        [reservationId, response?.status || null, Date.now() - startedAt, requestError?.message || null]
       ).catch((error) => {
         console.warn("Failed to record FlightAware outbound usage", error?.message || String(error));
       });
@@ -8223,6 +8194,9 @@ module.exports = {
   startTrackingPollerWorker,
   usesDatabase,
   __test__: {
+    fetchFlightAwareFlightByProviderId,
+    fetchFlightAwareLivePosition,
+    fetchFlightAwareTrackTrail,
     coalesceFlightAwareTrackTrail,
     compactTrackPoints,
     authoritativeProviderTrackTrail,

@@ -63,6 +63,14 @@ function createTrackingStore({
     await pool.query("select 1 from public.live_snapshots limit 1");
     await pool.query("select 1 from public.notifications limit 1");
     await pool.query("select 1 from public.push_devices limit 1");
+    // Fail startup before accepting traffic if the rollout migration is missing.
+    try {
+      await pool.query("select response, requested_at, expires_at from public.provider_response_cache limit 0");
+      await pool.query("select flight_snapshot, fanout_completed_at from public.flight_events limit 0");
+      await pool.query("select provider_path, request_reason from public.api_usage_logs limit 0");
+    } catch (error) {
+      throw new Error("Shared tracking schema is unavailable: apply 20260914_shared_provider_responses.sql before deployment", { cause: error });
+    }
   }
 
   async function upsertTrackedFlightRecord({ flightId, query, normalized, provider, lastUpdated }) {

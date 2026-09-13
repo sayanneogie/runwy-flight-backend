@@ -15,3 +15,8 @@ alter table public.api_usage_logs add column if not exists request_reason text;
 -- APNs copy must describe the validated event, even if a newer update arrives
 -- before fanout/retry runs. Delivery remains private to each recipient.
 alter table public.flight_events add column if not exists flight_snapshot jsonb;
+
+-- Completion is per event, not inferred from the first recipient's delivery.
+alter table public.flight_events add column if not exists fanout_completed_at timestamptz;
+create index if not exists flight_events_pending_fanout_idx
+  on public.flight_events (created_at) where notification_required = true and fanout_completed_at is null;

@@ -35,3 +35,14 @@ test("background job failures are contained and release their dedupe key", async
   );
   assert.equal(retry.deduped, undefined);
 });
+
+test("queue history stays bounded while delayed work still executes", async () => {
+  const queue = createSharedFlightQueue({ maxHistory: 5 });
+  const executed = [];
+  queue.process('work', async (job) => executed.push(job.id));
+  for (let i = 0; i < 30; i++) await queue.add('work', { flight_instance_id: `f${i}` }, { delayMs: 5 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(executed.length, 30);
+  assert.equal(new Set(executed).size, 30);
+  assert.equal(queue.jobs.length, 5);
+});

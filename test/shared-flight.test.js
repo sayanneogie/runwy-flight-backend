@@ -3498,3 +3498,112 @@ test("cached provider data older than a confirmed event cannot produce new alert
   assert.equal(result.gate, "A4");
   assert.equal(service.queue.jobs.some((job) => job.name === "fanoutNotificationJob"), false);
 });
+
+test("search cache cannot conceal another worker's newer canonical gate", async () => {
+  const { service, repository } = makeService();
+  const input = { airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" };
+  const response = await service.searchFlight(input);
+  const row = await repository.findFlightById(response.flightInstanceId);
+  await repository.commitCanonicalState({ ...row, gate: "A99" }, [], "test");
+  assert.equal((await service.searchFlight(input)).gate, "A99");
+});
+
+test("late duplicate discovery cannot overwrite a refreshed canonical flight", async () => {
+  const repository = createMemorySharedFlightRepository();
+  const params = normalizeSearchParams({ airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" });
+  const initial = await repository.upsertFlightFromNormalized(normalizedFlight(), params, new Date().toISOString());
+  const current = await repository.commitCanonicalState({ ...initial, gate: "A99" }, [], "test");
+  const discovered = await repository.upsertFlightFromNormalized(normalizedFlight(), params, new Date().toISOString());
+  assert.equal(discovered.gate, "A99");
+  assert.equal(discovered.state_revision, current.flight.state_revision);
+});
+
+test("interrupted fanout recovers remaining recipients without resending accepted alerts", async () => {
+  const sent = [];
+  const { service, repository } = makeService(normalizedFlight(), {
+    apns: { sendPayload: async ({ token }) => { sent.push(token.device_token); return { ok: true }; } },
+  });
+  const params = normalizeSearchParams({ airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" });
+  const row = await repository.upsertFlightFromNormalized(normalizedFlight(), params, new Date().toISOString());
+  for (const userId of ["u1", "u2", "u3"]) {
+    await repository.upsertUserFlight(userId, row.id, { alertPreferences: { critical: true } });
+    await repository.upsertDeviceToken(userId, { deviceToken: `token-${userId}`, environment: "sandbox" });
+  }
+  const [event] = await repository.insertEvents(row.id, [{ event_type: "CANCELLED", event_severity: "critical", notification_required: true }], "test");
+  const create = repository.createNotificationDelivery.bind(repository);
+  let calls = 0;
+  repository.createNotificationDelivery = async (...args) => { if (++calls === 2) throw new Error("simulated worker interruption"); return create(...args); };
+  await assert.rejects(service.fanoutNotificationJob({ data: { flight_event_id: event.id } }), /interruption/);
+  assert.deepEqual(sent, ["token-u1"]);
+  assert.ok((await repository.listPendingNotificationEventIds()).includes(event.id));
+  repository.createNotificationDelivery = create;
+  await service.recoverPendingNotificationFanout();
+  assert.deepEqual(sent.sort(), ["token-u1", "token-u2", "token-u3"]);
+  assert.ok(!(await repository.listPendingNotificationEventIds()).includes(event.id));
+  await service.recoverPendingNotificationFanout();
+  assert.equal(sent.length, 3);
+});
+
+test("an APNs retry rechecks revoked recipient access before sending", async () => {
+  let sends = 0;
+  const { service, repository } = makeService(normalizedFlight(), {
+    apns: { sendPayload: async () => { sends++; return { ok: false, status: 503, reason: "ServiceUnavailable" }; } },
+  });
+  const params = normalizeSearchParams({ airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" });
+  const row = await repository.upsertFlightFromNormalized(normalizedFlight(), params, new Date().toISOString());
+  await repository.upsertUserFlight("u1", row.id, { alertPreferences: { critical: true } });
+  await repository.upsertDeviceToken("u1", { deviceToken: "token-u1", environment: "sandbox" });
+  const [event] = await repository.insertEvents(row.id, [{ event_type: "CANCELLED", event_severity: "critical", notification_required: true }], "test");
+  await service.fanoutNotificationJob({ data: { flight_event_id: event.id } });
+  const outbox = [...repository.__memory.deliveryTokens.values()][0];
+  assert.equal(outbox.status, "retry");
+  // Represents revoked Circle access or disabled owner alert preferences.
+  repository.listNotificationTargets = async () => [];
+  outbox.next_attempt_at = new Date(Date.now() - 1).toISOString();
+  await service.recoverDurableApnsOutbox();
+  assert.equal(sends, 1);
+  assert.equal([...repository.__memory.deliveryTokens.values()][0].error, "notification_access_revoked");
+});
+
+test("missing and impossible coordinates never become stored route points", () => {
+  const result = preserveKnownOperationalFields(normalizedFlight({ trackPoints: [
+    { latitude: null, longitude: null }, { latitude: 95, longitude: 20 },
+    { latitude: 20, longitude: 200 }, { latitude: true, longitude: false },
+    { latitude: 0, longitude: 0 }, { latitude: -45, longitude: 179 },
+  ] }), { normalized_data: {} });
+  assert.deepEqual(result.trackPoints.map((p) => [p.latitude, p.longitude]), [[0, 0], [-45, 179]]);
+});
+
+test("invalid dates and unidentified replacement occurrences are rejected", () => {
+  const { validateProviderFlight } = require("../src/shared-flight/state");
+  assert.throws(() => normalizeSearchParams({ airline: "SQ", number: "509", date: "2026-02-30" }), /required/);
+  assert.equal(normalizeSearchParams({ airline: "SQ", number: "509", date: "2028-02-29" }).date, "2028-02-29");
+  const requested = { airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" };
+  assert.equal(validateProviderFlight(normalizedFlight({ scheduledDepartureAt: "nonsense" }), requested).ok, false);
+  assert.equal(validateProviderFlight(normalizedFlight({ scheduledDepartureAt: null }), requested).ok, false);
+  const existing = mapNormalizedToDb(normalizedFlight(), requested);
+  assert.equal(validateProviderFlight(normalizedFlight({ providerFlightId: "replacement", scheduledDepartureAt: null }), requested, existing).ok, false);
+  assert.equal(validateProviderFlight(normalizedFlight({ scheduledDepartureAt: null }), requested, existing).ok, true);
+});
+
+test("future-dated stream messages cannot freeze the shared flight timeline", async () => {
+  const { service, repository } = makeService();
+  const params = normalizeSearchParams({ airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" });
+  const row = await repository.upsertFlightFromNormalized(normalizedFlight(), params, new Date().toISOString());
+  await service.applyStreamedFlightUpdate(row.id, normalizedFlight({ gate: "A99" }), { eventTime: new Date(Date.now() + 864e5).toISOString() });
+  assert.equal((await repository.findFlightById(row.id)).gate, "A4");
+  await service.applyStreamedFlightUpdate(row.id, normalizedFlight({ gate: "A16", departureGate: "A16" }), { eventTime: new Date().toISOString() });
+  assert.equal((await repository.findFlightById(row.id)).gate, "A16");
+});
+
+test("suspicious data schedules an executable bounded revalidation", async () => {
+  const { service, repository } = makeService(normalizedFlight({ origin: "WRONG" }));
+  const params = normalizeSearchParams({ airline: "SQ", number: "509", date: "2026-05-27", origin: "BLR", destination: "SIN" });
+  const row = await repository.upsertFlightFromNormalized(normalizedFlight(), params, new Date().toISOString());
+  await service.refreshFlightJob({ data: { flight_instance_id: row.id, reason: "forced" } });
+  const revalidation = service.queue.jobs.find((job) => job.name === "revalidateSuspiciousFlightJob");
+  assert.ok(revalidation);
+  assert.notEqual(revalidation.options.runImmediately, false);
+  assert.equal(revalidation.options.delayMs, 60_000);
+  assert.equal((await repository.findFlightById(row.id)).origin_airport, "BLR");
+});

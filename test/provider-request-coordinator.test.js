@@ -63,3 +63,27 @@ test("coordination timeout does not issue another paid request", async () => {
   await assert.rejects(worker.request(url, { ttlMs: 1000, load: () => { calls++; } }), /still in progress/);
   assert.equal(calls, 0);
 });
+
+test("a stricter caller TTL cannot reuse an older response from another worker", async () => {
+  const worker = createProviderRequestCoordinator();
+  let calls = 0;
+  const load = async () => Response.json({ revision: ++calls });
+  await worker.request(url, { ttlMs: 1000, load });
+  await delay(25);
+  const response = await worker.request(url, { ttlMs: 10, load });
+  assert.equal((await response.json()).revision, 2);
+});
+
+test("losing the response lease cannot return an unfenced provider result", async () => {
+  const store = { read: async () => null, claim: async () => "token", write: async () => false, release: async () => {} };
+  const worker = createProviderRequestCoordinator({ store });
+  await assert.rejects(worker.request(url, { ttlMs: 1000, load: () => Response.json({ stale: true }) }), /lease/);
+});
+
+test("cache timestamp headers retain milliseconds for PostgreSQL Date values", async () => {
+  const requested = new Date(Date.now() - 3);
+  const expires = new Date(Date.now() + 1000);
+  const store = { read: async () => ({ response: { body: '{}', status: 200 }, requested_at: requested, expires_at: expires }) };
+  const response = await createProviderRequestCoordinator({ store }).request(url, { ttlMs: 1000, load: () => { throw new Error('must reuse'); } });
+  assert.equal(Date.parse(response.headers.get('x-runwy-requested-at')), requested.getTime());
+});

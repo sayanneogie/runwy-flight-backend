@@ -25,6 +25,8 @@ function normalizeAirport(input) {
 function normalizeDate(input) {
   const value = String(input || "").trim().slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) return null;
   return value;
 }
 
@@ -575,6 +577,14 @@ function validateProviderFlight(normalized, requested, existingRow = null) {
   if (normalized.rawProviderResponse?.error || normalized.rawProviderResponse?.errors) problems.push("provider_error_payload");
 
   const scheduledDate = toIso(normalized.scheduledDepartureAt)?.slice(0, 10);
+  if (normalized.scheduledDepartureAt && !scheduledDate) problems.push("invalid_departure_time");
+  if (!scheduledDate && (!existingRow || normalized.providerFlightId !== existingRow.provider_flight_id)) {
+    problems.push("weak_identifiers");
+  }
+  if (scheduledDate && requested.timezoneOffsetMinutes !== null && requested.timezoneOffsetMinutes !== undefined) {
+    const localDate = new Date(Date.parse(normalized.scheduledDepartureAt) + Number(requested.timezoneOffsetMinutes) * 60_000).toISOString().slice(0, 10);
+    if (localDate !== requested.date) problems.push("departure_date_mismatch");
+  }
   if (scheduledDate) {
     const dayDelta = Math.abs((Date.parse(`${scheduledDate}T00:00:00Z`) - Date.parse(`${requested.date}T00:00:00Z`)) / 864e5);
     if (dayDelta > 1) problems.push("departure_date_mismatch");
@@ -595,7 +605,7 @@ function validateProviderFlight(normalized, requested, existingRow = null) {
   }
 
   const suspicious = problems.some((problem) =>
-    ["airline_mismatch", "flight_number_mismatch", "departure_date_mismatch", "provider_error_payload", "arrival_before_departure", "origin_mismatch", "destination_mismatch", "weak_identifiers", "occurrence_mismatch"].includes(problem)
+    ["airline_mismatch", "flight_number_mismatch", "departure_date_mismatch", "provider_error_payload", "arrival_before_departure", "origin_mismatch", "destination_mismatch", "weak_identifiers", "occurrence_mismatch", "invalid_departure_time"].includes(problem)
   );
   const downgraded = problems.some((problem) => ["origin_mismatch", "destination_mismatch", "weak_identifiers"].includes(problem));
   return {
