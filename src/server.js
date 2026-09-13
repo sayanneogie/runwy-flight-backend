@@ -464,7 +464,7 @@ async function reconcilePaidSubscriptions() {
 }
 
 async function reconcilePaidFlightAccess(flight) {
-  const access = await paidAccess.flight(flight?.provider_flight_id);
+  const access = await paidAccess.flight(flight?.provider_flight_id, flight?.id);
   if (!access.paid && access.verified) {
     if (flight.provider_alert_id) {
       await deleteProviderAlert(flight.provider_alert_id);
@@ -4070,6 +4070,7 @@ function flightAwareAlertContextForSharedFlight(flight) {
   if (!flightNumber || !startDate || !endDate) return null;
   return {
     flightNumber,
+    flightInstanceId: flight.id,
     providerFlightId: flight.provider_flight_id || null,
     status,
     departureIata: normalizeAirportCode(flight.origin_airport) || null,
@@ -4145,7 +4146,7 @@ async function ensureFlightAwareAlertForInboundFlight(_flight, inboundFlight) {
 }
 
 async function updateFlightAwareAlert({ alertId, targetUrl, context }) {
-  if (!(await paidAccess.flight(context?.providerFlightId)).paid) throw new Error("Paid membership required for provider alerts");
+  if (!(await paidAccess.flight(context?.providerFlightId, context?.flightInstanceId)).paid) throw new Error("Paid membership required for provider alerts");
   await ensureFlightAwareAlertEndpoint(targetUrl);
   const payload = buildFlightAwareAlertPayload({ targetUrl, context });
   const response = await fetch(`${FLIGHTAWARE_BASE_URL}/alerts/${encodeURIComponent(alertId)}`, {
@@ -4371,7 +4372,7 @@ async function verifyFlightAwareAlert({ targetUrl, context }) {
 }
 
 async function createFlightAwareAlert({ targetUrl, context }) {
-  if (!(await paidAccess.flight(context?.providerFlightId)).paid) throw new Error("Paid membership required for provider alerts");
+  if (!(await paidAccess.flight(context?.providerFlightId, context?.flightInstanceId)).paid) throw new Error("Paid membership required for provider alerts");
   await ensureFlightAwareAlertEndpoint(targetUrl);
   const payload = buildFlightAwareAlertPayload({ targetUrl, context });
 

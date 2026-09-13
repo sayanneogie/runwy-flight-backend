@@ -39,6 +39,13 @@ test("free-only flight denies telemetry; mixed flight retains paid owner's acces
   users = ["free", "paid"];
   assert.equal((await access.flight("instance")).paid, true);
 });
+test("old alert without provider ID is checked using its saved flight instance", async () => {
+  let params;
+  const access = createPaidAccess({ apiKey: "test",
+    query: async (_sql, values) => { params = values; return { rows: [] }; } });
+  assert.deepEqual(await access.flight(null, "old-instance"), { paid: false, verified: true });
+  assert.deepEqual(params, [null, "old-instance"]);
+});
 test("verification failures withhold paid work without classifying user as expired", async () => {
   const access = createPaidAccess({ apiKey: "test", query: async () => ({ rows: [{ user_id: "paid" }] }),
     fetchImpl: async () => ({ ok: false }) });

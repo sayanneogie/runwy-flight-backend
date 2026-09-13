@@ -50,8 +50,8 @@ function createPaidAccess({ apiKey, query, fetchImpl = global.fetch, now = Date.
     pending.set(userId, request);
     return request;
   }
-  async function flight(providerFlightId) {
-    if (!providerFlightId || !query) return { paid: false, verified: false };
+  async function flight(providerFlightId, flightInstanceId = null) {
+    if ((!providerFlightId && !flightInstanceId) || !query) return { paid: false, verified: false };
     const result = await query(`select distinct uf.user_id
       from public.user_flights uf
       left join public.tracking_sessions ts on ts.id = uf.tracking_session_id
@@ -60,7 +60,7 @@ function createPaidAccess({ apiKey, query, fetchImpl = global.fetch, now = Date.
       where uf.deleted_at is null and coalesce(uf.lifecycle_state, '') <> 'deleted'
         and (fi.provider_flight_id = $1
           or fi.normalized_data->'inboundFlight'->>'providerFlightId' = $1
-          or ts.provider_flight_id = $1)`, [providerFlightId]);
+          or ts.provider_flight_id = $1 or fi.id::text = $2)`, [providerFlightId || null, flightInstanceId]);
     let verified = true;
     for (const row of result.rows) {
       const access = await membership(row.user_id);
