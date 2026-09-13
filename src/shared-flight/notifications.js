@@ -148,8 +148,8 @@ function routeDescription(flight) {
 
 function departureTime(flight, event) {
   const value =
-    event?.new_value?.scheduledDepartureAt ||
     event?.new_value?.estimatedDepartureAt ||
+    event?.new_value?.scheduledDepartureAt ||
     flight.estimated_departure_at ||
     flight.scheduled_departure_at;
   if (!value) return null;
@@ -264,27 +264,19 @@ function arrivalTitle(flight, context = {}) {
       : Math.round(temperatureC);
     weatherSuffix = ` ${weatherEmoji(weather.conditionCode)} ${temperature}°`;
   }
-  return `✈️ Welcome to ${city}!${weatherSuffix}`;
+  return `✈️ Welcome to ${city}.${weatherSuffix}`;
 }
 
 function arrivalBody(flight, context = {}) {
   const destination = String(flight.destination_airport || "---").trim().toUpperCase();
-  const terminal = String(flight?.normalized_data?.arrivalTerminal || flight.arrival_terminal || "").trim();
+  const city = airportDetails(destination)?.city || flight?.normalized_data?.arrivalCity || destination;
   const gate = String(flight?.normalized_data?.arrivalGate || flight.arrival_gate || "").trim();
-  const location = [destination, terminal ? `Terminal ${terminal}` : null, gate ? `Gate ${gate}` : null].filter(Boolean).join(" • ");
-  const localTime = arrivalLocalTime(flight);
-  const variance = arrivalVariance(flight);
-  const taxiMinutes = arrivalTaxiMinutes(flight);
-  const sentences = [];
-  if (taxiMinutes) sentences.push(`Taxiing for ${taxiMinutes}m.`);
-  let arrival = `Arriving at ${location}`;
-  if (localTime) arrival += ` at ${localTime} local time`;
-  if (variance) arrival += ` (${variance})`;
-  sentences.push(`${arrival}.`);
-  if (Number(context.visitOrdinal) > 0) {
-    sentences.push(`This is your ${ordinalNumber(context.visitOrdinal)} time here.`);
-  }
-  return sentences.join(" ");
+  const variance = arrivalVariance(flight)?.replace(/(\d+)m /, "$1 min ");
+  let body = `Landed at ${destination}. Taxiing to ${gate ? `Gate ${gate}` : "the gate"}`;
+  if (variance) body += ` · ${variance}`;
+  body += ".";
+  if (Number(context.visitOrdinal) > 0) body += ` This is your ${ordinalNumber(context.visitOrdinal)} time in ${city}`;
+  return body;
 }
 
 function temperatureText(event, context = {}) {
@@ -312,11 +304,11 @@ function airportDetailLine(flight, event) {
   const gate = String(flight.departure_gate || flight.gate || "").trim();
   const departure = departureTime(flight, event);
   const arrival = arrivalTime(flight);
-  const departureDetails = [terminal ? `Terminal ${terminal}` : null, gate ? `Gate ${gate}` : null]
+  const departureDetails = [terminal ? `T${terminal.replace(/^T(?:erminal)?\s*/i, "")}` : null, gate ? `Gate ${gate}` : null]
     .filter(Boolean)
     .join(" · ");
   const departureSuffix = [departureDetails, departure ? `at ${departure}` : null].filter(Boolean).join(" ");
-  return `↗ ${origin}${departureSuffix ? ` ${departureSuffix}` : ""}\n↘ ${destination}${arrival ? ` at ${arrival}` : ""}`;
+  return `↗ ${origin}${departureSuffix ? ` ${departureSuffix}` : ""}. ↘ ${destination}${arrival ? ` at ${arrival}` : ""}`;
 }
 
 function greetingForFlight(flight, event) {
@@ -349,61 +341,126 @@ function notificationSubject(flight, context = {}) {
 }
 
 function notificationTitle(flight, event, context = {}) {
+  const traveler = context.isCircle ? firstName(context.ownerDisplayName) : null;
+  if (traveler) {
+    const titles = {
+      TRIP_STARTING: `${traveler} has a flight today ✈️`,
+      DELAYED: `${traveler}'s flight is delayed 😐`,
+      CANCELLED: `${traveler}'s Flight is canceled 😬`,
+      BOARDING: `${traveler} is now boarding for 🎫`,
+      DEPARTED: `${traveler}'s Flight Took Off ✈️`,
+      AIRBORNE: `${traveler}'s Flight Took Off ✈️`,
+      DIVERTED: `${traveler}'s Flight diverted 👀`,
+    };
+    if (titles[event.event_type]) return titles[event.event_type];
+  }
+
   const code = `${flight.airline_code || ""}${flight.flight_number || ""}` || "Flight";
-  if (event.event_type === "DELAYED") return "Flight Delayed";
-  if (event.event_type === "CANCELLED") return "Flight Cancelled";
-  if (event.event_type === "DIVERTED") return "Flight Diverted";
-  if (event.event_type === "AIRCRAFT_CHANGED") return "Aircraft Changed";
-  if (event.event_type === "BOARDING") return "Boarding Started";
+  if (event.event_type === "TERMINAL_CHANGED") return "Terminal switch ↗";
+  if (event.event_type === "RESCHEDULED") return "A change of plans 🗓️";
+  if (event.event_type === "DELAYED") return "Running a little late ⏱️";
+  if (event.event_type === "CANCELLED") return "Flight canceled 😐";
+  if (event.event_type === "DIVERTED") return "Flight diverted 👀";
+  if (event.event_type === "AIRCRAFT_CHANGED") return "New ride ✈️";
+  if (event.event_type === "BOARDING") return "Time to board 🎫";
   if (event.event_type === "FLIGHT_PLAN_AVAILABLE") return "Flight Plan Available";
   if (event.event_type === "FLIGHT_PLAN_CHANGED") return "Flight Plan Changed";
-  if (event.event_type === "GATE_CHANGED") return "Gate Changed";
-  if (event.event_type === "TAXIING") return "Taxiing";
-  if (event.event_type === "TAKEOFF_ROLL") return "✈️ Taking Off";
+  if (event.event_type === "GATE_CHANGED") return "Gate has changed ✈️";
+  if (event.event_type === "TAXIING") return "Heading for the runway ✈️";
+  if (event.event_type === "TAKEOFF_ROLL") return "And we're off ✈️";
   if (event.event_type === "INBOUND_DEPARTED") return "✈️ Your Aircraft Is on the Way";
   if (event.event_type === "INBOUND_ARRIVED") return "✈️ Your Aircraft Has Landed";
   if (event.event_type === "INBOUND_CANCELLED") return "Inbound Aircraft Cancelled";
   if (event.event_type === "INBOUND_DIVERTED") return "Inbound Aircraft Diverted";
   if (event.event_type === "TRIP_STARTING") {
-    return preflightTitle(flight, event, context);
+    if (context.isCircle) return preflightTitle(flight, event, context);
+    if (String(flight.status || "").includes("delay") || Number(flight.delay_minutes) > 0) return "Running a little late ⏱️";
+    const temperature = temperatureText(event, context);
+    return `Right on schedule ✈️${temperature ? ` ${temperature} ${weatherEmoji(preflightWeather(event)?.conditionCode)}` : ""}`;
   }
-  if (event.event_type === "TAXI_IN") return "Taxiing In";
-  if (event.event_type === "ARRIVED_AT_GATE") return "Arrived at Gate";
+  if (event.event_type === "TAXI_IN") return "Heading to the gate";
+  if (event.event_type === "ARRIVED_AT_GATE") return "Journey complete ✨";
   if (event.event_type === "BAGGAGE_BELT_ASSIGNED") {
-    return event.old_value?.baggageBelt ? "🧳 Baggage Belt Changed" : "🧳 Baggage Belt Assigned";
+    return event.old_value?.baggageBelt
+      ? "New baggage belt 🧳"
+      : `Bags this way 🧳${event.new_value?.baggageBelt ? ` · Belt ${event.new_value.baggageBelt}` : ""}`;
   }
   if (event.event_type === "WEATHER_ADVISORY") return "Weather Update";
   if (event.event_type === "LANDED" || event.event_type === "ARRIVED") {
-    return context.isTraveler && !context.isCircle ? arrivalTitle(flight, context) : "✈️ Flight Landed";
+    if (context.isTraveler && !context.isCircle) return arrivalTitle(flight, context);
+    const traveler = context.isCircle ? firstName(context.ownerDisplayName) : null;
+    return `${traveler || readableFlightCode(flight)} has landed ✈️`;
   }
   if (event.event_type === "AIRBORNE" || event.event_type === "DEPARTED") return "✈️ Flight Took Off";
   return code;
+}
+
+function departureDelayDuration(flight, event) {
+  const scheduled = flight.scheduled_departure_at || flight.normalized_data?.departureTimes?.scheduled;
+  const estimated = event.new_value?.estimatedDepartureAt || flight.estimated_departure_at || flight.normalized_data?.departureTimes?.estimated;
+  if (!scheduled || !estimated) return null;
+  const minutes = Math.round((new Date(estimated).getTime() - new Date(scheduled).getTime()) / 60_000);
+  if (!Number.isFinite(minutes) || minutes <= 0) return null;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return hours ? `${hours}h${remainder ? ` ${remainder}m` : ""}` : `${minutes}m`;
 }
 
 function notificationBody(flight, event, context = {}) {
   const code = readableFlightCode(flight);
   const subject = notificationSubject(flight, context);
   const route = routeDescription(flight);
-  if (event.event_type === "DELAYED") return `${code} is delayed.`;
-  if (event.event_type === "CANCELLED") return `${code} has been cancelled.`;
+  const traveler = context.isCircle ? firstName(context.ownerDisplayName) : null;
+  if (traveler && event.event_type === "BOARDING") return `${traveler}'s flight ${code} is boarding now.`;
+  if (context.isCircle && event.event_type === "TAXIING") return `${code} is taxiing for takeoff. Send em a safe-flight text`;
+  if (event.event_type === "DELAYED") {
+    const time = departureTime(flight, event);
+    const duration = departureDelayDuration(flight, event);
+    const prefix = traveler ? `${traveler}'s flight ${code}` : code;
+    return `${prefix} is delayed${duration ? ` by ${duration}` : ""}.${time ? ` New departure: ${time}` : ""}`;
+  }
+  if (event.event_type === "RESCHEDULED") {
+    const time = departureTime(flight, event);
+    return time ? `${code} has a new departure time: ${time}.` : `${code} has a new departure time. Check with the airline for details.`;
+  }
+  if (event.event_type === "TERMINAL_CHANGED") {
+    const terminal = event.new_value?.terminal || flight.departure_terminal || flight.terminal;
+    return terminal ? `${code} is now departing from Terminal ${String(terminal).replace(/^T(?:erminal)?\s*/i, "")}.` : `${code}'s departure terminal has changed.`;
+  }
+  if (event.event_type === "CANCELLED") return `${code} has been canceled. Contact airline support`;
   if (event.event_type === "DIVERTED") {
     const airport = event.new_value?.diversionAirport || flight?.normalized_data?.diversionAirport;
-    return airport ? `${code} diverted to ${airport}.` : `${code} has been diverted.`;
+    // Malpensa's catalog municipality is Ferno; notifications use Milan,
+    // the passenger-facing destination city.
+    const city = String(airport || "").toUpperCase() === "MXP" ? "Milan" : airportDetails(airport)?.city;
+    const subject = traveler ? `${traveler}'s flight` : "Your flight";
+    const reason = traveler && event.new_value?.diversionReason ? ` due to ${event.new_value.diversionReason}` : "";
+    return airport ? `${subject} has been diverted to ${airport}${city ? ` (${city})` : ""}${reason}${traveler ? "." : ""}` : `${subject} has been diverted${traveler ? "." : ""}`;
   }
   if (event.event_type === "AIRCRAFT_CHANGED") {
     const aircraft = event.new_value?.aircraftType || flight?.normalized_data?.aircraftType;
-    return aircraft ? `${code} is now scheduled with ${aircraft}.` : `${code}'s aircraft has changed.`;
+    return aircraft ? `Aircraft changed: ${code} is now flying on ${/^[aeiou]/i.test(aircraft) ? "an" : "a"} ${aircraft}.` : `${code}'s aircraft has changed.`;
   }
-  if (event.event_type === "BOARDING") return `${subject} has started boarding.`;
+  if (event.event_type === "BOARDING") {
+    const gate = event.new_value?.gate || flight.departure_gate || flight.gate || flight.normalized_data?.departureGate;
+    return `${code} is boarding now${gate ? ` at Gate ${gate}` : ""}.`;
+  }
   if (["FLIGHT_PLAN_AVAILABLE", "FLIGHT_PLAN_CHANGED"].includes(event.event_type)) {
     const filedRoute = String(event.new_value?.flightPlanRoute || "").trim();
     return filedRoute
       ? `${code}'s filed route is ${filedRoute}.`
       : `${code}'s filed flight plan is now available.`;
   }
-  if (event.event_type === "GATE_CHANGED") return `${code} gate changed from ${event.old_value?.gate || "unknown"} to ${event.new_value?.gate}.`;
-  if (event.event_type === "TAXIING") return `${subject} is taxiing.`;
-  if (event.event_type === "TAKEOFF_ROLL") return `${subject}${route ? `, ${route},` : ""} is about to take off.`;
+  if (event.event_type === "GATE_CHANGED") {
+    const gate = event.new_value?.gate || flight.departure_gate || flight.gate;
+    const previous = event.old_value?.gate;
+    return gate ? `Flight gate for ${code} moved ${previous ? `from ${previous} → ${gate}` : `to ${gate}`}.` : `Flight gate for ${code} has changed.`;
+  }
+  if (event.event_type === "TAXIING") return `${code} is taxiing for takeoff.`;
+  if (event.event_type === "TAKEOFF_ROLL") {
+    const city = airportDetails(flight.destination_airport)?.city || flight.normalized_data?.arrivalCity || flight.destination_airport;
+    return `${code} is taking off${city ? ` for ${city}` : ""}.`;
+  }
   if (["INBOUND_DEPARTED", "INBOUND_ARRIVED", "INBOUND_CANCELLED", "INBOUND_DIVERTED"].includes(event.event_type)) {
     const inbound = event.new_value?.inboundFlight || flight?.normalized_data?.inboundFlight || {};
     const inboundCode = String(inbound.flightNumber || "Your inbound aircraft").trim();
@@ -430,27 +487,36 @@ function notificationBody(flight, event, context = {}) {
     if (context.isCircle && traveler) {
       const greeting = recipient ? `Hey ${recipient}, ` : "Hey! ";
       const journey = route || [flight.origin_airport, flight.destination_airport].filter(Boolean).join(" to ");
-      return `${greeting}today ${traveler} has a flight${journey ? ` from ${journey}` : ""}, scheduled${time ? ` at ${time} local time` : " for today"}.\n${code} · ${String(flight.origin_airport || "---").toUpperCase()} → ${String(flight.destination_airport || "---").toUpperCase()}`;
+      return `${greeting}${traveler} has a flight${journey ? ` from ${journey}` : ""} today, scheduled${time ? ` for ${time} local time` : " for today"}.`;
     }
     const delayed = String(flight.status || "").toLowerCase().includes("delay") || Number(flight.delay_minutes) > 0;
-    return `${greetingForFlight(flight, event)}! Your flight today is ${delayed ? "delayed" : "on time"}. ${code}\n${airportDetailLine(flight, event)}`;
+    if (delayed) return notificationBody(flight, { ...event, event_type: "DELAYED" }, context);
+    return `Your flight ${code} is on time. ${airportDetailLine(flight, event).split(". ↘")[0]}`;
   }
-  if (event.event_type === "TAXI_IN") return `${code} is taxiing to the gate.`;
-  if (event.event_type === "ARRIVED_AT_GATE") return `${code} has arrived at the gate.`;
+  if (event.event_type === "TAXI_IN") {
+    const gate = flight.normalized_data?.arrivalGate || flight.arrival_gate;
+    return `${code} is taxiing to ${gate ? `gate ${gate}` : "the gate"}.`;
+  }
+  if (event.event_type === "ARRIVED_AT_GATE") {
+    const gate = flight.normalized_data?.arrivalGate || flight.arrival_gate;
+    return `${code} has reached ${gate ? `Gate ${gate}` : "the gate"}.`;
+  }
   if (event.event_type === "BAGGAGE_BELT_ASSIGNED") {
     const previousBelt = event.old_value?.baggageBelt;
     const nextBelt = event.new_value?.baggageBelt;
-    const traveler = firstName(context.ownerDisplayName);
-    const luggageOwner = context.isCircle && traveler ? `${traveler}'s luggage` : "Your luggage";
+    if (!nextBelt) return `Baggage details for ${code} have been updated.`;
     return previousBelt
-      ? `${luggageOwner} for flight ${code} changed from belt ${previousBelt} to belt ${nextBelt}.`
-      : `${luggageOwner} for flight ${code} will be on belt ${nextBelt}.`;
+      ? `Head to Belt ${nextBelt} instead; ${code} baggage has been reassigned to Belt ${nextBelt}.`
+      : `Baggage for ${code} is assigned to Belt ${nextBelt}`;
   }
   if (event.event_type === "WEATHER_ADVISORY") return event.summary || `${code} weather update is available.`;
   if (event.event_type === "LANDED" || event.event_type === "ARRIVED") {
-    return context.isTraveler && !context.isCircle
-      ? arrivalBody(flight, context)
-      : `${subject}${route ? `, ${route},` : ""} has landed.`;
+    if (context.isTraveler && !context.isCircle) {
+      return arrivalBody(flight, context);
+    }
+    const city = airportDetails(flight.destination_airport)?.city || flight.normalized_data?.arrivalCity || flight.destination_airport || "the destination";
+    const traveler = context.isCircle ? firstName(context.ownerDisplayName) : null;
+    return traveler ? `${traveler}’s flight ${code} has landed in ${city}` : `The flight you were tracking has landed in ${city}.`;
   }
   if (event.event_type === "AIRBORNE" || event.event_type === "DEPARTED") return `${subject}${route ? `, ${route},` : ""} is now in the air.`;
   return event.summary || `${subject} status changed.`;

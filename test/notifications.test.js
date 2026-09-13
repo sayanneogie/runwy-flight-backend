@@ -152,11 +152,11 @@ test("flight circle recipients honor departure and arrival alert toggles", () =>
   );
   assert.equal(
     __test__.circleNotificationPreferenceConditionForEventType("flight_inbound_arrived"),
-    "fp.notify_departure = true"
+    "false"
   );
   assert.equal(
     __test__.circleNotificationPreferenceConditionForEventType("flight_takeoff_roll"),
-    "fp.notify_departure = true"
+    "false"
   );
 });
 
@@ -556,11 +556,11 @@ test("arrival notifications include destination, weather, taxi, gate, timing, an
     { visitOrdinal: 66 }
   );
 
-  assert.equal(payload.aps.alert.title, "✈️ Welcome to Bengaluru! 🌤️ 28°");
-  assert.match(payload.aps.alert.body, /Taxiing for 8m\./);
-  assert.match(payload.aps.alert.body, /BLR • Terminal 1 • Gate A1/);
-  assert.match(payload.aps.alert.body, /4:48 PM local time \(17m early\)/);
-  assert.match(payload.aps.alert.body, /66th time here\./);
+  assert.equal(payload.aps.alert.title, "✈️ Welcome to Bengaluru. 🌤️ 28°");
+  assert.match(payload.aps.alert.body, /Landed at BLR\./);
+  assert.match(payload.aps.alert.body, /Taxiing to Gate A1/);
+  assert.match(payload.aps.alert.body, /17 min early/);
+  assert.match(payload.aps.alert.body, /66th time in Bengaluru/);
   assert.equal(payload.flight_instance_id, "flight-id");
   assert.equal(payload.deep_link, "runwy://flights/flight-id");
 });
@@ -589,10 +589,10 @@ test("tracking-only arrival notifications use observer language without a welcom
     { isOwner: true, isTraveler: false }
   );
 
-  assert.equal(payload.aps.alert.title, "✈️ Tracked Flight Landed");
+  assert.equal(payload.aps.alert.title, "AI 101 has landed ✈️");
   assert.equal(
     payload.aps.alert.body,
-    "Flight AI 101, Rome to New York, that you were tracking has landed at 4:44 PM local time."
+    "The flight you were tracking has landed in New York."
   );
   assert.equal(payload.runwy.trackingOnly, true);
   assert.doesNotMatch(payload.aps.alert.title, /Welcome/);
@@ -614,7 +614,7 @@ test("circle takeoff notifications identify the traveler and use the plane emoji
     { isOwner: false, isTraveler: false, travelerName: "Maya Patel" }
   );
 
-  assert.equal(payload.aps.alert.title, "✈️ Flight Took Off");
+  assert.equal(payload.aps.alert.title, "Maya's Flight Took Off ✈️");
   assert.equal(payload.aps.alert.body, "Maya's flight AI 101, Rome to New York, is now in the air.");
 });
 
@@ -642,8 +642,8 @@ test("landing and baggage assignment create separate notification events", () =>
     events.map((event) => event.type),
     ["flight_arrived", "flight_baggage_claim"]
   );
-  assert.equal(events[1].title, "🧳 Baggage Claim Assigned");
-  assert.equal(events[1].body, "Your luggage for flight 6E 123, Delhi to Bengaluru will be on belt 3.");
+  assert.equal(events[1].title, "Bags this way 🧳 · Belt 3");
+  assert.equal(events[1].body, "Baggage for 6E 123 is assigned to Belt 3");
   assert.equal(events[0].payload.aps["content-available"], 1);
   assert.equal(events[1].payload.aps["content-available"], 1);
   assert.equal(
@@ -673,8 +673,8 @@ test("circle baggage notifications identify the traveler and flight", () => {
     { isOwner: false, travelerName: "Maya Patel" }
   );
 
-  assert.equal(events[0].title, "🧳 Baggage Claim Assigned");
-  assert.equal(events[0].body, "Maya's luggage for flight AI 101, Rome to New York will be on belt 6.");
+  assert.equal(events[0].title, "Bags this way 🧳 · Belt 6");
+  assert.equal(events[0].body, "Baggage for AI 101 is assigned to Belt 6");
 });
 
 test("baggage assignments stay silent until landing is confirmed", () => {
@@ -701,10 +701,10 @@ test("baggage assignments stay silent until landing is confirmed", () => {
   normalized.landingTimes = { actual: new Date(now).toISOString() };
   const [event] = __test__.notificationEventsFor(normalized, "flight-id");
   assert.equal(event.type, "flight_baggage_claim");
-  assert.equal(event.body, "Your luggage for flight EK 379, Phuket to Dubai will be on belt 7.");
+  assert.equal(event.body, "Baggage for EK 379 is assigned to Belt 7");
 });
 
-test("reliable baggage reassignments name both the previous and new belt", () => {
+test("reliable baggage reassignments highlight the new belt and retain previous-belt metadata", () => {
   const [event] = __test__.notificationEventsFor(
     {
       flightNumber: "EK379",
@@ -719,10 +719,10 @@ test("reliable baggage reassignments name both the previous and new belt", () =>
     { previousNotifiedBaggageBelt: "7" }
   );
 
-  assert.equal(event.title, "🧳 Baggage Claim Changed");
+  assert.equal(event.title, "New baggage belt 🧳");
   assert.equal(
     event.body,
-    "Your luggage for flight EK 379, Phuket to Dubai changed from belt 7 to belt 12."
+    "Head to Belt 12 instead; EK 379 baggage has been reassigned to Belt 12."
   );
   assert.equal(event.payload.runwy.previousBaggageBelt, "7");
 });
@@ -733,4 +733,16 @@ test("arrival visit counts use readable ordinals", () => {
   assert.equal(__test__.ordinalNumber(3), "3rd");
   assert.equal(__test__.ordinalNumber(11), "11th");
   assert.equal(__test__.ordinalNumber(66), "66th");
+});
+
+test("Circle allows only the eight requested milestones in both notification paths", () => {
+  const { circleNotificationPreferenceConditionForEventType: shared } = require("../src/shared-flight/repository");
+  const allowed = ["TRIP_STARTING", "DELAYED", "CANCELLED", "BOARDING", "TAXIING", "DEPARTED", "AIRBORNE", "DIVERTED", "LANDED", "ARRIVED"];
+  const blocked = ["GATE_CHANGED", "TERMINAL_CHANGED", "RESCHEDULED", "AIRCRAFT_CHANGED", "TAKEOFF_ROLL", "TAXI_IN", "ARRIVED_AT_GATE", "BAGGAGE_BELT_ASSIGNED", "BAGGAGE_BELT_CHANGED", "INBOUND_DEPARTED", "INBOUND_ARRIVED", "INBOUND_CANCELLED", "INBOUND_DIVERTED", "WEATHER_ADVISORY", "FLIGHT_PLAN_AVAILABLE", "FLIGHT_PLAN_CHANGED", "UNKNOWN"];
+  for (const type of allowed) assert.notEqual(shared(type), "false", type);
+  for (const type of blocked) assert.equal(shared(type), "false", type);
+  for (const type of ["flight_gate_change", "flight_takeoff_roll", "flight_inbound_arrived", "flight_baggage_claim", "flight_aircraft_changed", "unknown"]) {
+    assert.equal(__test__.circleNotificationPreferenceConditionForEventType(type), "false", type);
+  }
+  assert.notEqual(__test__.ownerNotificationPreferenceConditionForEventType("flight_gate_change"), "false");
 });

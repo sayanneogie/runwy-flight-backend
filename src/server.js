@@ -28,7 +28,7 @@ const {
   createMemorySharedFlightRepository,
   createPostgresSharedFlightRepository,
 } = require("./shared-flight/repository");
-const { createApnsSender: createSharedApnsSender } = require("./shared-flight/notifications");
+const { notificationTitle: sharedNotificationTitle, notificationBody: sharedNotificationBody, createApnsSender: createSharedApnsSender } = require("./shared-flight/notifications");
 const { createSharedFlightService } = require("./shared-flight/service");
 const { mountSharedFlightRoutes } = require("./shared-flight/routes");
 const {
@@ -4708,46 +4708,19 @@ function arrivalWelcomePayload(normalized, flightId, context = {}) {
   const airportCode = normalizeAirportCode(normalized?.arrivalAirportIata) || "your destination";
   const airport = context.airport || airportForNotification(airportCode);
   const city = airport?.city || normalized?.arrivalCity || airportCode;
-  const title = `✈️ Welcome to ${city}!${arrivalWeatherTitleSuffix(normalized)}`;
-  const terminal = String(normalized?.arrivalTerminal || "").trim();
+  const title = `✈️ Welcome to ${city}.${arrivalWeatherTitleSuffix(normalized)}`;
   const gate = String(normalized?.arrivalGate || "").trim();
-  const locationParts = [
-    airportCode,
-    terminal ? `Terminal ${terminal}` : null,
-    gate ? `Gate ${gate}` : null,
-  ].filter(Boolean);
-  const localTime = arrivalLocalTimeForNotification(normalized);
-  const variance = arrivalScheduleVarianceText(normalized);
-  const taxiMinutes = positiveDurationMinutes(
-    normalized?.landingTimes?.actual,
-    normalized?.arrivalTimes?.actual || normalized?.arrivalTimes?.estimated
-  );
-
-  const sentences = [];
-  if (taxiMinutes) {
-    sentences.push(`Taxiing for ${taxiMinutes}m.`);
-  }
-
-  let arrivalSentence = locationParts.length > 0
-    ? `Arriving at ${locationParts.join(" • ")}`
-    : "Arriving at the gate";
-  if (localTime) {
-    arrivalSentence += ` at ${localTime} local time`;
-  }
-  if (variance) {
-    arrivalSentence += ` (${variance})`;
-  }
-  sentences.push(`${arrivalSentence}.`);
-
-  if (Number.isFinite(Number(context.visitOrdinal)) && Number(context.visitOrdinal) > 0) {
-    sentences.push(`This is your ${ordinalNumber(context.visitOrdinal)} time here.`);
-  }
+  const variance = arrivalScheduleVarianceText(normalized)?.replace(/(\d+)m /, "$1 min ");
+  let body = `Landed at ${airportCode}. Taxiing to ${gate ? `Gate ${gate}` : "the gate"}`;
+  if (variance) body += ` · ${variance}`;
+  body += ".";
+  if (Number(context.visitOrdinal) > 0) body += ` This is your ${ordinalNumber(context.visitOrdinal)} time in ${city}`;
 
   return {
     aps: {
       alert: {
         title,
-        body: sentences.join(" "),
+        body,
       },
       sound: RUNWY_NOTIFICATION_SOUND,
       "thread-id": `runwy.flight.${flightId}`,
@@ -4768,23 +4741,15 @@ function arrivalWelcomePayload(normalized, flightId, context = {}) {
 
 function trackedArrivalPayload(normalized, flightId, context = {}) {
   const code = readableFlightCode(normalized);
-  const route = routeCitiesForNotification(normalized);
-  const localTime = arrivalLocalTimeForNotification(normalized);
-  const travelerName = firstNameForNotification(context.travelerName);
-  const subject = context.isOwner === false && travelerName
-    ? `${travelerName}'s flight ${code}`
-    : `Flight ${code}`;
-
-  let body = `${subject}${route ? `, ${route},` : ""} that you were tracking has landed`;
-  if (localTime) {
-    body += ` at ${localTime} local time`;
-  }
-  body += ".";
+  const city = airportForNotification(normalized?.arrivalAirportIata)?.city || normalized?.arrivalCity || normalized?.arrivalAirportIata || "the destination";
+  const traveler = context.isOwner === false ? firstNameForNotification(context.travelerName) : null;
+  const title = `${traveler || code} has landed ✈️`;
+  const body = traveler ? `${traveler}’s flight ${code} has landed in ${city}` : `The flight you were tracking has landed in ${city}.`;
 
   return {
     aps: {
       alert: {
-        title: "✈️ Tracked Flight Landed",
+        title,
         body,
       },
       sound: RUNWY_NOTIFICATION_SOUND,
@@ -4804,6 +4769,27 @@ function trackedArrivalPayload(normalized, flightId, context = {}) {
   };
 }
 
+function revisedDepartureAlert(normalized, eventType, context = {}) {
+  const flight = {
+    flight_number: readableFlightCode(normalized),
+    origin_airport: normalized.departureAirportIata,
+    destination_airport: normalized.arrivalAirportIata,
+    estimated_departure_at: normalized.departureTimes?.estimated || normalized.estimatedDepartureAt,
+    scheduled_departure_at: normalized.departureTimes?.scheduled || normalized.scheduledDepartureAt,
+    departure_gate: normalized.departureGate || normalized.gate,
+    normalized_data: normalized,
+  };
+  const event = {
+    event_type: eventType,
+    old_value: { gate: context.previousDepartureGate || context.previousGate },
+    new_value: { gate: flight.departure_gate },
+  };
+  return {
+    title: sharedNotificationTitle(flight, event, { isCircle: context.isOwner === false, ownerDisplayName: context.travelerName }),
+    body: sharedNotificationBody(flight, event, { isCircle: context.isOwner === false, ownerDisplayName: context.travelerName }),
+  };
+}
+
 function notificationPayloadFor(normalized, flightId, context = {}) {
   const alerts = normalized?.alerts;
   if (!alerts) return null;
@@ -4814,10 +4800,7 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
   if (alerts.cancelledNow) {
     return {
       aps: {
-        alert: {
-          title: "Flight Cancelled",
-          body: `${code} (${route}) has been cancelled.`,
-        },
+        alert: revisedDepartureAlert(normalized, "CANCELLED", context),
         sound: RUNWY_NOTIFICATION_SOUND,
       },
       runwy: {
@@ -4841,7 +4824,8 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
     return {
       aps: {
         alert: {
-          title: "✈️ Flight Took Off",
+          title: context.isOwner === false && firstNameForNotification(context.travelerName)
+            ? `${firstNameForNotification(context.travelerName)}'s Flight Took Off ✈️` : "✈️ Flight Took Off",
           body: `${subject}${routeDescription ? `, ${routeDescription},` : ""} is now in the air.`,
         },
         sound: RUNWY_NOTIFICATION_SOUND,
@@ -4860,10 +4844,7 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
     const routeDescription = routeCitiesForNotification(normalized);
     return {
       aps: {
-        alert: {
-          title: "✈️ Taking Off",
-          body: `${subject}${routeDescription ? `, ${routeDescription},` : ""} is about to take off.`,
-        },
+        alert: revisedDepartureAlert(normalized, "TAKEOFF_ROLL", context),
         sound: RUNWY_NOTIFICATION_SOUND,
       },
       runwy: {
@@ -4878,10 +4859,7 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
   if (alerts.taxiingNow) {
     return {
       aps: {
-        alert: {
-          title: "Taxiing",
-          body: `${code} (${route}) is taxiing.`,
-        },
+        alert: revisedDepartureAlert(normalized, "TAXIING", context),
         sound: RUNWY_NOTIFICATION_SOUND,
       },
       runwy: {
@@ -4899,10 +4877,7 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
 
     return {
       aps: {
-        alert: {
-          title: "Flight Delayed",
-          body: `${code} (${route}) is delayed${delayText}.`,
-        },
+        alert: revisedDepartureAlert(normalized, "DELAYED", context),
         sound: RUNWY_NOTIFICATION_SOUND,
       },
       runwy: {
@@ -4921,10 +4896,7 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
 
     return {
       aps: {
-        alert: {
-          title: "Gate Changed",
-          body: `${code} (${route}) moved${gateText}.`,
-        },
+        alert: revisedDepartureAlert(normalized, "GATE_CHANGED", context),
         sound: RUNWY_NOTIFICATION_SOUND,
       },
       runwy: {
@@ -4955,10 +4927,10 @@ function notificationPayloadFor(normalized, flightId, context = {}) {
       return {
         aps: {
           alert: {
-            title: isReassignment ? "🧳 Baggage Claim Changed" : "🧳 Baggage Claim Assigned",
+            title: isReassignment ? "New baggage belt 🧳" : `Bags this way 🧳 · Belt ${belt}`,
             body: isReassignment
-              ? `${luggageOwner}${flightDescription ? ` for ${flightDescription}` : ""} changed from belt ${previousNotifiedBelt} to belt ${belt}.`
-              : `${luggageOwner}${flightDescription ? ` for ${flightDescription}` : ""} will be on belt ${belt}.`,
+              ? `Head to Belt ${belt} instead; ${flightCode} baggage has been reassigned to Belt ${belt}.`
+              : `Baggage for ${flightCode} is assigned to Belt ${belt}`,
           },
           sound: RUNWY_NOTIFICATION_SOUND,
           "thread-id": `runwy.flight.${flightId}`,
@@ -5129,20 +5101,18 @@ function circleNotificationPreferenceConditionForEventType(eventType) {
   switch (eventType) {
     case "flight_delayed":
       return "fp.notify_delay = true";
-    case "flight_gate_change":
-      return "fp.notify_gate_change = true";
+    case "flight_cancelled":
+    case "flight_diverted":
+      return "true";
+    case "flight_trip_starting":
+    case "flight_boarding":
     case "flight_departed":
-    case "flight_takeoff_roll":
     case "flight_taxiing":
-    case "flight_inbound_arrived":
-    case "flight_inbound_departed":
-    case "flight_inbound_cancelled":
-    case "flight_inbound_diverted":
       return "fp.notify_departure = true";
     case "flight_arrived":
       return "fp.notify_arrival = true";
     default:
-      return "true";
+      return "false";
   }
 }
 

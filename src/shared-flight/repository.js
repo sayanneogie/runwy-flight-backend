@@ -2011,29 +2011,22 @@ function createPostgresSharedFlightRepository(pool) {
 function circleNotificationPreferenceConditionForEventType(eventType) {
   switch (String(eventType || "").toUpperCase()) {
     case "DELAYED":
-    case "RESCHEDULED":
       return "fp.notify_delay = true";
-    case "GATE_CHANGED":
-    case "TERMINAL_CHANGED":
-      return "fp.notify_gate_change = true";
+    case "CANCELLED":
+    case "DIVERTED":
+      return "true";
+    case "TRIP_STARTING":
+    case "BOARDING":
+    case "TAXIING":
     case "DEPARTED":
     case "AIRBORNE":
-    case "TAXIING":
-    case "TAKEOFF_ROLL":
-    case "TRIP_STARTING":
-    case "INBOUND_ARRIVED":
-    case "INBOUND_DEPARTED":
-    case "INBOUND_CANCELLED":
-    case "INBOUND_DIVERTED":
       return "fp.notify_departure = true";
     case "LANDED":
     case "ARRIVED":
-    case "ARRIVED_AT_GATE":
-    case "TAXI_IN":
       return "fp.notify_arrival = true";
     default:
-      return "true";
+      return "false";
   }
 }
 
-module.exports = { createMemorySharedFlightRepository, createPostgresSharedFlightRepository };
+module.exports = { createMemorySharedFlightRepository, createPostgresSharedFlightRepository, circleNotificationPreferenceConditionForEventType };

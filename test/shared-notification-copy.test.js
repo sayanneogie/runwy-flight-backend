@@ -22,7 +22,7 @@ const flight = {
   status: "scheduled",
 };
 
-test("five-hour traveller reminder uses a time-aware greeting and origin-local departure time", () => {
+test("three-hour traveller reminder uses a time-aware greeting and origin-local departure time", () => {
   const event = {
     id: "event-id",
     event_type: "TRIP_STARTING",
@@ -39,14 +39,14 @@ test("five-hour traveller reminder uses a time-aware greeting and origin-local d
     temperatureUnit: "fahrenheit",
   });
 
-  assert.equal(payload.aps.alert.title, "BLR ✈️ SIN · 82°F ☀️");
-  assert.match(payload.aps.alert.body, /^Good morning! Your flight today is on time\./);
+  assert.equal(payload.aps.alert.title, "Right on schedule ✈️ 82°F ☀️");
+  assert.match(payload.aps.alert.body, /^Your flight AI 101 is on time\./);
   assert.match(payload.aps.alert.body, /AI 101/);
-  assert.match(payload.aps.alert.body, /↗ BLR Terminal 2 · Gate A4 at 3:30 PM/);
-  assert.match(payload.aps.alert.body, /↘ SIN at 10:30 PM/);
+  assert.match(payload.aps.alert.body, /↗ BLR T2 · Gate A4 at 3:30 PM/);
+  assert.doesNotMatch(payload.aps.alert.body, /↘/);
 });
 
-test("five-hour Circle reminder names the traveller", () => {
+test("three-hour Circle reminder names the traveller", () => {
   const event = {
     id: "event-id",
     event_type: "TRIP_STARTING",
@@ -65,18 +65,18 @@ test("five-hour Circle reminder names the traveller", () => {
     temperatureUnit: "celsius",
   });
 
-  assert.equal(payload.aps.alert.title, "BLR ✈️ SIN · 28°C ☁️");
-  assert.match(payload.aps.alert.body, /^Hey Sayan, today Maya has a flight from /);
+  assert.equal(payload.aps.alert.title, "Maya has a flight today ✈️");
+  assert.match(payload.aps.alert.body, /^Hey Sayan, Maya has a flight from /);
   assert.match(payload.aps.alert.body, /3:30 PM local time/);
-  assert.match(payload.aps.alert.body, /AI 101 · BLR → SIN/);
+  assert.doesNotMatch(payload.aps.alert.body, /AI 101 · BLR → SIN/);
 });
 
 test("shared takeoff, landing, and baggage notifications use the requested emojis", () => {
-  assert.equal(notificationTitle(flight, { event_type: "TAKEOFF_ROLL" }), "✈️ Taking Off");
-  assert.equal(notificationTitle(flight, { event_type: "LANDED" }), "✈️ Flight Landed");
+  assert.equal(notificationTitle(flight, { event_type: "TAKEOFF_ROLL" }), "And we're off ✈️");
+  assert.equal(notificationTitle(flight, { event_type: "LANDED" }), "AI 101 has landed ✈️");
   assert.equal(
     notificationTitle(flight, { event_type: "BAGGAGE_BELT_ASSIGNED", old_value: null }),
-    "🧳 Baggage Belt Assigned"
+    "Bags this way 🧳"
   );
   assert.equal(
     notificationBody(
@@ -84,7 +84,7 @@ test("shared takeoff, landing, and baggage notifications use the requested emoji
       { event_type: "BAGGAGE_BELT_ASSIGNED", old_value: null, new_value: { baggageBelt: "14" } },
       { isCircle: true, ownerDisplayName: "Maya Patel" }
     ),
-    "Maya's luggage for flight AI 101 will be on belt 14."
+    "Baggage for AI 101 is assigned to Belt 14"
   );
 });
 
@@ -227,9 +227,95 @@ test("traveller landing notifications use the rich destination welcome format", 
     }
   );
 
-  assert.equal(payload.aps.alert.title, "✈️ Welcome to Singapore! 🌧️ 28°");
-  assert.match(payload.aps.alert.body, /Taxiing for 8m\./);
-  assert.match(payload.aps.alert.body, /SIN • Terminal 1 • Gate A8/);
-  assert.match(payload.aps.alert.body, /10:40 PM local time \(10m late\)/);
-  assert.match(payload.aps.alert.body, /This is your 4th time here\./);
+  assert.equal(payload.aps.alert.title, "✈️ Welcome to Singapore. 🌧️ 28°");
+  assert.match(payload.aps.alert.body, /Landed at SIN\./);
+  assert.match(payload.aps.alert.body, /Taxiing to Gate A8/);
+  assert.match(payload.aps.alert.body, /10 min late/);
+  assert.match(payload.aps.alert.body, /This is your 4th time in Singapore/);
+});
+
+test("revised departure alerts use live details and departure-local times", () => {
+  const demo = {
+    ...flight, origin_airport: "DEL", destination_airport: "FCO",
+    departure_terminal: "3", departure_gate: "A12",
+    scheduled_departure_at: "2026-09-13T17:40:00Z",
+    estimated_departure_at: "2026-09-13T18:50:00Z",
+  };
+  const cases = [
+    ["DELAYED", {}, "Running a little late ⏱️", "AI 101 is delayed by 1h 10m. New departure: 12:20 AM"],
+    ["CANCELLED", {}, "Flight canceled 😐", "AI 101 has been canceled. Contact airline support"],
+    ["GATE_CHANGED", { gate: "A16" }, "Gate has changed ✈️", "Flight gate for AI 101 moved from A12 → A16."],
+    ["TERMINAL_CHANGED", { terminal: "2" }, "Terminal switch ↗", "AI 101 is now departing from Terminal 2."],
+    ["RESCHEDULED", {}, "A change of plans 🗓️", "AI 101 has a new departure time: 12:20 AM."],
+    ["AIRCRAFT_CHANGED", { aircraftType: "A350-900" }, "New ride ✈️", "Aircraft changed: AI 101 is now flying on an A350-900."],
+    ["BOARDING", {}, "Time to board 🎫", "AI 101 is boarding now at Gate A12."],
+    ["TAXIING", {}, "Heading for the runway ✈️", "AI 101 is taxiing for takeoff."],
+    ["TAKEOFF_ROLL", {}, "And we're off ✈️", "AI 101 is taking off for Rome."],
+  ];
+  for (const [type, value, title, body] of cases) {
+    const event = { event_type: type, old_value: { gate: "A12" }, new_value: value };
+    assert.equal(notificationTitle(demo, event), title);
+    assert.equal(notificationBody(demo, event), body);
+  }
+  assert.equal(notificationBody({ ...demo, departure_gate: null }, { event_type: "BOARDING" }), "AI 101 is boarding now.");
+  assert.equal(notificationBody(demo, { event_type: "GATE_CHANGED", new_value: { gate: "A16" } }), "Flight gate for AI 101 moved to A16.");
+});
+
+test("arrival messages distinguish Circle, tracking, gates, diversions and belts", () => {
+  const demo = { ...flight, destination_airport: "FCO", normalized_data: { arrivalGate: "E12" } };
+  const landed = { event_type: "LANDED" };
+  const circle = { isCircle: true, ownerDisplayName: "Sayan Neogie" };
+  assert.equal(notificationTitle(demo, landed, circle), "Sayan has landed ✈️");
+  assert.equal(notificationBody(demo, landed, circle), "Sayan’s flight AI 101 has landed in Rome");
+  assert.equal(notificationBody(demo, landed), "The flight you were tracking has landed in Rome.");
+  assert.equal(notificationTitle(demo, landed, { isCircle: true }), "AI 101 has landed ✈️");
+  const cases = [
+    ["DIVERTED", { diversionAirport: "MXP" }, "Flight diverted 👀", "Your flight has been diverted to MXP (Milan)"],
+    ["TAXI_IN", {}, "Heading to the gate", "AI 101 is taxiing to gate E12."],
+    ["ARRIVED_AT_GATE", {}, "Journey complete ✨", "AI 101 has reached Gate E12."],
+    ["BAGGAGE_BELT_ASSIGNED", { baggageBelt: "7" }, "Bags this way 🧳 · Belt 7", "Baggage for AI 101 is assigned to Belt 7"],
+  ];
+  for (const [type, value, title, body] of cases) {
+    const event = { event_type: type, new_value: value };
+    assert.equal(notificationTitle(demo, event), title);
+    assert.equal(notificationBody(demo, event), body);
+  }
+  const changed = { event_type: "BAGGAGE_BELT_ASSIGNED", old_value: { baggageBelt: "7" }, new_value: { baggageBelt: "9" } };
+  assert.equal(notificationTitle(demo, changed), "New baggage belt 🧳");
+  assert.equal(notificationBody(demo, changed), "Head to Belt 9 instead; AI 101 baggage has been reassigned to Belt 9.");
+  assert.equal(notificationBody({ ...demo, normalized_data: {} }, { event_type: "TAXI_IN" }), "AI 101 is taxiing to the gate.");
+});
+
+test("Circle wording uses member names without changing traveler alerts", () => {
+  const context = { isCircle: true, ownerDisplayName: "Sayan Neogie", recipientDisplayName: "Alex Smith" };
+  const cases = [
+    ["BOARDING", "Sayan is now boarding for 🎫", "Sayan's flight AI 101 is boarding now."],
+    ["CANCELLED", "Sayan's Flight is canceled 😬", "AI 101 has been canceled. Contact airline support"],
+    ["TAXIING", "Heading for the runway ✈️", "AI 101 is taxiing for takeoff. Send em a safe-flight text"],
+  ];
+  for (const [type, title, body] of cases) {
+    assert.equal(notificationTitle(flight, { event_type: type }, context), title);
+    assert.equal(notificationBody(flight, { event_type: type }, context), body);
+  }
+  assert.equal(notificationTitle(flight, { event_type: "DELAYED" }, context), "Sayan's flight is delayed 😐");
+  assert.match(notificationBody(flight, { event_type: "DELAYED" }, context), /^Sayan's flight AI 101 is delayed\. New departure:/);
+  assert.equal(notificationBody(flight, { event_type: "DIVERTED", new_value: { diversionAirport: "MXP" } }, context), "Sayan's flight has been diverted to MXP (Milan).");
+  assert.equal(notificationTitle(flight, { event_type: "CANCELLED" }), "Flight canceled 😐");
+});
+
+test("delay durations handle midnight, offsets, whole hours and unavailable times", () => {
+  const demo = { ...flight, scheduled_departure_at: "2026-09-13T23:10:00+05:30" };
+  for (const [estimated, duration] of [
+    ["2026-09-14T00:20:00+05:30", "1h 10m"],
+    ["2026-09-14T01:10:00+05:30", "2h"],
+    ["2026-09-13T18:00:00Z", "20m"],
+  ]) {
+    const event = { event_type: "DELAYED", new_value: { estimatedDepartureAt: estimated } };
+    assert.ok(notificationBody(demo, event).startsWith(`AI 101 is delayed by ${duration}.`));
+    assert.ok(notificationBody(demo, event, { isCircle: true, ownerDisplayName: "Sayan Neogie" }).startsWith(`Sayan's flight AI 101 is delayed by ${duration}.`));
+  }
+  for (const estimated of [null, "invalid", "2026-09-13T17:00:00Z", demo.scheduled_departure_at]) {
+    assert.doesNotMatch(notificationBody({ ...demo, estimated_departure_at: estimated }, { event_type: "DELAYED" }), /delayed by/);
+  }
+  assert.doesNotMatch(notificationBody({ ...demo, scheduled_departure_at: null, estimated_departure_at: "2026-09-14T00:20:00+05:30" }, { event_type: "DELAYED" }), /delayed by/);
 });

@@ -268,6 +268,10 @@ test("impending departure webhook creates a Trip Starting Soon APNs event withou
       },
     },
   });
+  await repository.updateFlight({
+    ...row,
+    estimated_departure_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
   await repository.upsertUserFlight("u1", row.id, { alertPreferences: { low: true, medium: true, high: true, critical: true } });
   await repository.upsertDeviceToken("u1", { deviceToken: "token-u1", environment: "sandbox" });
 

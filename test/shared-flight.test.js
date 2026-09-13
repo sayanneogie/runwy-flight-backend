@@ -3351,8 +3351,8 @@ test("weather insights are cached by airport hour and can create one advisory ev
   assert.ok(service.queue.jobs.some((job) => job.name === "fanoutNotificationJob"));
 });
 
-test("five-hour reminder is durable and excludes tracking-only followers", async () => {
-  const departure = new Date(Date.now() + 5 * 60 * 60_000 + 5 * 60_000).toISOString();
+test("three-hour reminder is durable and excludes tracking-only followers", async () => {
+  const departure = new Date(Date.now() + 3 * 60 * 60_000 - 5 * 60_000).toISOString();
   const arrival = new Date(Date.now() + 8 * 60 * 60_000).toISOString();
   const weather = {
     async insightForFlight(row) {

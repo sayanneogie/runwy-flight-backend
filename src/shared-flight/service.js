@@ -1,5 +1,6 @@
 "use strict";
 
+const { circleNotificationPreferenceConditionForEventType } = require("./repository");
 const { createFlightCache } = require("./cache");
 const {
   compareFlightState,
@@ -32,7 +33,7 @@ const DEPARTURE_CATCHUP_FINAL_AFTER_MS = 8 * 60_000;
 const MISSED_DEPARTURE_RECOVERY_MIN_STALE_MS = 10 * 60_000;
 const MISSED_DEPARTURE_RECOVERY_WINDOW_MS = 2 * 60 * 60_000;
 const ARRIVAL_CATCHUP_AFTER_MS = 6 * 60_000;
-const PREFLIGHT_REMINDER_BEFORE_MS = 5 * 60 * 60_000;
+const PREFLIGHT_REMINDER_BEFORE_MS = 3 * 60 * 60_000;
 const INBOUND_MONITOR_WINDOW_MS = 3 * 60 * 60_000;
 const DEFAULT_API_ACTIVE_POLL_MS = 2 * 60_000;
 const DEFAULT_API_PREDEPARTURE_POLL_MS = 5 * 60_000;
@@ -688,6 +689,7 @@ function createSharedFlightService({
     const dedupeKey = notificationDedupeKey(data.flight, data.event);
     let sent = 0;
     for (const target of targets) {
+      if (target.isCircle && circleNotificationPreferenceConditionForEventType(data.event.event_type) === "false") continue;
       const ownerUserId = target.userFlight.owner_user_id || target.userFlight.user_id;
       if (repository.isUserFlightNotificationActive) {
         const active = await repository.isUserFlightNotificationActive(ownerUserId, target.userFlight.id);
@@ -1304,6 +1306,8 @@ function createSharedFlightService({
           });
         }
         if (alert.event_type === "flight_departure_soon") {
+          const departureMs = new Date(target.estimated_departure_at || target.scheduled_departure_at || "").getTime();
+          if (!Number.isFinite(departureMs) || departureMs <= Date.now() || departureMs - Date.now() > PREFLIGHT_REMINDER_BEFORE_MS) continue;
           const recent = await repository.findRecentEventByType?.(target.id, "TRIP_STARTING", 24 * 60 * 60_000);
           if (recent) continue;
           const [event] = await repository.insertEvents(target.id, [{
@@ -1633,7 +1637,7 @@ function createSharedFlightService({
     const departureAt = row.estimated_departure_at || row.scheduled_departure_at;
     const departureMs = new Date(departureAt || 0).getTime();
     const minutesUntilDeparture = Math.round((departureMs - Date.now()) / 60_000);
-    if (!Number.isFinite(departureMs) || minutesUntilDeparture <= 0 || minutesUntilDeparture > 330) {
+    if (!Number.isFinite(departureMs) || minutesUntilDeparture <= 0 || departureMs - Date.now() > PREFLIGHT_REMINDER_BEFORE_MS) {
       return null;
     }
 
@@ -1658,7 +1662,7 @@ function createSharedFlightService({
         estimatedDepartureAt: row.estimated_departure_at || null,
         weatherInsight: embeddedWeather,
       },
-      summary: "Flight scheduled to depart in about five hours",
+      summary: "Flight scheduled to depart in about three hours",
       notification_required: true,
       confidence: "high",
       provider_event_time: new Date().toISOString(),
