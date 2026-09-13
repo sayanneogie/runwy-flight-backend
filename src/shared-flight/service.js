@@ -113,13 +113,9 @@ function userFlightMatchesDisplayedManifest(row, manifestItem) {
 }
 
 function normalizedBreadcrumb(point) {
-  const rawLatitude = point?.latitude ?? point?.lat;
-  const rawLongitude = point?.longitude ?? point?.lon;
-  if (rawLatitude == null || rawLongitude == null || rawLatitude === "" || rawLongitude === "" ||
-      typeof rawLatitude === "boolean" || typeof rawLongitude === "boolean") return null;
-  const latitude = Number(rawLatitude);
-  const longitude = Number(rawLongitude);
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return null;
+  const latitude = Number(point?.latitude ?? point?.lat);
+  const longitude = Number(point?.longitude ?? point?.lon);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
   return {
     latitude,
     longitude,
@@ -247,13 +243,8 @@ function preserveKnownOperationalFields(normalized, row) {
     ? previousStatus
     : normalized?.status;
 
-  const oldPosition = previous.position || previous.livePosition;
-  const newPosition = normalized?.position || normalized?.livePosition;
-  const useOldPosition = oldPosition?.recordedAt &&
-    (!newPosition?.recordedAt || Date.parse(newPosition.recordedAt) < Date.parse(oldPosition.recordedAt));
   return {
     ...normalized,
-    ...(useOldPosition ? { position: oldPosition, livePosition: oldPosition } : {}),
     status: stableStatus,
     trackPoints,
     ...(takeoffTimes ? { takeoffTimes } : {}),
@@ -364,18 +355,14 @@ function createSharedFlightService({
     const params = normalizeSearchParams(input);
     const cacheKey = `flight:${params.flightKey}`;
     const cached = await cache.getJSON(cacheKey);
-    // A process-local cache is not an authority after another API/stream worker
-    // commits a newer revision. Verify against shared storage before serving it.
-    const existing = await repository.findFlightByKeyOrAlias(params.flightKey);
-    if (cached && existing && Number(cached.stateRevision || 0) === Number(existing.state_revision || 0) &&
-        new Date(existing.fresh_until || 0).getTime() > Date.now() &&
-        !existing.needs_revalidation && matchesRequestedOriginLocalDate(cached, params)) {
+    if (cached && matchesRequestedOriginLocalDate(cached, params)) {
       return { ...cached, source: "redis", freshness: cached.freshness || "fresh", isRefreshing: false };
     }
     if (cached) {
       await cache.redis.del(cacheKey);
     }
 
+    const existing = await repository.findFlightByKeyOrAlias(params.flightKey);
     if (existing && matchesRequestedOriginLocalDate(existing, params)) {
       const fresh = existing.fresh_until && new Date(existing.fresh_until).getTime() > Date.now();
       const deferPolling = shouldDeferProviderPolling(existing);
@@ -427,18 +414,7 @@ function createSharedFlightService({
       }
       const ttl = getFlightFreshnessTTL(normalized);
       const freshUntil = new Date(Date.now() + ttl * 1000).toISOString();
-      let saved;
-      if (existing && !matchesRequestedOriginLocalDate(existing, params) && repository.commitCanonicalState) {
-        // Explicit local-date repair is a revision-checked state change, not a
-        // discovery upsert allowed to replace a concurrent operational update.
-        const repaired = await repository.commitCanonicalState({
-          ...existing, ...mapNormalizedToDb(normalized, params), id: existing.id,
-          state_revision: existing.state_revision, fresh_until: freshUntil,
-        }, [], provider.name);
-        saved = repaired.flight;
-      } else {
-        saved = await repository.upsertFlightFromNormalized(normalized, params, freshUntil);
-      }
+      const saved = await repository.upsertFlightFromNormalized(normalized, params, freshUntil);
       await repository.insertSnapshot(saved);
       const response = rowToFlightResponse(saved, { source: "provider", freshness: "fresh" });
       await cache.setJSON(`flight:${saved.flight_key}`, { ...response, source: "redis" }, ttl);
@@ -483,7 +459,7 @@ function createSharedFlightService({
   }
 
   async function refreshFlightJob(job) {
-    let row = job.data.flight_instance_id
+    const row = job.data.flight_instance_id
       ? await repository.findFlightById(job.data.flight_instance_id)
       : await repository.findFlightByKeyOrAlias(job.data.flight_key);
     if (!row || (row.is_final && job.data.reason !== "forced" && !isArrivalDetailsRefreshReason(job.data.reason))) return null;
@@ -492,8 +468,6 @@ function createSharedFlightService({
     if (!lock) return null;
     const startedAt = Date.now();
     try {
-      row = await repository.findFlightById(row.id);
-      if (!row) return null;
       const params = { airline: row.airline_code, number: row.flight_number, date: dateOnly(row.departure_date), origin: row.origin_airport || "UNKNOWN", destination: row.destination_airport || "UNKNOWN", flightKey: row.flight_key };
       params.timezoneOffsetMinutes = row.normalized_data?.timezoneOffsetMinutes ?? null;
       const reason = String(job.data.reason || "");
@@ -511,9 +485,9 @@ function createSharedFlightService({
       const providerOptions = {
         forceRefresh:
           reason === "forced" ||
+          reason === "detail_open" ||
           reason.startsWith("provider_alert_position"),
         skipLivePosition: isOperationalDetailsRefreshReason(job.data.reason),
-        reason,
         ...(usesTrackedFlightReserve ? { budgetEndpoint: "tracked_flight" } : {}),
       };
       let providerNormalized = row.provider_flight_id && provider.supportsProviderId && provider.fetchFlightByProviderId
@@ -618,12 +592,6 @@ function createSharedFlightService({
         await repository.logApiUsage({ provider: provider.name, endpoint: "refreshFlightJob", flight_key: row.flight_key, response_time_ms: Date.now() - startedAt, error: "no_match" });
         return row;
       }
-      // Cached API data cannot undo an event received after that request began.
-      if (providerNormalized.providerObservedAt && row.last_stream_event_at &&
-          Date.parse(providerNormalized.providerObservedAt) < Date.parse(row.last_stream_event_at)) {
-        await repository.logApiUsage({ provider: provider.name, endpoint: "refreshFlightJob", flight_key: row.flight_key, cache_status: "older_than_confirmed_event" });
-        return row;
-      }
       const normalized = reconcileDiversionContext(
         preserveKnownOperationalFields(providerNormalized, row),
         params,
@@ -633,7 +601,7 @@ function createSharedFlightService({
       normalized.dataConfidence = validation.confidence;
       if (!validation.ok) {
         await repository.markSuspicious(row.id, validation.problems.join(","));
-        await queue.add("revalidateSuspiciousFlightJob", { flight_instance_id: row.id, flight_key: row.flight_key }, { dedupe: true, dedupeKey: `revalidate:${row.id}`, delayMs: 60_000 });
+        await queue.add("revalidateSuspiciousFlightJob", { flight_instance_id: row.id, flight_key: row.flight_key }, { dedupe: true, dedupeKey: `revalidate:${row.id}`, runImmediately: false });
         return row;
       }
       const activeViewerCount = await getActiveViewerCount(row.id);
@@ -653,7 +621,7 @@ function createSharedFlightService({
       const suspicious = events.find((event) => event.event_type === "PROVIDER_DATA_SUSPICIOUS");
       if (suspicious) {
         await repository.markSuspicious(row.id, suspicious.summary);
-        await queue.add("revalidateSuspiciousFlightJob", { flight_instance_id: row.id, flight_key: row.flight_key }, { dedupe: true, dedupeKey: `revalidate:${row.id}`, delayMs: 60_000 });
+        await queue.add("revalidateSuspiciousFlightJob", { flight_instance_id: row.id, flight_key: row.flight_key }, { dedupe: true, dedupeKey: `revalidate:${row.id}`, runImmediately: false });
         return row;
       }
       const committed = repository.commitCanonicalState
@@ -720,7 +688,6 @@ function createSharedFlightService({
       : null;
     const dedupeKey = notificationDedupeKey(data.flight, data.event);
     let sent = 0;
-    let fanoutIncomplete = false;
     for (const target of targets) {
       if (target.isCircle && circleNotificationPreferenceConditionForEventType(data.event.event_type) === "false") continue;
       const ownerUserId = target.userFlight.owner_user_id || target.userFlight.user_id;
@@ -816,7 +783,6 @@ function createSharedFlightService({
         }
         if (deliveryStatus === "sent") sent += 1;
       } catch (error) {
-        fanoutIncomplete = true;
         const recoveredParent = repository.refreshNotificationDeliveryStatus
           ? await repository.refreshNotificationDeliveryStatus(delivery.row.id).catch(() => null)
           : null;
@@ -836,9 +802,6 @@ function createSharedFlightService({
           await repository.updateNotificationDelivery(delivery.row.id, { status: "failed", error: error?.message || String(error) });
         }
       }
-    }
-    if (!fanoutIncomplete && repository.completeNotificationFanout) {
-      await repository.completeNotificationFanout(data.event.id);
     }
     return { sent };
   }
@@ -1194,10 +1157,6 @@ function createSharedFlightService({
     const row = await repository.findFlightById(flightInstanceId);
     if (!row || !normalized) return null;
     const incomingEventAt = options.eventTime || new Date().toISOString();
-    if (!Number.isFinite(new Date(incomingEventAt).getTime()) || new Date(incomingEventAt).getTime() > Date.now() + 2 * 60_000) {
-      await repository.logApiUsage({ provider: provider.name, endpoint: "stream_update", flight_key: row.flight_key, error: "invalid_or_future_event_timestamp" });
-      return row;
-    }
     if (isOlderStreamEvent(row.last_stream_event_at, incomingEventAt)) {
       return row;
     }
@@ -1219,7 +1178,7 @@ function createSharedFlightService({
     normalized.dataConfidence = validation.confidence;
     if (!validation.ok) {
       await repository.markSuspicious(row.id, validation.problems.join(","));
-      await queue.add("revalidateSuspiciousFlightJob", { flight_instance_id: row.id, flight_key: row.flight_key }, { dedupe: true, dedupeKey: `revalidate:${row.id}`, delayMs: 60_000 });
+      await queue.add("revalidateSuspiciousFlightJob", { flight_instance_id: row.id, flight_key: row.flight_key }, { dedupe: true, dedupeKey: `revalidate:${row.id}`, runImmediately: false });
       return row;
     }
     const ttl = getFlightFreshnessTTL({ ...normalized, liveDataSource, streamingStatus });
@@ -1241,7 +1200,7 @@ function createSharedFlightService({
     const suspicious = events.find((event) => event.event_type === "PROVIDER_DATA_SUSPICIOUS");
     if (suspicious) {
       await repository.markSuspicious(row.id, suspicious.summary);
-      await queue.add("revalidateSuspiciousFlightJob", { flight_instance_id: row.id, flight_key: row.flight_key }, { dedupe: true, dedupeKey: `revalidate:${row.id}`, delayMs: 60_000 });
+      await queue.add("revalidateSuspiciousFlightJob", { flight_instance_id: row.id, flight_key: row.flight_key }, { dedupe: true, dedupeKey: `revalidate:${row.id}`, runImmediately: false });
       return row;
     }
     const committed = repository.commitCanonicalState
@@ -1725,10 +1684,6 @@ function createSharedFlightService({
     const rows = await repository.listLifecycleRecoveryCandidates();
     let scheduled = 0;
     for (const row of rows) {
-      if (row.needs_revalidation) {
-        await queue.add("revalidateSuspiciousFlightJob", { flight_instance_id: row.id, flight_key: row.flight_key },
-          { dedupe: true, dedupeKey: `revalidate:${row.id}`, delayMs: 60_000 });
-      }
       const jobs = await scheduleLifecycleCatchups(row.id, reason);
       scheduled += jobs.filter((job) => !job?.deduped).length;
       const apiPoll = await scheduleApiPoll(row.id, reason, row);
@@ -1783,18 +1738,6 @@ function createSharedFlightService({
       });
     }
 
-    // Circle access, notification preferences and device ownership may have
-    // changed since this payload was queued. Recheck before sending a retry.
-    try {
-      if (repository.notificationTokenIsAuthorized && !await repository.notificationTokenIsAuthorized(claimed)) {
-        return repository.updateNotificationTokenDelivery(claimed.id, { status: "permanent_failed", error: "notification_access_revoked" });
-      }
-    } catch (error) {
-      return repository.updateNotificationTokenDelivery(claimed.id, {
-        status: Number(claimed.attempt_count || 0) < APNS_OUTBOX_MAX_ATTEMPTS ? "retry" : "permanent_failed",
-        next_attempt_at: apnsRetryAt(claimed.attempt_count), error: "notification_authorization_check_failed",
-      });
-    }
     try {
       const payload = fallback.payload || claimed.payload_json || {};
       const result = typeof apns.sendPayload === "function"

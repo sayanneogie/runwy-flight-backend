@@ -1,8 +1,6 @@
 "use strict";
 
-function createSharedFlightQueue({ onError = null, maxHistory = 1000 } = {}) {
-  let nextJobId = 0;
-  const historyLimit = Number.isFinite(maxHistory) ? Math.max(1, Math.floor(maxHistory)) : 1000;
+function createSharedFlightQueue({ onError = null } = {}) {
   const jobs = [];
   const handlers = new Map();
   const dedupe = new Set();
@@ -11,9 +9,8 @@ function createSharedFlightQueue({ onError = null, maxHistory = 1000 } = {}) {
     const dedupeKey = options.dedupeKey || `${name}:${data.flight_instance_id || data.flight_key || data.flight_event_id || JSON.stringify(data)}`;
     if (options.dedupe && dedupe.has(dedupeKey)) return { id: dedupeKey, deduped: true };
     dedupe.add(dedupeKey);
-    const job = { id: `${name}:${++nextJobId}`, name, data, options };
+    const job = { id: `${name}:${jobs.length + 1}`, name, data, options };
     jobs.push(job);
-    if (jobs.length > historyLimit) jobs.splice(0, jobs.length - historyLimit);
     if (options.runImmediately !== false && handlers.has(name)) {
       const run = async () => {
         try {
