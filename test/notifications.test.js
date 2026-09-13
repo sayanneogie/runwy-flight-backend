@@ -365,6 +365,8 @@ test("shared FlightAware alert context accepts PostgreSQL Date objects", () => {
 });
 
 test("existing FlightAware alerts are updated in place for configuration changes", async () => {
+  const originalAccess = __test__.paidAccess.flight;
+  __test__.paidAccess.flight = async () => ({ paid: true, verified: true });
   const originalFetch = global.fetch;
   const requests = [];
   global.fetch = async (url, options = {}) => {
@@ -392,6 +394,7 @@ test("existing FlightAware alerts are updated in place for configuration changes
     assert.equal(update.options.method, "PUT");
     assert.equal(JSON.parse(update.options.body).events.out, true);
   } finally {
+    __test__.paidAccess.flight = originalAccess;
     global.fetch = originalFetch;
   }
 });
@@ -751,4 +754,19 @@ test("Circle allows only the eight requested milestones in both notification pat
     assert.equal(__test__.circleNotificationPreferenceConditionForEventType(type), "false", type);
   }
   assert.notEqual(__test__.ownerNotificationPreferenceConditionForEventType("flight_gate_change"), "false");
+});
+
+
+test("free-only telemetry and alert paths never reach provider HTTP, even when forced", async () => {
+  const originalAccess = __test__.paidAccess.flight;
+  const originalFetch = global.fetch;
+  __test__.paidAccess.flight = async () => ({ paid: false, verified: true });
+  let calls = 0;
+  global.fetch = async () => { calls++; throw new Error("Must not call provider"); };
+  try {
+    assert.equal(await __test__.fetchFlightAwareLivePosition("free-flight", { forceRefresh: true }), null);
+    assert.deepEqual(await __test__.fetchFlightAwareTrackTrail("free-flight", { forceRefresh: true }), { trackPoints: [], livePosition: null });
+    await assert.rejects(__test__.updateFlightAwareAlert({ alertId: "existing", context: { providerFlightId: "free-flight" } }), /Paid membership required/);
+    assert.equal(calls, 0);
+  } finally { __test__.paidAccess.flight = originalAccess; global.fetch = originalFetch; }
 });

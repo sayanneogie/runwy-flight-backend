@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const crypto = require("node:crypto");
+const { createPaidAccess, withoutLiveTelemetry } = require("./paid-access");
 const http2 = require("node:http2");
 const express = require("express");
 const helmet = require("helmet");
@@ -248,6 +249,8 @@ const BUILD_INFO = Object.freeze({
     ).trim() || null,
   features: Object.freeze({
     scheduleAwareSearch: true,
+    paidTrackingEnforced: true,
+    membershipVerifierConfigured: Boolean(process.env.REVENUECAT_API_KEY),
     scheduleWindowHours: Math.round(FLIGHTAWARE_SCHEDULE_WINDOW_MS / 60 / 60_000),
   }),
 });
@@ -407,6 +410,80 @@ const pool = DATABASE_URL
       ssl: postgresSSLConfig(),
     })
   : null;
+
+const paidAccess = createPaidAccess({
+  apiKey: process.env.REVENUECAT_API_KEY,
+  query: pool ? (sql, params) => pool.query(sql, params) : null,
+});
+
+app.use("/v1", async (req, res, next) => {
+  try {
+    if (!req.auth?.userId) return next();
+    const access = await paidAccess.membership(req.auth.userId);
+    req.paidAccess = access.paid;
+    if (!access.paid) {
+      const json = res.json.bind(res);
+      res.json = (body) => json(withoutLiveTelemetry(body));
+    }
+    next();
+  } catch (error) { next(error); }
+});
+
+async function deleteProviderAlert(alertId) {
+  if (!alertId) return;
+  const response = await fetch(`${FLIGHTAWARE_BASE_URL}/alerts/${encodeURIComponent(alertId)}`, {
+    method: "DELETE", headers: { "x-apikey": FLIGHTAWARE_API_KEY },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok && response.status !== 404) throw new Error(`Alert removal failed (${response.status})`);
+}
+
+async function reconcilePaidSubscriptions() {
+  if (!pool || !process.env.REVENUECAT_API_KEY || !PROVIDER_CALLS_ENABLED) return;
+  const { rows } = await pool.query(`select * from public.flight_instances
+    where provider_alert_id is not null or normalized_data->'inboundFlight'->>'providerAlertId' is not null`);
+  for (const row of rows) {
+    try { await reconcilePaidFlightAccess(row); }
+    catch (error) { console.warn("Paid alert reconciliation failed", { error: error.message }); }
+  }
+  const legacy = await pool.query(`select id, owner_user_id as user_id, metadata_json from public.tracking_sessions
+    where metadata_json->'flightawareAlert'->>'alertId' is not null`);
+  for (const row of legacy.rows) {
+    const access = await paidAccess.membership(row.user_id);
+    if (!access.paid && access.verified) {
+      // Don't remove an alert also used by a paid shared occurrence.
+      const shared = rows.filter(f => String(f.provider_alert_id) === String(row.metadata_json.flightawareAlert.alertId));
+      let keep = false;
+      for (const flight of shared) if ((await paidAccess.flight(flight.provider_flight_id)).paid) keep = true;
+      if (!keep) {
+        await deleteProviderAlert(row.metadata_json.flightawareAlert.alertId);
+        await mergeTrackingSessionMetadata(row.id, { flightawareAlert: null });
+      }
+    }
+  }
+}
+
+async function reconcilePaidFlightAccess(flight) {
+  const access = await paidAccess.flight(flight?.provider_flight_id);
+  if (!access.paid && access.verified) {
+    if (flight.provider_alert_id) {
+      await deleteProviderAlert(flight.provider_alert_id);
+      await sharedFlightRepository.updateProviderAlert(flight.id, { status: "unavailable" });
+    }
+    const inbound = flight.normalized_data?.inboundFlight;
+    if (inbound?.providerAlertId) {
+      const inboundAccess = await paidAccess.flight(inbound.providerFlightId);
+      if (!inboundAccess.paid && inboundAccess.verified) {
+        await deleteProviderAlert(inbound.providerAlertId);
+        await pool.query(`update public.flight_instances set normalized_data = jsonb_set(
+          normalized_data, '{inboundFlight}', coalesce(normalized_data->'inboundFlight', '{}'::jsonb)
+            || '{"providerAlertId":null,"providerAlertStatus":"unavailable"}'::jsonb), updated_at = now()
+          where id = $1 and normalized_data->'inboundFlight'->>'providerAlertId' = $2`, [flight.id, String(inbound.providerAlertId)]);
+      }
+    }
+  }
+  return access.paid;
+}
 
 function flightAwareDailyBudgetLimitForEndpoint(endpoint) {
   if (String(endpoint || "") === "tracked_flight") {
@@ -2911,6 +2988,7 @@ async function fetchFlightAwareTrackTrail(providerFlightId, options = {}) {
   if (!PROVIDER_CALLS_ENABLED) {
     return { trackPoints: [], livePosition: null };
   }
+  if (!(await paidAccess.flight(providerFlightId)).paid) return { trackPoints: [], livePosition: null };
 
   const normalizedFlightId = String(providerFlightId || "").trim();
   if (!normalizedFlightId) {
@@ -3073,6 +3151,7 @@ async function fetchFlightAwareLivePosition(providerFlightId, options = {}) {
   if (!PROVIDER_CALLS_ENABLED) {
     return null;
   }
+  if (!(await paidAccess.flight(providerFlightId)).paid) return null;
 
   const normalizedFlightId = String(providerFlightId || "").trim();
   if (!normalizedFlightId) return null;
@@ -3687,6 +3766,7 @@ const sharedFlightService = createSharedFlightService({
   liveActivities: {
     sendFlightState: (flight) => sendLiveActivityStateForFlight(flight),
   },
+  paidAccess: { reconcileFlight: reconcilePaidFlightAccess, membership: paidAccess.membership, delivery: paidAccess.delivery },
   apns: createSharedApnsSender({
     send: async ({ token, payload, environment }) => sendApnsNotification(token, payload, environment),
   }),
@@ -3870,6 +3950,7 @@ function mergeResolvedInboundFlight(normalized, resolvedRecord) {
 }
 
 async function enrichNormalizedWithInboundFlight(normalized, providerName, options = {}) {
+  if (!(await paidAccess.flight(normalized?.inboundFlight?.providerFlightId)).paid) return normalized;
   const inboundFlight = normalized?.inboundFlight;
   if (providerName !== "flightaware" || !inboundFlight?.providerFlightId) {
     return normalized;
@@ -4064,6 +4145,7 @@ async function ensureFlightAwareAlertForInboundFlight(_flight, inboundFlight) {
 }
 
 async function updateFlightAwareAlert({ alertId, targetUrl, context }) {
+  if (!(await paidAccess.flight(context?.providerFlightId)).paid) throw new Error("Paid membership required for provider alerts");
   await ensureFlightAwareAlertEndpoint(targetUrl);
   const payload = buildFlightAwareAlertPayload({ targetUrl, context });
   const response = await fetch(`${FLIGHTAWARE_BASE_URL}/alerts/${encodeURIComponent(alertId)}`, {
@@ -4289,6 +4371,7 @@ async function verifyFlightAwareAlert({ targetUrl, context }) {
 }
 
 async function createFlightAwareAlert({ targetUrl, context }) {
+  if (!(await paidAccess.flight(context?.providerFlightId)).paid) throw new Error("Paid membership required for provider alerts");
   await ensureFlightAwareAlertEndpoint(targetUrl);
   const payload = buildFlightAwareAlertPayload({ targetUrl, context });
 
@@ -4366,6 +4449,14 @@ async function ensureFlightAwareAlertForTrackedSession(req, trackedRecord) {
     return;
   }
 
+  const access = await paidAccess.membership(trackedRecord.ownerUserId);
+  if (!access.paid) {
+    if (access.verified && trackedRecord.metadata?.flightawareAlert?.alertId) {
+      await deleteProviderAlert(trackedRecord.metadata.flightawareAlert.alertId);
+      await mergeTrackingSessionMetadata(trackedRecord.flightId, { flightawareAlert: null });
+    }
+    return;
+  }
   const targetUrl = flightAwareWebhookTargetURL(req);
   if (!targetUrl) {
     return;
@@ -5221,6 +5312,7 @@ async function hasActiveNotificationSubscription(flightId) {
 }
 
 async function sendApnsNotification(apnsToken, payload, environment = null) {
+  if (!(await paidAccess.tokenAllowed(apnsToken))) return { skipped: true, reason: "paid_membership_required" };
   if (!isApnsConfigured()) {
     console.warn("Skipping APNs delivery because APNs is not fully configured", apnsConfigStatus());
     return { skipped: true };
@@ -5628,7 +5720,7 @@ function liveActivityDeliveryFlight(flight, snapshot, snapshotBaggage, snapshotR
 async function sendLiveActivityStateForFlight(flight) {
   if (!usesDatabase() || !flight?.id || !isApnsConfigured()) return { sent: 0, skipped: true };
   const tokenResult = await pool.query(
-    `select lat.id, lat.push_token, lat.environment, lat.last_content_phase,
+    `select lat.id, lat.user_id, lat.push_token, lat.environment, lat.last_content_phase,
             ls.canonical_snapshot_json as tracking_snapshot,
             ls.baggage_claim as snapshot_baggage,
             ls.canonical_revision as snapshot_revision
@@ -5642,6 +5734,7 @@ async function sendLiveActivityStateForFlight(flight) {
   let sent = 0;
   let skippedRegressive = 0;
   for (const token of tokenResult.rows) {
+    if (!(await paidAccess.membership(token.user_id)).paid) continue;
     const deliveryFlight = liveActivityDeliveryFlight(
       flight,
       token.tracking_snapshot,
@@ -7690,7 +7783,7 @@ mountSharedFlightRoutes(app, sharedFlightService);
 app.get("/v1/flights/:flightId", async (req, res) => {
   const flightId = req.params.flightId;
   const userId = String(req.auth?.userId || "").trim() || null;
-  const forceDetailRefresh = String(req.query?.refresh || "").toLowerCase() === "detail";
+  const forceDetailRefresh = req.paidAccess === true && String(req.query?.refresh || "").toLowerCase() === "detail";
   if (forceDetailRefresh) {
     res.set("Cache-Control", "no-store");
   }
@@ -7910,6 +8003,7 @@ function providerTrackTrailRefreshOptions(value) {
 }
 
 app.get("/v1/providers/flightaware/flights/:providerFlightId/track", async (req, res) => {
+  if (!req.paidAccess) return res.json({ providerFlightId: req.params.providerFlightId, trackPoints: [], livePosition: null, source: "paid_membership_required" });
   if (!PROVIDER_CALLS_ENABLED) {
     return res.status(503).json({ error: "Provider calls are temporarily disabled" });
   }
@@ -8124,6 +8218,7 @@ async function startApiServer() {
     if (lifecycleRecoveryRunning) return;
     lifecycleRecoveryRunning = true;
     try {
+      await reconcilePaidSubscriptions();
       const recovered = await sharedFlightService.recoverLifecycleCatchups(reason);
       console.log(`Lifecycle recovery checked=${recovered.checked} scheduled=${recovered.scheduled} fanoutRecovered=${recovered.recoveredFanout || 0}`);
     } catch (error) {
@@ -8172,6 +8267,9 @@ module.exports = {
   startTrackingPollerWorker,
   usesDatabase,
   __test__: {
+    paidAccess,
+    fetchFlightAwareTrackTrail,
+    fetchFlightAwareLivePosition,
     coalesceFlightAwareTrackTrail,
     compactTrackPoints,
     authoritativeProviderTrackTrail,

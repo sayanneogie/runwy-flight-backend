@@ -300,6 +300,7 @@ function createSharedFlightService({
   queue = createSharedFlightQueue(),
   apns = createApnsSender(),
   liveActivities = null,
+  paidAccess = null,
   stateProjection = null,
   weather = null,
   streamingEnabled = false,
@@ -681,7 +682,15 @@ function createSharedFlightService({
       }
     }
 
-    const targets = await repository.listNotificationTargets(data.flight.id, data.event.event_severity, data.event.event_type);
+    let targets = await repository.listNotificationTargets(data.flight.id, data.event.event_severity, data.event.event_type);
+    if (paidAccess) {
+      const eligible = [];
+      for (const target of targets) {
+        if ((await paidAccess.membership(target.userFlight.user_id)).paid &&
+            (await paidAccess.membership(target.userFlight.owner_user_id || target.userFlight.user_id)).paid) eligible.push(target);
+      }
+      targets = eligible;
+    }
     const isArrival = ["LANDED", "ARRIVED"].includes(data.event.event_type);
     const weatherInsight = isArrival
       ? await weatherService.insightForFlight(data.flight, { cacheStatus: "arrival_notification" })
@@ -993,6 +1002,7 @@ function createSharedFlightService({
   async function ensureInboundFlightMonitoring(flightInstanceId, reason) {
     if (typeof provider.ensureInboundFlightAlert !== "function") return null;
     let flight = await repository.findFlightById(flightInstanceId);
+    if (paidAccess && flight && !await paidAccess.reconcileFlight(flight)) return flight;
     let inbound = flight?.normalized_data?.inboundFlight;
     const departureMs = new Date(flight?.estimated_departure_at || flight?.scheduled_departure_at || 0).getTime();
     const untilDepartureMs = departureMs - Date.now();
@@ -1130,6 +1140,7 @@ function createSharedFlightService({
   async function ensureProviderAlert(flightInstanceId, reason) {
     if (typeof provider.ensureFlightAlert !== "function") return null;
     const flight = await repository.findFlightById(flightInstanceId);
+    if (paidAccess && flight && !await paidAccess.reconcileFlight(flight)) return flight;
     if (!flight || (!needsProviderAlertConfigurationUpgrade(flight, provider) && flight.provider_alert_status === "active") || isFinalStatus(flight.status)) return flight;
     try {
       const alert = await provider.ensureFlightAlert(flight, { reason });
@@ -1703,7 +1714,7 @@ function createSharedFlightService({
         });
         if (!recovery?.deduped) scheduled += 1;
       }
-      if (!isProviderAlertActive(row) || needsProviderAlertConfigurationUpgrade(row, provider)) {
+      if (paidAccess || !isProviderAlertActive(row) || needsProviderAlertConfigurationUpgrade(row, provider)) {
         await ensureLiveSource(row.id, `${reason}_alert_repair`);
       }
     }
@@ -1723,6 +1734,15 @@ function createSharedFlightService({
   }
 
   async function deliverNotificationToken(outboxRow, fallback = {}) {
+    if (paidAccess?.delivery) {
+      const access = await paidAccess.delivery(outboxRow.notification_delivery_id);
+      if (!access.paid) {
+        if (!access.verified) return outboxRow;
+        return repository.updateNotificationTokenDelivery(outboxRow.id, {
+          status: "permanent_failed", error: "paid_membership_required",
+        });
+      }
+    }
     const claimed = await repository.claimNotificationTokenDelivery(outboxRow.id, APNS_OUTBOX_LEASE_MS);
     if (!claimed) return outboxRow;
     const token = fallback.token || {

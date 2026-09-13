@@ -260,6 +260,7 @@ function makeService(providerFlight = normalizedFlight(), options = {}) {
     apns: options.apns,
     liveActivities: options.liveActivities,
     stateProjection: options.stateProjection,
+    paidAccess: options.paidAccess,
   });
   return { service, repository, providerCalls: () => calls, providerOptions };
 }
@@ -3441,4 +3442,25 @@ test("WeatherKit response is normalized into a conservative flight weather insig
   assert.equal(insight.severity, "low");
   assert.equal(insight.notificationRequired, true);
   assert.match(insight.summary, /weather at BLR looks favorable/i);
+});
+
+
+test("free flight keeps basic status but creates neither outbound nor inbound provider alerts", async () => {
+  let alerts = 0;
+  const departure = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+  const { service } = makeService(normalizedFlight({
+    scheduledDepartureAt: departure, estimatedDepartureAt: departure,
+    scheduledArrivalAt: new Date(Date.now() + 5 * 60 * 60_000).toISOString(),
+    estimatedArrivalAt: new Date(Date.now() + 5 * 60 * 60_000).toISOString(),
+    inboundFlight: { providerFlightId: "inbound" },
+  }), {
+    paidAccess: { reconcileFlight: async () => false, membership: async () => ({ paid: false }) },
+    ensureFlightAlert: async () => { alerts++; },
+    ensureInboundFlightAlert: async () => { alerts++; },
+  });
+  const saved = await service.saveUserFlight("free", {
+    airline: "SQ", number: "509", date: departure.slice(0, 10), origin: "BLR", destination: "SIN",
+  });
+  assert.ok(saved.flight.flightInstanceId);
+  assert.equal(alerts, 0);
 });
