@@ -21,7 +21,11 @@ function clientNetwork(value) {
 }
 
 function clientKey(req) {
-  return clientNetwork(req.ip || req.socket?.remoteAddress);
+  // Railway overwrites X-Forwarded-For at its public edge. Its first entry is
+  // the client, while the final entry can be a shared Fastly address. Use this
+  // contract only on Railway; direct deployments retain Express proxy trust.
+  const forwarded = req.app?.get("runwy:trustedRailwayEdge") ? req.get("X-Forwarded-For") : null;
+  return clientNetwork(forwarded ? forwarded.split(",")[0].trim() : req.ip || req.socket?.remoteAddress);
 }
 
 function createProtectionMetrics(logger = console) {

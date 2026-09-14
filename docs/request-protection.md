@@ -19,10 +19,13 @@ The API quota defaults to 300/minute and search to 60/minute. Existing deploymen
 environment overrides remain effective (production had API quota 60/minute).
 These are fixed windows starting at the first request, not a concurrency guarantee.
 
-Node trusts one immediate proxy hop on Railway, and zero elsewhere. Other proxy
-topologies must explicitly set `TRUST_PROXY_HOPS` after verifying their forwarded
-headers. Never trust arbitrary leftmost forwarded IPs. IPv6 clients share a /56
-network quota. Unauthenticated device IDs are never used for rate-limit identity.
+On Railway, the quota identity uses the first IP in the edge-overwritten
+`X-Forwarded-For` header, following Railway's explicit contract. Selecting the
+last hop would incorrectly group users behind Fastly. This behavior is enabled
+only when `RAILWAY_ENVIRONMENT_ID` is present. Other deployments use Express's
+proxy trust (zero hops by default), configurable with `TRUST_PROXY_HOPS` after
+verifying their topology. IPv6 clients share a /56 network quota. Unauthenticated
+device IDs are never used for rate-limit identity.
 
 ## Storage and failure behavior
 
@@ -105,4 +108,5 @@ cap without the owner's budget decision.
 
 References: [Railway DDoS protection](https://railway.com/changelog/2026-02-20-domains),
 [Express proxy trust](https://expressjs.com/en/guide/behind-proxies/),
+[Railway client-IP contract](https://station.railway.com/questions/which-header-should-i-rely-on-for-real-c-d78a6f96),
 [Supabase gateway log headers](https://supabase.com/docs/guides/observability/advanced-log-filtering).

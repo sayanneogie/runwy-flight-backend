@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const { PGlite } = require("@electric-sql/pglite");
-const { PostgresRateLimitStore, createLocalIngress, clientNetwork, createSharedLimiter } = require("../src/request-protection");
+const { PostgresRateLimitStore, createLocalIngress, clientNetwork, clientKey, createSharedLimiter } = require("../src/request-protection");
 const express = require("express");
 
 async function database() {
@@ -69,6 +69,15 @@ test("IPv6 address rotation and IPv4 mapped notation share a network quota", () 
   assert.equal(clientNetwork("::ffff:192.0.2.7"), clientNetwork("192.0.2.7"));
   assert.equal(clientNetwork("2001:db8:abcd:1201::1"), clientNetwork("2001:db8:abcd:12ff::9"));
   assert.notEqual(clientNetwork("2001:db8:abcd:1201::1"), clientNetwork("2001:db8:abcd:1301::1"));
+});
+
+test("Railway uses its edge-overwritten client address across CDN paths; other hosts ignore that header", () => {
+  const request = { app: { get: () => true }, get: () => "192.0.2.10, 198.51.100.20", ip: "198.51.100.20" };
+  assert.equal(clientKey(request), "192.0.2.10");
+  request.get = () => "192.0.2.10";
+  assert.equal(clientKey(request), "192.0.2.10");
+  request.app.get = () => false;
+  assert.equal(clientKey(request), "198.51.100.20");
 });
 
 function response() {

@@ -336,6 +336,7 @@ app.disable("x-powered-by");
 const proxyHops = Number(process.env.TRUST_PROXY_HOPS ?? (process.env.RAILWAY_ENVIRONMENT_ID ? 1 : 0));
 if (!Number.isInteger(proxyHops) || proxyHops < 0 || proxyHops > 5) throw new Error("Invalid TRUST_PROXY_HOPS");
 app.set("trust proxy", proxyHops);
+app.set("runwy:trustedRailwayEdge", Boolean(process.env.RAILWAY_ENVIRONMENT_ID));
 app.use(helmet());
 app.use(createLocalIngress({
   maxConcurrent: positiveInteger(process.env.MAX_CONCURRENT_REQUESTS, 64),
