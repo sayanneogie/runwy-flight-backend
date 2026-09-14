@@ -11,3 +11,10 @@ The backend verifies RevenueCat `first_class` membership using `REVENUECAT_API_K
 - Subscription cancellation with a future expiry remains entitled; expired access is denied, lifetime access and explicit grace periods are supported.
 
 No five-flight quota or billing plan was changed. No test notifications are sent by verification. Tests cover provider-enabled forced free telemetry, mixed flights, expiry, lifetime, grace, identity casing, nested response filtering and queued Circle delivery after owner expiry.
+
+
+## Temporary admin free-mode testing
+
+Only the fixed Sayan admin UUID can GET/POST `/v1/admin/membership-test`. POST accepts a boolean `testAsFree`. The backend persists this downgrade in `auth.users.raw_app_meta_data.runwy_test_as_free`, which normal user metadata updates cannot modify. Every admin membership check reads this value before membership caches, so background workers, provider subscription creation, APNs and Live Activity delivery share the setting. Turning it off restores normal RevenueCat verification; it never creates paid access. Provider subscription reconciliation is kicked off after each change and retried by the existing recovery loop. Requests already in progress may finish.
+
+The temporary Settings toggle is visible only to that admin. Its initial state is synced with the backend, and local feature access changes only after the server confirms the write. Widget access is refreshed and Live Activities are reconciled when the mode changes. The RevenueCat entitlement remains intact. Remove the Settings section and these two endpoints when testing is complete; leave the metadata value false before removal.

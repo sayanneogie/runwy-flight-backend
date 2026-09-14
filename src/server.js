@@ -7098,6 +7098,27 @@ app.get("/health", async (_req, res) => {
   });
 });
 
+app.get("/v1/admin/membership-test", async (req, res) => {
+  try {
+    res.json({ testAsFree: await paidAccess.getAdminTestMode(req.auth?.userId) });
+  } catch (error) { res.status(error.status || 503).json({ error: error.message }); }
+});
+
+app.post("/v1/admin/membership-test", async (req, res) => {
+  try {
+    const testAsFree = await paidAccess.setAdminTestMode(req.auth?.userId, req.body?.testAsFree);
+    res.json({ testAsFree });
+    // Access is already changed. Reconcile provider subscriptions without holding
+    // the toggle open while FlightAware responds; periodic recovery retries errors.
+    setImmediate(async () => {
+      try {
+        await reconcilePaidSubscriptions();
+        await sharedFlightService.recoverLifecycleCatchups("admin_membership_test");
+      } catch (error) { console.warn(`Admin membership reconciliation failed: ${error.message}`); }
+    });
+  } catch (error) { res.status(error.status || 503).json({ error: error.message }); }
+});
+
 app.get("/v1/health/details", async (_req, res) => {
   res.json(await buildDetailedHealth());
 });

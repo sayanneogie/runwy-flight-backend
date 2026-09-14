@@ -96,3 +96,37 @@ test("enabled provider cannot be reached by forced free-only telemetry", () => {
       FLIGHTAWARE_API_KEY: "test-only", DATABASE_URL: "", ALLOW_INSECURE_NO_AUTH: "true" } });
   assert.equal(result.status, 0, result.stderr);
 });
+
+
+test("admin free mode overrides cached paid membership and can be restored", async () => {
+  const admin = "4321A459-DA14-4ABA-8052-881E90FC737A";
+  let mode = false, calls = 0;
+  const access = createPaidAccess({ apiKey: "test", fetchImpl: async () => {
+    calls++; return { ok: true, json: async () => payload(null) };
+  }, query: async (sql, params) => {
+    if (sql.startsWith("update auth.users")) { mode = params[1]; return { rows: [{ id: admin }] }; }
+    return { rows: [{ test_as_free: String(mode) }] };
+  } });
+  assert.equal((await access.membership(admin)).paid, true);
+  await access.setAdminTestMode(admin.toLowerCase(), true);
+  assert.equal((await access.membership(admin)).paid, false);
+  assert.equal(calls, 1);
+  // A second worker sees the same DB override without a process-local cache.
+  const worker = createPaidAccess({ apiKey: "test", query: async () => ({ rows: [{ test_as_free: "true" }] }),
+    fetchImpl: async () => { throw new Error("Must not call RevenueCat in free test mode"); } });
+  assert.equal((await worker.membership(admin)).paid, false);
+  await access.setAdminTestMode(admin, false);
+  assert.equal((await access.membership(admin)).paid, true);
+});
+test("regular users cannot read or change admin test mode", async () => {
+  let queries = 0;
+  const access = createPaidAccess({ apiKey: "test", query: async () => { queries++; return { rows: [] }; } });
+  await assert.rejects(access.getAdminTestMode("other"), { status: 403 });
+  await assert.rejects(access.setAdminTestMode("other", true), { status: 403 });
+  await assert.rejects(access.setAdminTestMode("4321A459-DA14-4ABA-8052-881E90FC737A", "true"), { status: 400 });
+  assert.equal(queries, 0);
+});
+test("admin override lookup failure withholds access without confirming expiry", async () => {
+  const access = createPaidAccess({ apiKey: "test", query: async () => { throw new Error("offline"); } });
+  assert.deepEqual(await access.membership("4321A459-DA14-4ABA-8052-881E90FC737A"), { paid: false, verified: false });
+});

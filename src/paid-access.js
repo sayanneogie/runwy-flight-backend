@@ -11,14 +11,45 @@ function paidEntitlement(payload, now = Date.now()) {
   return expires > now;
 }
 
+const ADMIN_USER_ID = "4321A459-DA14-4ABA-8052-881E90FC737A";
+
 function createPaidAccess({ apiKey, query, fetchImpl = global.fetch, now = Date.now }) {
   const cache = new Map();
   const pending = new Map();
+  function requireAdmin(userId) {
+    if (String(userId).toUpperCase() !== ADMIN_USER_ID) {
+      throw Object.assign(new Error("Admin access required"), { status: 403 });
+    }
+    if (!query) throw Object.assign(new Error("Test mode unavailable"), { status: 503 });
+  }
+  async function getAdminTestMode(userId) {
+    requireAdmin(userId);
+    const { rows } = await query("select raw_app_meta_data->>'runwy_test_as_free' as test_as_free from auth.users where id = $1", [ADMIN_USER_ID]);
+    if (!rows.length) throw Object.assign(new Error("Admin account unavailable"), { status: 503 });
+    return rows[0].test_as_free === "true";
+  }
+  async function setAdminTestMode(userId, enabled) {
+    requireAdmin(userId);
+    if (typeof enabled !== "boolean") throw Object.assign(new Error("testAsFree must be a boolean"), { status: 400 });
+    const { rows } = await query(`update auth.users
+      set raw_app_meta_data = jsonb_set(coalesce(raw_app_meta_data, '{}'::jsonb), '{runwy_test_as_free}', to_jsonb($2::boolean), true)
+      where id = $1 returning id`, [ADMIN_USER_ID, enabled]);
+    if (!rows.length) throw Object.assign(new Error("Admin account unavailable"), { status: 503 });
+    cache.delete(ADMIN_USER_ID);
+    return enabled;
+  }
   async function membership(userId) {
     if (!userId || !apiKey) return { paid: false, verified: false };
     // Swift UUID.uuidString is uppercase; PostgreSQL UUID output is lowercase.
     // RevenueCat IDs are case-sensitive, so mirror the app's logIn identity.
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId)) userId = userId.toUpperCase();
+    // The admin-only downgrade is checked before caches, including in background
+    // workers. It can remove access, never manufacture a paid entitlement.
+    if (userId === ADMIN_USER_ID) {
+      try {
+        if (await getAdminTestMode(userId)) return { paid: false, verified: true, testAsFree: true };
+      } catch (_) { return { paid: false, verified: false }; }
+    }
     const prior = cache.get(userId);
     if (prior && prior.until > now()) return prior;
     if (pending.has(userId)) return pending.get(userId);
@@ -86,7 +117,7 @@ function createPaidAccess({ apiKey, query, fetchImpl = global.fetch, now = Date.
     if (!recipient.paid) return recipient;
     return rows[0].owner_user_id ? membership(rows[0].owner_user_id) : recipient;
   }
-  return { membership, flight, tokenAllowed, delivery };
+  return { membership, flight, tokenAllowed, delivery, getAdminTestMode, setAdminTestMode };
 }
 
 function withoutLiveTelemetry(value) {
