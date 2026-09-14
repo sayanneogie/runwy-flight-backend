@@ -53,6 +53,9 @@ function createLocalIngress({ maxConcurrent = 64, requestsPerSecond = 200, perIP
   let secondHits = 0;
   let nextSweep = 0;
   return (req, res, next) => {
+    res.once("finish", () => {
+      if (res.statusCode === 401) metrics.record("authentication_rejected");
+    });
     const timestamp = now();
     if (timestamp >= nextSweep) {
       for (const [key, value] of clients) if (value.resetAt <= timestamp) clients.delete(key);

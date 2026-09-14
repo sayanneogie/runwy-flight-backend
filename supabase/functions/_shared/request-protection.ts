@@ -27,7 +27,7 @@ export async function consumeEdgeQuota(namespace: string, identity: string, limi
     p_key_hash: await sha256(identity),
     p_window_ms: 60000,
     p_limit: limit,
-  }).abortSignal(AbortSignal.timeout(2000));
+  }).abortSignal(AbortSignal.timeout(5000));
   if (error || !data?.[0]) throw new HttpError(503, "Service is busy. Please try again shortly.");
   if (Number(data[0].total_hits) > limit) throw new HttpError(429, "Too many requests. Please try again shortly.");
 }
