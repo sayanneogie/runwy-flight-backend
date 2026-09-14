@@ -1,0 +1,26 @@
+{
+  "version": "5",
+  "remote": {
+    "https://deno.land/std@0.224.0/async/delay.ts": "f90dd685b97c2f142b8069082993e437b1602b8e2561134827eeb7c12b95c499",
+    "https://deno.land/std@0.224.0/http/server.ts": "f9313804bf6467a1704f45f76cb6cd0a3396a3b31c316035e6a4c2035d1ea514",
+    "https://esm.sh/@supabase/supabase-js@2.45.4": "1108d69216995335d057dbd15907caaf514a4d1ef082f097050573b9d589a57c"
+  },
+  "workspace": {
+    "packageJson": {
+      "dependencies": [
+        "npm:@electric-sql/pglite@~0.5.8",
+        "npm:dotenv@^16.4.5",
+        "npm:express-rate-limit@^7.4.1",
+        "npm:express@^4.21.2",
+        "npm:helmet@^8.1.0",
+        "npm:ipaddr.js@^2.2.0",
+        "npm:pg@^8.11.5",
+        "npm:tz-lookup@^6.1.25",
+        "npm:zod@^4.3.6"
+      ],
+      "overrides": {
+        "qs": "^6.16.0"
+      }
+    }
+  }
+}

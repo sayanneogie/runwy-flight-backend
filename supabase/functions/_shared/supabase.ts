@@ -24,6 +24,9 @@ export function createAdminClient(): SupabaseClient {
         autoRefreshToken: false,
         persistSession: false,
       },
+      global: {
+        fetch: (input, init) => fetch(input, { ...init, signal: init?.signal || AbortSignal.timeout(5000) }),
+      },
     },
   );
 }
@@ -38,6 +41,7 @@ export function createRequestClient(authHeader: string): SupabaseClient {
         persistSession: false,
       },
       global: {
+        fetch: (input, init) => fetch(input, { ...init, signal: init?.signal || AbortSignal.timeout(5000) }),
         headers: {
           Authorization: authHeader,
         },

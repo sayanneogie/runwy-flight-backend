@@ -1,3 +1,4 @@
+import { withRequestProtection } from "../_shared/request-protection.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { errorResponse, handleCors, HttpError, jsonResponse, requireJsonBody } from "../_shared/http.ts";
 import { createAdminClient, fetchUserSummary, sha256 } from "../_shared/supabase.ts";
@@ -12,7 +13,7 @@ type InviteRow = {
   expires_at: string | null;
 };
 
-serve(async (request) => {
+serve((request) => withRequestProtection(request, "preview-friend-invite", async () => {
   const cors = handleCors(request);
   if (cors) {
     return cors;
@@ -24,8 +25,8 @@ serve(async (request) => {
     }
 
     const body = await requireJsonBody<InviteTokenRequest>(request);
-    const token = body.token?.trim();
-    if (!token) {
+    const token = typeof body?.token === "string" ? body.token.trim() : "";
+    if (!/^[a-f0-9]{64}$/i.test(token)) {
       throw new HttpError(400, "Invite token is required.");
     }
 
@@ -61,4 +62,4 @@ serve(async (request) => {
   } catch (error) {
     return errorResponse(error);
   }
-});
+}));

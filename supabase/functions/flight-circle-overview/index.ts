@@ -1,3 +1,4 @@
+import { withRequestProtection, consumeEdgeQuota } from "../_shared/request-protection.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { errorResponse, handleCors, HttpError, jsonResponse } from "../_shared/http.ts";
 import {
@@ -35,7 +36,7 @@ type UserFlightRow = {
   deleted_at: string | null;
 };
 
-serve(async (request) => {
+serve((request) => withRequestProtection(request, "flight-circle-overview", async () => {
   const cors = handleCors(request);
   if (cors) {
     return cors;
@@ -47,6 +48,7 @@ serve(async (request) => {
     }
 
     const user = await requireAuthenticatedUser(request);
+    await consumeEdgeQuota("edge:flight-circle-overview:user", user.id, 60);
     const admin = createAdminClient();
 
     const relationshipsResponse = await admin
@@ -185,4 +187,4 @@ serve(async (request) => {
   } catch (error) {
     return errorResponse(error);
   }
-});
+}));

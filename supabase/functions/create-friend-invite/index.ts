@@ -1,3 +1,4 @@
+import { withRequestProtection, consumeEdgeQuota } from "../_shared/request-protection.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { errorResponse, handleCors, HttpError } from "../_shared/http.ts";
 import {
@@ -8,7 +9,7 @@ import {
   sha256,
 } from "../_shared/supabase.ts";
 
-serve(async (request) => {
+serve((request) => withRequestProtection(request, "create-friend-invite", async () => {
   const cors = handleCors(request);
   if (cors) {
     return cors;
@@ -20,6 +21,7 @@ serve(async (request) => {
     }
 
     const user = await requireAuthenticatedUser(request);
+    await consumeEdgeQuota("edge:create-friend-invite:user", user.id, 10);
     const admin = createAdminClient();
     const token = makeInviteToken();
     const tokenHash = await sha256(token);
@@ -56,4 +58,4 @@ serve(async (request) => {
   } catch (error) {
     return errorResponse(error);
   }
-});
+}));

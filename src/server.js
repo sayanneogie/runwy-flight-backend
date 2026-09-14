@@ -5,7 +5,7 @@ const { createPaidAccess, withoutLiveTelemetry } = require("./paid-access");
 const http2 = require("node:http2");
 const express = require("express");
 const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
+const { createLocalIngress, createSharedLimiter, clientKey, positiveInteger, createProtectionMetrics } = require("./request-protection");
 const { Pool } = require("pg");
 const { version: PACKAGE_VERSION = "0.0.0" } = require("../package.json");
 const { airportCodesForCity, getAirportCatalog } = require("./airport-catalog");
@@ -318,81 +318,82 @@ if (!WEBHOOK_SHARED_SECRET) {
   );
 }
 
+const protectionMetrics = createProtectionMetrics();
+const protectionPool = DATABASE_URL ? new Pool({
+  connectionString: DATABASE_URL,
+  ssl: postgresSSLConfig(),
+  max: 3,
+  connectionTimeoutMillis: 2_000,
+  statement_timeout: 1_500,
+  query_timeout: 2_000,
+}) : null;
+if (protectionPool) protectionPool.on("error", () => protectionMetrics.record("rate_store_connection_error"));
+const protectionQuery = protectionPool ? (sql, params) => protectionPool.query(sql, params) : null;
 const app = express();
 app.disable("x-powered-by");
+// Railway's public edge is the immediately preceding trusted hop. Never trust
+// arbitrary leftmost X-Forwarded-For entries or device identifiers as identity.
+const proxyHops = Number(process.env.TRUST_PROXY_HOPS ?? (process.env.RAILWAY_ENVIRONMENT_ID ? 1 : 0));
+if (!Number.isInteger(proxyHops) || proxyHops < 0 || proxyHops > 5) throw new Error("Invalid TRUST_PROXY_HOPS");
+app.set("trust proxy", proxyHops);
 app.use(helmet());
+app.use(createLocalIngress({
+  maxConcurrent: positiveInteger(process.env.MAX_CONCURRENT_REQUESTS, 64),
+  requestsPerSecond: positiveInteger(process.env.LOCAL_REQUESTS_PER_SECOND, 200),
+  perIPPerMinute: positiveInteger(process.env.LOCAL_IP_REQUESTS_PER_MINUTE, 1200),
+  metrics: protectionMetrics,
+}));
+const isLivenessRequest = req => ["GET", "HEAD"].includes(req.method) && req.path.toLowerCase().replace(/\/+$/, "") === "/health";
+const sharedLimiter = (namespace, limit, options = {}) => createSharedLimiter({
+  query: protectionQuery, namespace, limit, metrics: protectionMetrics, ...options,
+});
+app.use(sharedLimiter("ingress-global", positiveInteger(process.env.GLOBAL_REQUESTS_PER_MINUTE, 6000), {
+  keyGenerator: () => "all", skip: isLivenessRequest,
+}));
+app.use(sharedLimiter("ingress-ip", positiveInteger(process.env.PREAUTH_IP_REQUESTS_PER_MINUTE, 600), {
+  skip: isLivenessRequest,
+}));
+
+const webhookPaths = ["/webhooks/flightaware/alerts", "/v1/webhooks/flightaware/alerts", "/v1/webhooks/flightaware"];
+// Verify the provider secret before parsing the body or touching application data.
+app.use(webhookPaths, (req, res, next) => {
+  if (!WEBHOOK_SHARED_SECRET) return res.status(503).json({ error: "Webhook secret is not configured" });
+  if (!timingSafeEqualText(webhookSecretFromRequest(req), WEBHOOK_SHARED_SECRET)) {
+    protectionMetrics.record("webhook_auth_rejected");
+    return res.status(401).json({ error: "Unauthorized webhook" });
+  }
+  next();
+});
+app.use(webhookPaths, sharedLimiter("webhooks", positiveInteger(process.env.WEBHOOK_REQUESTS_PER_MINUTE, 600), {
+  keyGenerator: () => "flightaware",
+}));
 app.use(express.json({ limit: "100kb" }));
 
 const authTokenCache = new Map();
-
-function isTestNotificationRequest(req) {
-  const path = String(req.originalUrl || req.url || "").split("?", 1)[0];
-  return path === "/v1/devices/test-notification";
+function requestPath(req) {
+  return String(req.originalUrl || req.url || "").split("?", 1)[0].toLowerCase().replace(/\/+$/, "");
 }
-
+function isTestNotificationRequest(req) { return requestPath(req) === "/v1/devices/test-notification"; }
 function isFlightSearchRequest(req) {
-  const path = String(req.originalUrl || req.url || "").split("?", 1)[0];
-  return path === "/v1/search" || path === "/v1/search/route";
+  return ["/v1/search", "/v1/search/route", "/v1/flights/search"].includes(requestPath(req));
 }
-
 function authenticatedRequestKey(req, namespace) {
   const userID = String(req.auth?.userId || "").trim();
-  if (userID) {
-    return `${namespace}:user:${userID.slice(0, 128)}`;
-  }
-
-  const ip = req.ip || req.socket?.remoteAddress || "unknown";
-  const deviceID = normalizedHeaderDeviceID(req);
-  if (deviceID) {
-    return `${namespace}:ip:${ip}|device:${deviceID.slice(0, 128)}`;
-  }
-  return `${namespace}:ip:${ip}`;
+  return userID ? `${namespace}:user:${userID}` : `${namespace}:ip:${clientKey(req)}`;
 }
-
-const limiter = rateLimit({
-  windowMs: 60_000,
-  max: RATE_LIMIT_PER_MINUTE,
-  standardHeaders: true,
-  legacyHeaders: false,
-  // Test pushes have a dedicated limiter below. Counting them here as well
-  // lets unrelated foreground/background API traffic disable the diagnostic.
-  skip: (req) => isTestNotificationRequest(req) || isFlightSearchRequest(req),
-  keyGenerator: (req) => authenticatedRequestKey(req, "api"),
+const limiter = sharedLimiter("api", RATE_LIMIT_PER_MINUTE, {
+  skip: req => isTestNotificationRequest(req) || isFlightSearchRequest(req) || webhookPaths.includes(requestPath(req)),
+  keyGenerator: req => authenticatedRequestKey(req, "api"),
 });
-
-const searchLimiter = rateLimit({
-  windowMs: 60_000,
-  max: SEARCH_RATE_LIMIT_PER_MINUTE,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => authenticatedRequestKey(req, "flight-search"),
+const searchLimiter = sharedLimiter("flight-search", SEARCH_RATE_LIMIT_PER_MINUTE, {
+  keyGenerator: req => authenticatedRequestKey(req, "flight-search"),
 });
-
-const testNotificationLimiter = rateLimit({
-  windowMs: 60_000,
-  max: TEST_NOTIFICATION_RATE_LIMIT_PER_MINUTE,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => {
-    const userID = String(req.auth?.userId || req.ip || "unknown").slice(0, 128);
-    const deviceID = normalizedHeaderDeviceID(req) || "unknown-device";
-    return `test-push:${userID}:${deviceID.slice(0, 128)}`;
-  },
-  handler: (req, res) => {
-    const resetAt = req.rateLimit?.resetTime?.getTime?.() || Date.now() + 60_000;
-    const retryAfterSeconds = Math.max(1, Math.ceil((resetAt - Date.now()) / 1_000));
-    return res.status(429).json({
-      error: `Please wait ${retryAfterSeconds}s before scheduling another test notification.`,
-      retryAfterSeconds,
-    });
-  },
+const testNotificationLimiter = sharedLimiter("test-push", TEST_NOTIFICATION_RATE_LIMIT_PER_MINUTE, {
+  keyGenerator: req => authenticatedRequestKey(req, "test-push"),
 });
-
 app.use("/v1", authenticateRequest);
 app.use("/v1", limiter);
-// Search has its own bucket so unrelated lifecycle and background requests
-// cannot prevent a user from deliberately looking up a flight.
-app.use("/v1/search", searchLimiter);
+app.use(["/v1/search", "/v1/flights/search"], searchLimiter);
 
 const providerCache = new Map();
 const providerInFlightRequests = new Map();
@@ -408,6 +409,8 @@ const pool = DATABASE_URL
   ? new Pool({
       connectionString: DATABASE_URL,
       ssl: postgresSSLConfig(),
+      connectionTimeoutMillis: 5_000,
+      statement_timeout: 15_000,
     })
   : null;
 
@@ -502,40 +505,29 @@ function flightAwareDailyBudgetLimitForEndpoint(endpoint) {
 async function flightAwareFlightFetch(url, options, { endpoint, units = 1 } = {}) {
   const usageEndpoint = `aeroapi:flight:${String(endpoint || "unknown")}`;
   const estimatedUnits = Math.max(1, Math.round(Number(units) || 1));
-  const isSearchRequest = ["operational", "schedules", "historical"].includes(String(endpoint || ""));
   const isTrackedFlightRequest = String(endpoint || "") === "tracked_flight";
   const effectiveLimit = flightAwareDailyBudgetLimitForEndpoint(endpoint);
-
   if (pool) {
-    const usage = await pool.query(
-      `select coalesce(sum(coalesce(cost_estimate, 1)), 0)::int as units
-       from public.api_usage_logs
-       where provider = 'flightaware'
-         and endpoint like 'aeroapi:flight:%'
-         and (
-           ($1::boolean = true and endpoint = 'aeroapi:flight:tracked_flight')
-           or ($1::boolean = false and endpoint <> 'aeroapi:flight:tracked_flight')
-         )
-         and created_at >= date_trunc('day', now() at time zone 'UTC') at time zone 'UTC'`
-      ,
-      [isTrackedFlightRequest]
+    const { rows } = await pool.query(
+      "select * from public.runwy_reserve_flightaware_budget($1, $2, $3)",
+      [isTrackedFlightRequest ? "tracked" : "general", effectiveLimit, estimatedUnits],
     );
-    const usedUnits = Number(usage.rows[0]?.units || 0);
-    if (usedUnits + estimatedUnits > effectiveLimit) {
-      const error = new Error(
-        `FlightAware daily ${isTrackedFlightRequest ? "tracked-flight" : isSearchRequest ? "search reserve" : "Flight-call"} budget exhausted (${usedUnits}/${effectiveLimit})`
-      );
+    if (!rows[0]?.allowed) {
+      protectionMetrics.record("provider_budget_exhausted");
+      const error = new Error("FlightAware daily request budget exhausted");
       error.code = "FLIGHTAWARE_DAILY_BUDGET_EXHAUSTED";
       error.statusCode = 429;
       throw error;
     }
+  } else if (IS_PRODUCTION) {
+    throw new Error("Durable provider budget storage is required in production");
   }
 
   const startedAt = Date.now();
   let response = null;
   let requestError = null;
   try {
-    response = await fetch(url, options);
+    response = await fetch(url, { ...options, signal: options?.signal || AbortSignal.timeout(15_000) });
     return response;
   } catch (error) {
     requestError = error;
@@ -764,8 +756,12 @@ async function verifySupabaseTokenViaAuthAPI(token) {
     throw new Error("SUPABASE_URL must use HTTPS");
   }
 
+  // Reject malformed/expired tokens locally before making a verification request.
+  if (token.length > 8192) throw new Error("Invalid bearer token");
+  validateJWTLifetime(decodeJWT(token).payload);
   const response = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
     method: "GET",
+    signal: AbortSignal.timeout(5_000),
     headers: {
       apikey: SUPABASE_ANON_KEY,
       authorization: `Bearer ${token}`,
@@ -835,7 +831,7 @@ function inferredHTTPSBaseURLFromRequest(req) {
 function flightAwareWebhookTargetURL(req) {
   if (!WEBHOOK_SHARED_SECRET) return null;
 
-  const baseURL = inferredHTTPSBaseURLFromRequest(req) || WEBHOOK_PUBLIC_BASE_URL;
+  const baseURL = WEBHOOK_PUBLIC_BASE_URL || (IS_PRODUCTION ? "" : inferredHTTPSBaseURLFromRequest(req));
   if (!baseURL) return null;
 
   // Use the unified handler so one provider callback updates both the shared
@@ -854,7 +850,7 @@ function scopedDeviceID(userId, rawDeviceID) {
 }
 
 function shouldBypassAuthForRequest(req) {
-  return req.path === "/airports" || req.path === "/webhooks/flightaware";
+  return requestPath(req) === "/v1/airports" || webhookPaths.includes(requestPath(req));
 }
 
 async function authenticateRequest(req, res, next) {
@@ -8219,7 +8215,19 @@ app.post("/webhooks/flightaware/alerts", handleUnifiedFlightAwareWebhook);
 app.post("/v1/webhooks/flightaware/alerts", handleUnifiedFlightAwareWebhook);
 app.post("/v1/webhooks/flightaware", handleUnifiedFlightAwareWebhook);
 
+app.use((error, _req, res, _next) => {
+  if (res.headersSent) return _next(error);
+  const status = error?.type === "entity.too.large" ? 413 : error?.type === "entity.parse.failed" ? 400 : 500;
+  protectionMetrics.record(status === 500 ? "request_failed" : "invalid_body_rejected");
+  res.status(status).json({ error: status === 413 ? "Request body is too large" : status === 400 ? "Invalid JSON body" : "Request failed" });
+});
+
 async function startApiServer() {
+  if (IS_PRODUCTION && !protectionPool) throw new Error("DATABASE_URL is required for production request protection");
+  if (protectionPool) {
+    const { rows } = await protectionPool.query("select to_regprocedure('public.runwy_consume_rate_limit(text,text,integer,integer)') is not null as ready");
+    if (!rows[0]?.ready) throw new Error("Apply the 20260915_request_abuse_guardrails migration before deploying");
+  }
   if (apnsPrivateKeysConflict()) {
     throw new Error("Conflicting APNs private keys are configured; remove or synchronize the duplicate credential");
   }
@@ -8234,6 +8242,18 @@ async function startApiServer() {
       `Flight proxy running on port ${PORT} provider=${FLIGHT_DATA_PROVIDER} persistence=${usesDatabase() ? "supabase-postgres" : "memory"} poller=${isPollerRunning() ? "on" : "off"} backgroundTracking=${backgroundTrackingMode()} apnsConfigured=${isApnsConfigured() ? "yes" : "no"} apnsHost=${apnsHost()} apnsTopic=${APNS_BUNDLE_ID || "missing"}`
     );
   });
+
+  server.requestTimeout = 15_000;
+  server.headersTimeout = 10_000;
+  server.keepAliveTimeout = 5_000;
+  server.maxRequestsPerSocket = 100;
+  const protectionTimer = setInterval(() => {
+    protectionMetrics.flush();
+    if (protectionPool) protectionPool.query("select public.runwy_cleanup_rate_limits()")
+      .catch(() => protectionMetrics.record("rate_cleanup_failed"));
+  }, 60_000);
+  protectionTimer.unref();
+  server.on("close", () => clearInterval(protectionTimer));
 
   let lifecycleRecoveryRunning = false;
   const runLifecycleRecovery = async (reason) => {

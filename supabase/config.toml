@@ -1,13 +1,15 @@
 project_id = "djbhozqfsxzkfnpxdumh"
 
 [functions.create-friend-invite]
-verify_jwt = true
+# Match production: these functions verify users via Supabase Auth in their
+# handlers, which also supports projects using asymmetric JWT signing keys.
+verify_jwt = false
 
 [functions.flight-circle-overview]
-verify_jwt = true
+verify_jwt = false
 
 [functions.accept-friend-invite]
-verify_jwt = true
+verify_jwt = false
 
 [functions.preview-friend-invite]
 verify_jwt = false

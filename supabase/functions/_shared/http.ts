@@ -26,6 +26,7 @@ export function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: {
       ...corsHeaders,
+      "Cache-Control": "no-store",
       "Content-Type": "application/json",
     },
   });
@@ -33,13 +34,15 @@ export function jsonResponse(body: unknown, status = 200): Response {
 
 export function errorResponse(error: unknown): Response {
   if (error instanceof HttpError) {
-    return jsonResponse(
+    const response = jsonResponse(
       {
         error: error.message,
         message: error.message,
       },
       error.status,
     );
+    if ([429, 503].includes(error.status)) response.headers.set("Retry-After", "60");
+    return response;
   }
 
   const message = error instanceof Error ? error.message : "Unknown backend error";
@@ -53,9 +56,34 @@ export function errorResponse(error: unknown): Response {
 }
 
 export async function requireJsonBody<T>(request: Request): Promise<T> {
-  try {
-    return await request.json() as T;
-  } catch {
-    throw new HttpError(400, "Request body must be valid JSON.");
+  const maxBytes = 16 * 1024;
+  if (Number(request.headers.get("content-length")) > maxBytes) {
+    throw new HttpError(413, "Request body is too large.");
   }
+  const reader = request.body?.getReader();
+  if (!reader) throw new HttpError(400, "Request body must be valid JSON.");
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; void reader.cancel().catch(() => {}); }, 5000);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (timedOut) throw new HttpError(408, "Request body timed out.");
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new HttpError(413, "Request body is too large.");
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return JSON.parse(new TextDecoder().decode(bytes)) as T;
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(400, "Request body must be valid JSON.");
+  } finally { clearTimeout(timer); reader.releaseLock(); }
 }

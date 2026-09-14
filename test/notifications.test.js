@@ -5,6 +5,8 @@ const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 
 process.env.ALLOW_INSECURE_NO_AUTH = "true";
+process.env.DATABASE_URL = "";
+process.env.PROVIDER_CALLS_ENABLED = "false";
 process.env.WEBHOOK_SHARED_SECRET = process.env.WEBHOOK_SHARED_SECRET || "test webhook secret";
 
 const { __test__ } = require("../src/server.js");
