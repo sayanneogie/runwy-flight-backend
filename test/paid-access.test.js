@@ -69,7 +69,7 @@ test("free responses remove nested live telemetry without removing status and ga
   assert.equal(result.flight.status, "enroute");
   assert.equal(result.flight.livePosition, null);
   assert.deepEqual(result.flight.trackPoints, []);
-  assert.equal(result.flight.inboundFlight.position, null);
+  assert.equal(result.flight.inboundFlight, null);
   assert.equal(input.flight.livePosition.latitude, 1);
 });
 test("queued Circle delivery is blocked if its flight owner loses membership", async () => {

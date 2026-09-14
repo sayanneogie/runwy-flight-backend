@@ -92,7 +92,7 @@ function createPaidAccess({ apiKey, query, fetchImpl = global.fetch, now = Date.
 function withoutLiveTelemetry(value) {
   if (Array.isArray(value)) return value.map(withoutLiveTelemetry);
   if (!value || typeof value !== "object" || value instanceof Date) return value;
-  const hidden = new Set(["livePosition", "position", "trackPoints", "position_lat", "position_lon", "rawProviderResponse", "rawProviderPayload"]);
+  const hidden = new Set(["inboundFlight", "livePosition", "position", "trackPoints", "position_lat", "position_lon", "rawProviderResponse", "rawProviderPayload"]);
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
     hidden.has(key) ? (key === "trackPoints" ? [] : null) : withoutLiveTelemetry(item)]));
 }
