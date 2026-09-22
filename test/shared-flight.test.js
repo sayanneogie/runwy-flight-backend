@@ -1362,7 +1362,7 @@ test("saving a previously deleted shared flight reactivates its notification row
   assert.equal((await repository.listUserFlights("u1")).length, 1);
 });
 
-test("displayed-flight reconciliation removes stale tracking ownership and keeps only matching occurrences", async () => {
+test("displayed-flight reconciliation preserves flights absent from a stale device manifest", async () => {
   const { service, repository } = makeService();
   const rows = repository.__memory.userFlights;
   const base = {
@@ -1416,18 +1416,18 @@ test("displayed-flight reconciliation removes stale tracking ownership and keeps
 
   assert.equal(result.displayed, 1);
   assert.equal(result.checked, 2);
-  assert.equal(result.kept, 1);
-  assert.equal(result.removed, 1);
-  assert.deepEqual(result.removedUserFlightIds, ["wrong-day-server-row"]);
-  assert.deepEqual(result.stoppedTrackingSessionIds, ["wrong-day-tracking-session"]);
+  assert.equal(result.kept, 2);
+  assert.equal(result.removed, 0);
+  assert.deepEqual(result.removedUserFlightIds, []);
+  assert.deepEqual(result.stoppedTrackingSessionIds, []);
   assert.deepEqual(result.orphanedFlightInstanceIds, []);
   assert.equal(rows.get("current").deleted_at, null);
-  assert.ok(rows.get("wrong-day").deleted_at);
+  assert.equal(rows.get("wrong-day").deleted_at, null);
   assert.equal(rows.get("history").deleted_at, null);
   assert.equal(rows.get("other-user").deleted_at, null);
 });
 
-test("an empty displayed-flight manifest removes every upcoming or active subscription", async () => {
+test("an empty displayed-flight manifest preserves cloud subscriptions", async () => {
   const { service, repository } = makeService();
   repository.__memory.userFlights.set("stale", {
     id: "stale-row",
@@ -1446,9 +1446,9 @@ test("an empty displayed-flight manifest removes every upcoming or active subscr
 
   const result = await service.reconcileDisplayedUserFlights("u1", { flights: [] });
 
-  assert.equal(result.removed, 1);
-  assert.deepEqual(result.orphanedFlightInstanceIds, ["orphaned-flight-instance"]);
-  assert.ok(repository.__memory.userFlights.get("stale").deleted_at);
+  assert.equal(result.removed, 0);
+  assert.deepEqual(result.orphanedFlightInstanceIds, []);
+  assert.equal(repository.__memory.userFlights.get("stale").deleted_at, null);
 });
 
 test("displayed-flight reconciliation consolidates duplicate rows for one occurrence", async () => {
@@ -1920,6 +1920,8 @@ test("manual tracking can defer slow live coverage until after the canonical sav
   ]);
 
   assert.ok(saved.flight.flightInstanceId);
+  assert.equal(coverageStarted, false);
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(coverageStarted, true);
   releaseCoverage();
 });
@@ -2337,6 +2339,7 @@ test("active viewer heartbeat records temporary watcher state and queues stale r
   row.fresh_until = "2026-05-01T00:00:00.000Z";
   await repository.updateFlight(row);
 
+  await repository.upsertUserFlight("u1", flight.flightInstanceId, {});
   const heartbeat = await service.registerActiveViewer("u1", flight.flightInstanceId);
 
   assert.equal(heartbeat.flightInstanceId, flight.flightInstanceId);

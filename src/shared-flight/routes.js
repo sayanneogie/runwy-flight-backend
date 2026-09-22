@@ -24,12 +24,15 @@ function mountSharedFlightRoutes(app, service) {
   app.post("/v1/user-flights/ensure-live-coverage", async (req, res) => {
     const userId = String(req.auth?.userId || "").trim();
     if (!userId) return res.status(401).json({ error: "Sign in is required" });
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    res.on('close', cancel);
     try {
-      const result = await service.ensureUserFlightLiveCoverage(userId, req.body || {});
+      const result = await service.ensureUserFlightLiveCoverage(userId, req.body || {}, { signal: controller.signal });
       return res.json(result);
     } catch (error) {
       return res.status(error.code === "PT429" ? 429 : error.code === "23514" ? 400 : (error.statusCode || 500)).json({ error: error.message || "Unable to ensure live coverage" });
-    }
+    } finally { res.off('close', cancel); }
   });
 
   app.put("/v1/user-flights/displayed", async (req, res) => {
@@ -49,7 +52,11 @@ function mountSharedFlightRoutes(app, service) {
     const userId = String(req.auth?.userId || "").trim();
     if (!userId) return res.status(401).json({ error: "Sign in is required" });
     try {
-      return res.json({ flights: await service.listUserFlights(userId) });
+      const limit = Number(req.query.limit || 100), offset = Number(req.query.offset || 0);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0 || offset > 10000)
+        return res.status(400).json({ error: "Invalid page" });
+      const flights = await service.listUserFlights(userId, { limit, offset });
+      return res.json({ flights, nextOffset: flights.length === limit ? offset + limit : null });
     } catch (error) {
       return res.status(500).json({ error: "Unable to load saved flights" });
     }

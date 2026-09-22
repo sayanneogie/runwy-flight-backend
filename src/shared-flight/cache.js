@@ -2,14 +2,20 @@
 
 const crypto = require("node:crypto");
 
-function createMemoryRedis() {
+function createMemoryRedis({ maxEntries = 10000, sweepIntervalMs = 30000 } = {}) {
   const values = new Map();
 
   function isExpired(record) {
     return record?.expiresAt && record.expiresAt <= Date.now();
   }
 
+  function sweep() {
+    for (const [key, record] of values) if (isExpired(record)) values.delete(key);
+  }
+  const timer = setInterval(sweep, sweepIntervalMs);
+  timer.unref?.();
   return {
+    close() { clearInterval(timer); values.clear(); },
     async get(key) {
       const record = values.get(key);
       if (!record || isExpired(record)) {
@@ -23,6 +29,11 @@ function createMemoryRedis() {
       if ((options.nx || options.NX) && values.has(key) && !isExpired(values.get(key))) {
         return null;
       }
+      if (!values.has(key) && values.size >= maxEntries) {
+        sweep();
+        // Never evict an active lock or rate counter to accommodate new work.
+        if (values.size >= maxEntries) throw Object.assign(new Error("Cache capacity reached"), { statusCode: 503 });
+      }
       values.set(key, { value, expiresAt: ttlMs > 0 ? Date.now() + ttlMs : null });
       return "OK";
     },
@@ -31,7 +42,7 @@ function createMemoryRedis() {
     },
     async incr(key) {
       const next = Number((await this.get(key)) || 0) + 1;
-      values.set(key, { value: String(next), expiresAt: null });
+      await this.set(key, String(next));
       return next;
     },
     async expire(key, seconds) {

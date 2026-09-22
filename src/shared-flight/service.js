@@ -822,25 +822,23 @@ function createSharedFlightService({
     return refreshFlightJob({ data: { flight_key: row.flight_key, flight_instance_id: row.id, reason: "forced" } });
   }
 
+  async function ensureSavedFlightCoverage(id) {
+    await ensureLiveSource(id, "user_saved");
+    await scheduleLifecycleCatchups(id, "user_saved");
+    await scheduleApiPoll(id, "user_saved");
+    await scheduleWeatherInsight(id, "user_saved");
+  }
+
   async function saveUserFlight(userId, input, options = {}) {
+    const reservation = await repository.reserveFlightWork?.(userId, normalizeSearchParams(input));
+    try {
     const flight = await searchFlight(input, { userId });
     if (!flight.flightInstanceId) return { flight, userFlight: null };
     const userFlight = await repository.upsertUserFlight(userId, flight.flightInstanceId, input);
-    const ensureCoverage = async () => {
-      await ensureLiveSource(flight.flightInstanceId, "user_saved");
-      await scheduleLifecycleCatchups(flight.flightInstanceId, "user_saved");
-      await scheduleApiPoll(flight.flightInstanceId, "user_saved");
-      await scheduleWeatherInsight(flight.flightInstanceId, "user_saved");
-    };
     if (options.deferCoverage === true) {
-      ensureCoverage().catch((error) => {
-        console.warn("Deferred saved-flight coverage failed", {
-          flightInstanceId: flight.flightInstanceId,
-          error: error?.message || String(error),
-        });
-      });
+      await queue.add('savedFlightCoverageJob', { flight_instance_id: flight.flightInstanceId }, { dedupe: true });
     } else {
-      await ensureCoverage();
+      await ensureSavedFlightCoverage(flight.flightInstanceId);
     }
     const updatedRow = await repository.findFlightById(flight.flightInstanceId);
     const updatedFlight = updatedRow
@@ -852,9 +850,10 @@ function createSharedFlightService({
         })
       : flight;
     return { flight: updatedFlight, userFlight };
+    } finally { if (reservation) await repository.releaseFlightWork(userId, reservation); }
   }
 
-  async function ensureUserFlightLiveCoverage(userId, input = {}) {
+  async function ensureUserFlightLiveCoverage(userId, input = {}, options = {}) {
     const ids = Array.isArray(input.ids)
       ? input.ids.map((id) => String(id || "").trim()).filter(Boolean).slice(0, 50)
       : [];
@@ -867,6 +866,7 @@ function createSharedFlightService({
     let covered = 0;
 
     for (const row of rows) {
+      if (options.signal?.aborted) break;
       try {
         const flightInstanceId = row.flight_instance_id || await resolveFlightInstanceForUserFlight(userId, row);
         if (!flightInstanceId) {
@@ -890,6 +890,8 @@ function createSharedFlightService({
   async function resolveFlightInstanceForUserFlight(userId, row) {
     const params = searchInputFromUserFlight(row);
     if (!params) return null;
+    const reservation = await repository.reserveFlightWork?.(userId, params);
+    try {
     const flight = await searchFlight(params, { userId });
     if (!flight.flightInstanceId) return null;
 
@@ -901,6 +903,7 @@ function createSharedFlightService({
     }
 
     return flight.flightInstanceId;
+    } finally { if (reservation) await repository.releaseFlightWork(userId, reservation); }
   }
 
   async function deleteUserFlight(userId, id) {
@@ -942,7 +945,11 @@ function createSharedFlightService({
     // A legacy tracked mirror and its client-owned row can describe the same
     // displayed occurrence. Keep exactly one subscription so target discovery,
     // provider ownership, and APNs fanout remain one-to-one.
-    const staleRows = activeRows.filter((row) => !retainedIds.has(String(row.id)));
+    // A device manifest is observational, never authority to delete another
+    // device's additions. Deletion must use the explicit owner-scoped endpoint.
+    const retainedRows = activeRows.filter(row => retainedIds.has(String(row.id)));
+    const staleRows = activeRows.filter(row => !retainedIds.has(String(row.id)) &&
+      row.flight_instance_id && retainedRows.some(kept => kept.flight_instance_id === row.flight_instance_id));
     const removed = [];
 
     for (const row of staleRows) {
@@ -976,9 +983,7 @@ function createSharedFlightService({
       checked: activeRows.length,
       kept: activeRows.length - removed.length,
       removed: removed.length,
-      duplicatesConsolidated: Math.max(0, activeRows.length - retainedIds.size - activeRows.filter((row) =>
-        !manifest.some((item) => userFlightMatchesDisplayedManifest(row, item))
-      ).length),
+      duplicatesConsolidated: removed.length,
       removedUserFlightIds: removed.map((row) => row.id),
       stoppedTrackingSessionIds: [...new Set(removed.map((row) => row.tracking_session_id).filter(Boolean))],
       orphanedFlightInstanceIds,
@@ -1443,6 +1448,7 @@ function createSharedFlightService({
   }
 
   async function registerActiveViewer(userId, flightInstanceId) {
+    if (!await repository.canReadFlight(userId, flightInstanceId)) return null;
     const flight = await repository.findFlightById(flightInstanceId);
     if (!flight) return null;
     await cache.redis.set(`active_watchers:${flightInstanceId}:${userId}`, "1", { ex: ACTIVE_VIEWER_TTL_SECONDS });
@@ -1474,8 +1480,8 @@ function createSharedFlightService({
     return count;
   }
 
-  async function listUserFlights(userId) {
-    const rows = await repository.listUserFlights(userId);
+  async function listUserFlights(userId, page = { limit: 100, offset: 0 }) {
+    const rows = await repository.listUserFlights(userId, page);
     return rows.map(({ userFlight, flight }) => ({ userFlight, flight: rowToFlightResponse(flight, { source: "postgres", freshness: new Date(flight.fresh_until).getTime() > Date.now() ? "fresh" : "stale" }) }));
   }
 
@@ -1968,6 +1974,7 @@ function createSharedFlightService({
     return insight;
   }
 
+  queue.process("savedFlightCoverageJob", job => ensureSavedFlightCoverage(job.data.flight_instance_id));
   queue.process("refreshFlightJob", refreshFlightJob);
   queue.process("fanoutNotificationJob", fanoutNotificationJob);
   queue.process("liveActivityUpdateJob", liveActivityUpdateJob);

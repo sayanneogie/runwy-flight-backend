@@ -59,6 +59,10 @@ async function verify(client) {
     not has_function_privilege('authenticated','public.runwy_create_tracking_session(uuid,text,text,text,text,text,text,date,text,jsonb,integer)','EXECUTE') as tracking_reservation_server_only,
     exists(select 1 from pg_trigger where tgname='runwy_bound_storage') as storage_allowance_enforced,
     exists(select 1 from pg_constraint where conname='runwy_alert_settings_shape') as alert_shapes_validated,
+    exists(select 1 from pg_trigger where tgname='souvenir_revision') as sticker_revisions_enforced,
+    exists(select 1 from pg_trigger where tgname='bound_live_activity_tokens') as live_activity_bounds,
+    not has_table_privilege('authenticated','runwy_security.data_gateway_config','SELECT') as gateway_secret_private,
+    not has_function_privilege('authenticated','public.runwy_reserve_flight_work(uuid,text,date,text,text,boolean,integer)','EXECUTE') as work_reservation_private,
     not exists(select 1 from public.live_snapshots where canonical_snapshot_json is distinct from public.runwy_basic_snapshot(canonical_snapshot_json)
       or raw_provider_payload_json<>'{}'::jsonb) as basic_snapshots_sanitized,
     not exists(select 1 from public.user_flights uf left join public.tracking_sessions ts on ts.id=uf.tracking_session_id

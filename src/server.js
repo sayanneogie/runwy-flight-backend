@@ -368,6 +368,7 @@ app.use(webhookPaths, (req, res, next) => {
 app.use(webhookPaths, sharedLimiter("webhooks", positiveInteger(process.env.WEBHOOK_REQUESTS_PER_MINUTE, 600), {
   keyGenerator: () => "flightaware",
 }));
+app.use('/v1/data/rest/v1', express.json({ limit: '2mb' }));
 app.use(express.json({ limit: "100kb" }));
 
 const authTokenCache = new Map();
@@ -5717,7 +5718,7 @@ function liveActivityDeliveryFlight(flight, snapshot, snapshotBaggage, snapshotR
   return liveActivityFlightByApplyingTrackingSnapshot(flight, snapshot, snapshotBaggage);
 }
 
-async function sendLiveActivityStateForFlight(flight) {
+async function sendLiveActivityStateForFlight(flight, tokenId = null) {
   if (!usesDatabase() || !flight?.id || !isApnsConfigured()) return { sent: 0, skipped: true };
   const tokenResult = await pool.query(
     `select lat.id, lat.user_id, lat.push_token, lat.environment, lat.last_content_phase,
@@ -5727,8 +5728,9 @@ async function sendLiveActivityStateForFlight(flight) {
      from public.live_activity_tokens lat
      left join public.live_snapshots ls
        on ls.tracking_session_id = lat.tracking_session_id
-     where lat.flight_instance_id = $1::uuid and lat.is_active = true`,
-    [flight.id]
+     where lat.flight_instance_id = $1::uuid and lat.is_active = true
+       and ($2::uuid is null or lat.id=$2)`,
+    [flight.id, tokenId]
   );
   const now = new Date();
   let sent = 0;
@@ -5772,7 +5774,7 @@ async function sendLiveActivityStateForFlight(flight) {
            last_error = $3,
            updated_at = now()
        where id = $1`,
-      [token.id, ok, ok ? null : (response.reason || `HTTP_${response.status}`), permanentTokenFailure, phase]
+      [token.id, ok, ok ? null : (response.reason || `HTTP_${response.status}`), permanentTokenFailure || (ok && shouldEnd), phase]
     );
   }
   return { sent, attempted: tokenResult.rowCount - skippedRegressive, skippedRegressive };
@@ -7088,6 +7090,9 @@ async function buildDetailedHealth() {
   };
 }
 
+require('./data-gateway').mountDataGateway(app, { query: protectionQuery, supabaseURL: SUPABASE_URL,
+  anonKey: SUPABASE_ANON_KEY, secret: process.env.RUNWY_DATA_GATEWAY_SECRET });
+
 app.get("/health", async (_req, res) => {
   res.json({
     ok: true,
@@ -7219,6 +7224,9 @@ app.post("/v1/live-activities/token", async (req, res) => {
   }
 
   try {
+    const access = await paidAccess.membership(userId);
+    if (!access.paid || !access.verified) return res.status(access.verified ? 403 : 503).json({ error: "Verified membership required" });
+    if (contentPhase.length > 64) return res.status(400).json({ error: "Invalid content phase" });
     const link = await pool.query(
       `select fi.id as flight_instance_id
        from public.user_flights uf
@@ -7244,7 +7252,7 @@ app.post("/v1/live-activities/token", async (req, res) => {
       return res.status(404).json({ error: "No active shared flight is linked to this activity" });
     }
 
-    await pool.query(
+    const registration = await pool.query(
       `insert into public.live_activity_tokens (
          user_id, flight_instance_id, tracking_session_id, activity_id,
          local_flight_id, push_token, environment, is_active, last_content_phase
@@ -7258,19 +7266,20 @@ app.post("/v1/live-activities/token", async (req, res) => {
          is_active = true,
          last_content_phase = coalesce(excluded.last_content_phase, live_activity_tokens.last_content_phase),
          last_error = null,
-         updated_at = now()`,
+         updated_at = now()
+       returning id`,
       [userId, flightInstanceId, trackingId, activityId, localFlightId, token, environment, contentPhase || null]
     );
     const flight = await sharedFlightRepository.findFlightById(flightInstanceId);
     // Delivery reconciles the shared row with this token's tracking snapshot
     // and performs its own phase-regression guard.
     if (flight) {
-      await sendLiveActivityStateForFlight(flight);
+      await sendLiveActivityStateForFlight(flight, registration.rows[0].id);
     }
     return res.json({ ok: true, flightInstanceId });
   } catch (error) {
     console.error("Unable to store Live Activity token", error?.message || String(error));
-    return res.status(500).json({ error: "Unable to store Live Activity token" });
+    return res.status(error.code === "PT429" ? 429 : 500).json({ error: "Unable to store Live Activity token" });
   }
 });
 
@@ -7649,8 +7658,11 @@ app.post("/v1/track", async (req, res) => {
     return res.status(503).json({ error: "Provider calls are temporarily disabled" });
   }
 
+  let workReservation;
   try {
     const query = validated.value;
+    workReservation = await require('./flight-work').reserveFlightWork(pool.query.bind(pool), userId, query,
+      { tracking: true, limit: MAX_ACTIVE_TRACKING_SESSIONS_PER_USER });
     if (SHARED_FLIGHT_TRACK_BRIDGE_ENABLED && sharedFlightService) {
       const sharedInput = sharedTrackInputFromQuery(query);
       if (sharedInput) {
@@ -7680,6 +7692,7 @@ app.post("/v1/track", async (req, res) => {
             }
           }
         } catch (error) {
+          if (["PT429", "TRACKING_LIMIT_REACHED"].includes(error.code)) throw error;
           console.warn("Shared flight track bridge failed; falling back to provider track", {
             error: error?.message || String(error),
             details: error?.details || null,
@@ -7795,10 +7808,13 @@ app.post("/v1/track", async (req, res) => {
       normalized: tracked.normalized,
     });
   } catch (_error) {
-    if (_error?.code === "TRACKING_LIMIT_REACHED") {
+    if (["TRACKING_LIMIT_REACHED", "PT429"].includes(_error?.code)) {
       return res.status(429).json({ error: _error.message });
     }
     return res.status(502).json({ error: "Failed to fetch provider data" });
+  } finally {
+    if (workReservation) await require('./flight-work').releaseFlightWork(pool.query.bind(pool), userId, workReservation)
+      .catch(error => console.warn('Tracking work release failed', { code: error.code }));
   }
 });
 
@@ -8244,7 +8260,9 @@ async function startApiServer() {
       and to_regprocedure('public.runwy_register_push_device(uuid,text,text,text,text)') is not null
       and to_regprocedure('public.runwy_link_user_flight(uuid,uuid,uuid,jsonb)') is not null
       and to_regprocedure('public.runwy_prepare_tracking_user_flight(uuid,uuid,uuid)') is not null
-      and to_regprocedure('public.runwy_prune_operational_history(integer)') is not null as ready`);
+      and to_regprocedure('public.runwy_prune_operational_history(integer)') is not null
+      and to_regprocedure('public.runwy_reserve_flight_work(uuid,text,date,text,text,boolean,integer)') is not null
+      and to_regprocedure('public.runwy_charge_data_bytes(uuid,bigint)') is not null as ready`);
     if (!rows[0]?.ready) throw new Error("Apply the database gap-fix migrations before deploying this backend");
   }
 

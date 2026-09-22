@@ -401,11 +401,11 @@ function createMemorySharedFlightRepository() {
     async canReadFlight(userId, flightId) {
       return [...userFlights.values()].some(row => row.user_id === userId && row.flight_instance_id === flightId && !row.deleted_at && row.lifecycle_state !== "deleted");
     },
-    async listUserFlights(userId) {
+    async listUserFlights(userId, page = { limit: 10000, offset: 0 }) {
       return [...userFlights.values()]
         .filter((row) => row.user_id === userId && !row.deleted_at && row.lifecycle_state !== "deleted")
         .map((userFlight) => ({ userFlight, flight: [...flights.values()].find((flight) => flight.id === userFlight.flight_instance_id) || null }))
-        .filter((item) => item.flight);
+        .filter((item) => item.flight).slice(page.offset, page.offset + page.limit);
     },
     async listActiveUserFlightRows(userId) {
       return [...userFlights.values()]
@@ -817,6 +817,8 @@ function createPostgresSharedFlightRepository(pool) {
   }
 
   return {
+    reserveFlightWork(userId, input) { return require('../flight-work').reserveFlightWork(pool.query.bind(pool), userId, input); },
+    releaseFlightWork(userId, token) { return require('../flight-work').releaseFlightWork(pool.query.bind(pool), userId, token); },
     async canReadFlight(userId, flightId) {
       const result = await pool.query(`select exists(select 1 from public.user_flights uf where uf.flight_instance_id=$2::uuid
         and uf.deleted_at is null and uf.lifecycle_state<>'deleted'
@@ -1353,7 +1355,7 @@ function createPostgresSharedFlightRepository(pool) {
         [userId, flightInstanceId]
       ));
     },
-    async listUserFlights(userId) {
+    async listUserFlights(userId, page = { limit: 10000, offset: 0 }) {
       const result = await pool.query(
         `select uf as user_flight, fi as flight
          from public.user_flights uf
@@ -1361,14 +1363,16 @@ function createPostgresSharedFlightRepository(pool) {
          where uf.user_id = $1
            and uf.deleted_at is null
            and coalesce(uf.lifecycle_state, '') <> 'deleted'
-         order by uf.added_at desc`,
-        [userId]
+         order by uf.added_at desc, uf.id
+         limit $2 offset $3`,
+        [userId, page.limit, page.offset]
       );
       return result.rows.map((row) => ({ userFlight: row.user_flight, flight: row.flight }));
     },
     async listActiveUserFlightRows(userId) {
       const result = await pool.query(
-        `select *
+        `select id,user_id,flight_instance_id,tracking_session_id,display_flight_number,origin_iata,destination_iata,
+                 scheduled_departure,lifecycle_state,updated_at,added_at
          from public.user_flights
          where user_id = $1::uuid
            and deleted_at is null
