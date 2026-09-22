@@ -1523,11 +1523,12 @@ test("Postgres shared-flight upsert clears tombstones and notification lookup fo
   await repository.markUserFlightsDisplayed("user-1", ["user-flight-1"]);
 
   assert.match(statements[0], /on conflict[\s\S]*deleted_at = null/i);
-  assert.match(statements[1], /sharedFlightInstanceId/);
-  assert.match(statements[2], /sharedFlightInstanceId/);
-  assert.match(statements[2], /alert_settings_json[\s\S]*takeoffLanding/);
-  assert.match(statements[2], /deleted_uf\.deleted_at > greatest/);
-  assert.match(statements[3], /set updated_at = clock_timestamp\(\)/);
+  const fanout = statements.find(sql=>sql.includes('circle_targets as'));
+  assert.match(fanout, /ts\.flight_instance_id/);
+  assert.match(fanout, /runwy_circle_flight_allowed/);
+  assert.match(fanout, /alert_settings_json[\s\S]*takeoffLanding/);
+  assert.match(fanout, /deleted_uf\.deleted_at > greatest/);
+  assert.ok(statements.some(sql=>/set updated_at = clock_timestamp\(\)/.test(sql)));
 });
 
 test("stream update targets can be found by provider id or canonical flight number", async () => {
@@ -1558,7 +1559,7 @@ test("suspicious provider data does not overwrite trusted state and queues reval
 });
 
 test("RLS migration protects user-specific rows and shared flight mutation", () => {
-  const sql = fs.readFileSync(path.join(__dirname, "../supabase/migrations/20260509_create_shared_flight_state.sql"), "utf8");
+  const sql = fs.readFileSync(path.join(__dirname, "../supabase/legacy-migrations/20260509_create_shared_flight_state.sql"), "utf8");
   assert.match(sql, /alter table public\.user_flights enable row level security/i);
   assert.match(sql, /auth\.uid\(\) = user_id/i);
   assert.match(sql, /revoke insert, update, delete on public\.flight_instances from anon, authenticated/i);
@@ -1566,7 +1567,7 @@ test("RLS migration protects user-specific rows and shared flight mutation", () 
 
 test("provider refresh cleanup migration pauses bridged sessions and finalizes arrivals", () => {
   const sql = fs.readFileSync(
-    path.join(__dirname, "../supabase/migrations/20260828_stop_duplicate_provider_refreshes.sql"),
+    path.join(__dirname, "../supabase/legacy-migrations/20260828_stop_duplicate_provider_refreshes.sql"),
     "utf8"
   );
 
@@ -1579,7 +1580,7 @@ test("provider refresh cleanup migration pauses bridged sessions and finalizes a
 
 test("provider request lease migration protects distributed call locks", () => {
   const sql = fs.readFileSync(
-    path.join(__dirname, "../supabase/migrations/20260828_add_provider_request_leases.sql"),
+    path.join(__dirname, "../supabase/legacy-migrations/20260828_add_provider_request_leases.sql"),
     "utf8"
   );
 
@@ -1591,7 +1592,7 @@ test("provider request lease migration protects distributed call locks", () => {
 
 test("APNs semantic dedupe migration enforces one delivery claim per user and event meaning", () => {
   const sql = fs.readFileSync(
-    path.join(__dirname, "../supabase/migrations/20260904_add_apns_semantic_dedupe.sql"),
+    path.join(__dirname, "../supabase/legacy-migrations/20260904_add_apns_semantic_dedupe.sql"),
     "utf8"
   );
 
@@ -1603,7 +1604,7 @@ test("APNs semantic dedupe migration enforces one delivery claim per user and ev
 
 test("durable APNs migration persists per-device work and safe recovery states", () => {
   const sql = fs.readFileSync(
-    path.join(__dirname, "../supabase/migrations/20260904_add_durable_apns_outbox.sql"),
+    path.join(__dirname, "../supabase/legacy-migrations/20260904_add_durable_apns_outbox.sql"),
     "utf8"
   );
 
@@ -1615,7 +1616,7 @@ test("durable APNs migration persists per-device work and safe recovery states",
 
 test("past-flight occurrence migration separates trips and enforces one history row", () => {
   const sql = fs.readFileSync(
-    path.join(__dirname, "../supabase/migrations/20260904_deduplicate_past_flight_occurrences.sql"),
+    path.join(__dirname, "../supabase/legacy-migrations/20260904_deduplicate_past_flight_occurrences.sql"),
     "utf8"
   );
 
@@ -1629,7 +1630,7 @@ test("past-flight occurrence migration separates trips and enforces one history 
 
 test("deleted-flight cleanup removes queued notifications and pauses orphaned tracking", () => {
   const sql = fs.readFileSync(
-    path.join(__dirname, "../supabase/migrations/20260828_cleanup_deleted_flight_notifications.sql"),
+    path.join(__dirname, "../supabase/legacy-migrations/20260828_cleanup_deleted_flight_notifications.sql"),
     "utf8"
   );
   const serverSource = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");

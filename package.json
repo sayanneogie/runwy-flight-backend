@@ -19,7 +19,11 @@
     "dev": "npm run dev:api",
     "dev:api": "ENABLE_TRACKING_POLLER=false node --watch src/server.js",
     "dev:poller": "node --watch src/flight-poller.js",
-    "dev:firehose": "node --watch src/flight-firehose.js"
+    "dev:firehose": "node --watch src/flight-firehose.js",
+    "test:database": "node --test test/database-hardening.test.js",
+    "db:status": "node scripts/db-migrate.js",
+    "db:migrate": "node scripts/db-migrate.js --apply",
+    "db:verify": "node scripts/db-migrate.js --verify"
   },
   "engines": {
     "node": ">=18.18"

@@ -1,0 +1,4790 @@
+{
+  "sha256": "93ddc92c7ec71d3d013ee74b9ed643e312ae3f1488ce7399bb467c920aadc251",
+  "parts": {
+    "columns": [
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "attname": "provider",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "attname": "endpoint",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "attname": "flight_key",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "attname": "user_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "attname": "status_code",
+        "type": "integer",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "attname": "response_time_ms",
+        "type": "integer",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "attname": "cache_status",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "attname": "cost_estimate",
+        "type": "numeric",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "attname": "error",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "attname": "provider_path",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "attname": "request_reason",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "device_tokens",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "device_tokens",
+        "attname": "user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "device_tokens",
+        "attname": "device_token",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "device_tokens",
+        "attname": "platform",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'ios'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "device_tokens",
+        "attname": "environment",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "device_tokens",
+        "attname": "is_active",
+        "type": "boolean",
+        "attnotnull": false,
+        "default_value": "true"
+      },
+      {
+        "nspname": "public",
+        "relname": "device_tokens",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "device_tokens",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "attname": "user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "attname": "provider",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'revenuecat'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "attname": "product_id",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "attname": "entitlement_key",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "attname": "is_active",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "false"
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "attname": "expires_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "attname": "last_synced_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "attname": "raw_payload",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": "'{}'::jsonb"
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_definitions",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_definitions",
+        "attname": "airline_code",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_definitions",
+        "attname": "flight_number",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_definitions",
+        "attname": "airline_name",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_definitions",
+        "attname": "typical_origin_airport",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_definitions",
+        "attname": "typical_destination_airport",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_definitions",
+        "attname": "provider",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_definitions",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_definitions",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "attname": "flight_instance_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "attname": "flight_key",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "attname": "fa_flight_id",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "attname": "ident",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "attname": "event_type",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "attname": "event_status",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "attname": "event_time",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "attname": "source",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'flightaware'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "attname": "raw_payload",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "attname": "normalized_payload",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "attname": "dedupe_key",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "flight_instance_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "event_type",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "event_severity",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'low'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "old_value",
+        "type": "jsonb",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "new_value",
+        "type": "jsonb",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "summary",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "provider",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "provider_event_time",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "confidence",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": "'medium'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "notification_required",
+        "type": "boolean",
+        "attnotnull": false,
+        "default_value": "false"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "state_revision",
+        "type": "bigint",
+        "attnotnull": true,
+        "default_value": "0"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "flight_snapshot",
+        "type": "jsonb",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "attname": "fanout_completed_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instance_aliases",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instance_aliases",
+        "attname": "alias_key",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instance_aliases",
+        "attname": "flight_instance_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instance_aliases",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "flight_key",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "provider_flight_id",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "airline_code",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "flight_number",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "departure_date",
+        "type": "date",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "origin_airport",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "destination_airport",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "scheduled_departure_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "scheduled_arrival_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "estimated_departure_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "estimated_arrival_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "actual_departure_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "actual_arrival_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "status",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'unknown'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "status_detail",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "gate",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "terminal",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "baggage_belt",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "position_lat",
+        "type": "double precision",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "position_lon",
+        "type": "double precision",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "altitude",
+        "type": "integer",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "ground_speed",
+        "type": "integer",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "heading",
+        "type": "integer",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "provider",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "provider_alert_id",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "provider_alert_status",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'unavailable'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "provider_alert_created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "provider_alert_expires_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "last_webhook_received_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "live_data_source",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'on_demand'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "streaming_status",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'disabled'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "stream_registered_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "last_stream_event_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "last_poll_reason",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "refresh_priority",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'normal'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "data_confidence",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": "'unknown'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "normalized_data",
+        "type": "jsonb",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "raw_provider_response",
+        "type": "jsonb",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "last_fetched_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "fresh_until",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "needs_revalidation",
+        "type": "boolean",
+        "attnotnull": false,
+        "default_value": "false"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "is_final",
+        "type": "boolean",
+        "attnotnull": false,
+        "default_value": "false"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "attname": "state_revision",
+        "type": "bigint",
+        "attnotnull": true,
+        "default_value": "0"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "flight_instance_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "status",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "estimated_departure_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "estimated_arrival_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "actual_departure_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "actual_arrival_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "gate",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "terminal",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "baggage_belt",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "position_lat",
+        "type": "double precision",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "position_lon",
+        "type": "double precision",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "altitude",
+        "type": "integer",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "ground_speed",
+        "type": "integer",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "heading",
+        "type": "integer",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "raw_provider_response",
+        "type": "jsonb",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "normalized_data",
+        "type": "jsonb",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "attname": "state_revision",
+        "type": "bigint",
+        "attnotnull": true,
+        "default_value": "0"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "attname": "inviter_user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "attname": "token_hash",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "attname": "status",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'pending'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "attname": "default_share_scope",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'future_flights'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "attname": "message",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "attname": "expires_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "(now() + '7 days'::interval)"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "attname": "accepted_by_user_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "attname": "accepted_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "relationship_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "owner_user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "viewer_user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "share_scope",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'future_flights'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "can_view_live",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "true"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "can_view_history",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "false"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "can_receive_alerts",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "true"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "notify_departure",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "true"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "notify_arrival",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "true"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "notify_delay",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "true"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "notify_gate_change",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "true"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "attname": "user_a",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "attname": "user_b",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "attname": "relationship_status",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'active'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "attname": "created_by_user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "flight_instance_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "tracking_session_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "activity_id",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "local_flight_id",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "push_token",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "environment",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "is_active",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "true"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "last_sent_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "last_error",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "attname": "last_content_phase",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "tracking_session_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "provider",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "provider_flight_id",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "flight_number",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "airline_code",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "departure_airport_iata",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "arrival_airport_iata",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "snapshot_status",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "terminal",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "gate",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "baggage_claim",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "delay_minutes",
+        "type": "integer",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "departure_times_json",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": "'{}'::jsonb"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "arrival_times_json",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": "'{}'::jsonb"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "alerts_json",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": "'{}'::jsonb"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "metrics_json",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": "'{}'::jsonb"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "canonical_snapshot_json",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": "'{}'::jsonb"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "raw_provider_payload_json",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": "'{}'::jsonb"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "provider_last_updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "attname": "canonical_revision",
+        "type": "bigint",
+        "attnotnull": true,
+        "default_value": "0"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "attname": "user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "attname": "flight_instance_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "attname": "flight_event_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "attname": "channel",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'apns'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "attname": "status",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'pending'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "attname": "sent_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "attname": "opened_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "attname": "error",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "attname": "user_flight_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "attname": "dedupe_key",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "notification_delivery_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "device_token_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "payload_json",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": "'{}'::jsonb"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "status",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'queued'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "attempt_count",
+        "type": "integer",
+        "attnotnull": true,
+        "default_value": "0"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "next_attempt_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "locked_until",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "last_attempt_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "accepted_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "apns_id",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "error",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "tracking_session_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "friend_relationship_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "notification_type",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "delivery_channel",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'push'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "delivery_status",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'queued'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "title",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "body",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "payload_json",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": "'{}'::jsonb"
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "scheduled_for",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "sent_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "read_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "attname": "dedupe_key",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "profiles",
+        "attname": "user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "profiles",
+        "attname": "display_name",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'Traveler'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "profiles",
+        "attname": "avatar_url",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "profiles",
+        "attname": "email",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "profiles",
+        "attname": "auth_provider",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "profiles",
+        "attname": "onboarding_completed",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "false"
+      },
+      {
+        "nspname": "public",
+        "relname": "profiles",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "profiles",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "provider_request_leases",
+        "attname": "lock_key",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "provider_request_leases",
+        "attname": "lease_token",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "provider_request_leases",
+        "attname": "expires_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "provider_request_leases",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "provider_request_leases",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "provider_response_cache",
+        "attname": "cache_key",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "provider_response_cache",
+        "attname": "response",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "provider_response_cache",
+        "attname": "requested_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "provider_response_cache",
+        "attname": "expires_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "push_devices",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "push_devices",
+        "attname": "user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "push_devices",
+        "attname": "device_id",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "push_devices",
+        "attname": "apns_token",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "push_devices",
+        "attname": "platform",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'ios'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "push_devices",
+        "attname": "push_enabled",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "true"
+      },
+      {
+        "nspname": "public",
+        "relname": "push_devices",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "push_devices",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "ticket_souvenirs",
+        "attname": "user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "ticket_souvenirs",
+        "attname": "flight_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "ticket_souvenirs",
+        "attname": "flight_payload",
+        "type": "jsonb",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "ticket_souvenirs",
+        "attname": "collected_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "ticket_souvenirs",
+        "attname": "locked_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "ticket_souvenirs",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "ticket_souvenirs",
+        "attname": "deleted_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "owner_user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "provider",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "provider_flight_id",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "flight_number",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "airline_code",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "origin_iata",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "destination_iata",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "travel_date",
+        "type": "date",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "session_status",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'pending'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "created_source",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "metadata_json",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": "'{}'::jsonb"
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "next_poll_after",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "last_snapshot_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "polling_stopped_reason",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "achievement_key",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "achievement_type",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "user_flight_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "flight_instance_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "title",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "body",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "symbol",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "metadata_json",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": "'{}'::jsonb"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "awarded_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "notified_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "celebrated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": "gen_random_uuid()"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "source_type",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'manual_search'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "lifecycle_state",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'upcoming'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "tracking_session_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "display_flight_number",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "marketing_airline_code",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "marketing_airline_name",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "operating_airline_code",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "operating_airline_name",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "origin_iata",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "destination_iata",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "scheduled_departure",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "scheduled_arrival",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "estimated_departure",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "estimated_arrival",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "actual_departure",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "actual_arrival",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "departure_terminal",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "departure_gate",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "arrival_terminal",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "arrival_gate",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "baggage_claim",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "aircraft_type",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "status",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "delay_minutes",
+        "type": "integer",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "distance_km",
+        "type": "numeric",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "flight_time_minutes",
+        "type": "integer",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "route_polyline",
+        "type": "jsonb",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "tracked_snapshot",
+        "type": "jsonb",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "calendar_source_text",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "provider_name",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "provider_flight_id",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "deleted_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "notifications_enabled",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "true"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "alert_settings_json",
+        "type": "jsonb",
+        "attnotnull": true,
+        "default_value": "jsonb_build_object('gateChange', true, 'delayUpdates', true, 'boardingTime', true, 'takeoffLanding', false, 'baggageClaim', true, 'quietHours', jsonb_build_object('startHour', 22, 'startMinute', 0, 'endHour', 7, 'endMinute', 0))"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "flight_instance_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "notification_enabled",
+        "type": "boolean",
+        "attnotnull": false,
+        "default_value": "true"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "alert_preferences",
+        "type": "jsonb",
+        "attnotnull": false,
+        "default_value": "'{\"low\": false, \"high\": true, \"medium\": true, \"critical\": true}'::jsonb"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "trip_id",
+        "type": "uuid",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "user_label",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "visibility",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": "'private'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "added_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "final_route_capture_status",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "final_route_capture_attempted_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "final_route_capture_completed_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "final_route_capture_next_attempt_at",
+        "type": "timestamp with time zone",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "attname": "final_route_capture_error",
+        "type": "text",
+        "attnotnull": false,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "attname": "user_id",
+        "type": "uuid",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "attname": "preferred_theme",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'system'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "attname": "distance_unit",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'km'::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "attname": "uses_24_hour_time",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "false"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "attname": "default_airport_code",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "''::text"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "attname": "validate_with_provider_enabled",
+        "type": "boolean",
+        "attnotnull": true,
+        "default_value": "true"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "attname": "created_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "attname": "updated_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": "now()"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "attname": "temperature_unit",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": "'celsius'::text"
+      },
+      {
+        "nspname": "runwy_security",
+        "relname": "provider_daily_budgets",
+        "attname": "budget_day",
+        "type": "date",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "runwy_security",
+        "relname": "provider_daily_budgets",
+        "attname": "bucket",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "runwy_security",
+        "relname": "provider_daily_budgets",
+        "attname": "reserved_units",
+        "type": "integer",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "runwy_security",
+        "relname": "rate_limits",
+        "attname": "namespace",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "runwy_security",
+        "relname": "rate_limits",
+        "attname": "key_hash",
+        "type": "text",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "runwy_security",
+        "relname": "rate_limits",
+        "attname": "hits",
+        "type": "integer",
+        "attnotnull": true,
+        "default_value": null
+      },
+      {
+        "nspname": "runwy_security",
+        "relname": "rate_limits",
+        "attname": "expires_at",
+        "type": "timestamp with time zone",
+        "attnotnull": true,
+        "default_value": null
+      }
+    ],
+    "constraints": [
+      {
+        "nspname": "public",
+        "relname": "api_usage_logs",
+        "conname": "api_usage_logs_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "device_tokens",
+        "conname": "device_tokens_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "device_tokens",
+        "conname": "device_tokens_user_id_device_token_key",
+        "definition": "UNIQUE (user_id, device_token)"
+      },
+      {
+        "nspname": "public",
+        "relname": "device_tokens",
+        "conname": "device_tokens_user_id_fkey",
+        "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "conname": "entitlements_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "conname": "entitlements_unique_user_entitlement",
+        "definition": "UNIQUE (user_id, entitlement_key)"
+      },
+      {
+        "nspname": "public",
+        "relname": "entitlements",
+        "conname": "entitlements_user_id_fkey",
+        "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_definitions",
+        "conname": "flight_definitions_airline_code_flight_number_key",
+        "definition": "UNIQUE (airline_code, flight_number)"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_definitions",
+        "conname": "flight_definitions_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "conname": "flight_event_logs_dedupe_key_key",
+        "definition": "UNIQUE (dedupe_key)"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "conname": "flight_event_logs_flight_instance_id_fkey",
+        "definition": "FOREIGN KEY (flight_instance_id) REFERENCES flight_instances(id) ON DELETE SET NULL"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_event_logs",
+        "conname": "flight_event_logs_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "conname": "flight_events_confidence_check",
+        "definition": "CHECK (confidence = ANY (ARRAY['high'::text, 'medium'::text, 'low'::text, 'suspicious'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "conname": "flight_events_flight_instance_id_fkey",
+        "definition": "FOREIGN KEY (flight_instance_id) REFERENCES flight_instances(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "conname": "flight_events_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "conname": "flight_events_severity_check",
+        "definition": "CHECK (event_severity = ANY (ARRAY['low'::text, 'medium'::text, 'high'::text, 'critical'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_events",
+        "conname": "flight_events_type_check",
+        "definition": "CHECK (event_type = ANY (ARRAY['SCHEDULED'::text, 'DELAYED'::text, 'RESCHEDULED'::text, 'CANCELLED'::text, 'DEPARTED'::text, 'AIRBORNE'::text, 'LANDED'::text, 'ARRIVED'::text, 'TAXIING'::text, 'TAKEOFF_ROLL'::text, 'TAXI_IN'::text, 'ARRIVED_AT_GATE'::text, 'GATE_CHANGED'::text, 'TERMINAL_CHANGED'::text, 'BAGGAGE_BELT_ASSIGNED'::text, 'DIVERTED'::text, 'RETURNED_TO_GATE'::text, 'WEATHER_ADVISORY'::text, 'TRIP_STARTING'::text, 'AIRCRAFT_CHANGED'::text, 'UNKNOWN_CHANGE'::text, 'PROVIDER_DATA_SUSPICIOUS'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instance_aliases",
+        "conname": "flight_instance_aliases_alias_key_key",
+        "definition": "UNIQUE (alias_key)"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instance_aliases",
+        "conname": "flight_instance_aliases_flight_instance_id_fkey",
+        "definition": "FOREIGN KEY (flight_instance_id) REFERENCES flight_instances(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instance_aliases",
+        "conname": "flight_instance_aliases_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "conname": "flight_instances_confidence_check",
+        "definition": "CHECK (data_confidence = ANY (ARRAY['unknown'::text, 'high'::text, 'medium'::text, 'low'::text, 'suspicious'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "conname": "flight_instances_flight_key_key",
+        "definition": "UNIQUE (flight_key)"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "conname": "flight_instances_live_data_source_check",
+        "definition": "CHECK (live_data_source = ANY (ARRAY['on_demand'::text, 'provider_alert'::text, 'streaming'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "conname": "flight_instances_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "conname": "flight_instances_provider_alert_status_check",
+        "definition": "CHECK (provider_alert_status = ANY (ARRAY['active'::text, 'unavailable'::text, 'failed'::text, 'expired'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "conname": "flight_instances_refresh_priority_check",
+        "definition": "CHECK (refresh_priority = ANY (ARRAY['none'::text, 'minimal'::text, 'low'::text, 'normal'::text, 'high'::text, 'critical'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_instances",
+        "conname": "flight_instances_streaming_status_check",
+        "definition": "CHECK (streaming_status = ANY (ARRAY['disabled'::text, 'pending'::text, 'active'::text, 'failed'::text, 'expired'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "conname": "flight_snapshots_flight_instance_id_fkey",
+        "definition": "FOREIGN KEY (flight_instance_id) REFERENCES flight_instances(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "flight_snapshots",
+        "conname": "flight_snapshots_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "conname": "friend_invites_accepted_by_user_id_fkey",
+        "definition": "FOREIGN KEY (accepted_by_user_id) REFERENCES auth.users(id) ON DELETE SET NULL"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "conname": "friend_invites_default_share_scope_check",
+        "definition": "CHECK (default_share_scope = ANY (ARRAY['future_flights'::text, 'all_flights'::text, 'selected_flights'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "conname": "friend_invites_inviter_user_id_fkey",
+        "definition": "FOREIGN KEY (inviter_user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "conname": "friend_invites_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "conname": "friend_invites_status_check",
+        "definition": "CHECK (status = ANY (ARRAY['pending'::text, 'accepted'::text, 'revoked'::text, 'expired'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_invites",
+        "conname": "friend_invites_token_hash_key",
+        "definition": "UNIQUE (token_hash)"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "conname": "friend_permissions_distinct_users",
+        "definition": "CHECK (owner_user_id <> viewer_user_id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "conname": "friend_permissions_owner_user_id_fkey",
+        "definition": "FOREIGN KEY (owner_user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "conname": "friend_permissions_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "conname": "friend_permissions_relationship_id_fkey",
+        "definition": "FOREIGN KEY (relationship_id) REFERENCES friend_relationships(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "conname": "friend_permissions_share_scope_check",
+        "definition": "CHECK (share_scope = ANY (ARRAY['future_flights'::text, 'all_flights'::text, 'selected_flights'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "conname": "friend_permissions_unique_direction",
+        "definition": "UNIQUE (owner_user_id, viewer_user_id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_permissions",
+        "conname": "friend_permissions_viewer_user_id_fkey",
+        "definition": "FOREIGN KEY (viewer_user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "conname": "friend_relationships_created_by_user_id_fkey",
+        "definition": "FOREIGN KEY (created_by_user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "conname": "friend_relationships_distinct_users",
+        "definition": "CHECK (user_a <> user_b)"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "conname": "friend_relationships_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "conname": "friend_relationships_relationship_status_check",
+        "definition": "CHECK (relationship_status = ANY (ARRAY['active'::text, 'blocked'::text, 'removed'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "conname": "friend_relationships_unique_pair",
+        "definition": "UNIQUE (user_a, user_b)"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "conname": "friend_relationships_user_a_fkey",
+        "definition": "FOREIGN KEY (user_a) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "friend_relationships",
+        "conname": "friend_relationships_user_b_fkey",
+        "definition": "FOREIGN KEY (user_b) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "conname": "live_activity_tokens_environment_check",
+        "definition": "CHECK (environment = ANY (ARRAY['sandbox'::text, 'production'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "conname": "live_activity_tokens_flight_instance_id_fkey",
+        "definition": "FOREIGN KEY (flight_instance_id) REFERENCES flight_instances(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "conname": "live_activity_tokens_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "conname": "live_activity_tokens_tracking_session_id_fkey",
+        "definition": "FOREIGN KEY (tracking_session_id) REFERENCES tracking_sessions(id) ON DELETE SET NULL"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "conname": "live_activity_tokens_user_id_activity_id_key",
+        "definition": "UNIQUE (user_id, activity_id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_activity_tokens",
+        "conname": "live_activity_tokens_user_id_fkey",
+        "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "conname": "live_snapshots_pkey",
+        "definition": "PRIMARY KEY (tracking_session_id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "live_snapshots",
+        "conname": "live_snapshots_tracking_session_id_fkey",
+        "definition": "FOREIGN KEY (tracking_session_id) REFERENCES tracking_sessions(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "conname": "notification_deliveries_flight_event_id_fkey",
+        "definition": "FOREIGN KEY (flight_event_id) REFERENCES flight_events(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "conname": "notification_deliveries_flight_instance_id_fkey",
+        "definition": "FOREIGN KEY (flight_instance_id) REFERENCES flight_instances(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "conname": "notification_deliveries_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "conname": "notification_deliveries_user_flight_id_fkey",
+        "definition": "FOREIGN KEY (user_flight_id) REFERENCES user_flights(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "conname": "notification_deliveries_user_id_fkey",
+        "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_deliveries",
+        "conname": "notification_deliveries_user_id_flight_event_id_channel_key",
+        "definition": "UNIQUE (user_id, flight_event_id, channel)"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "conname": "notification_delivery_tokens_device_token_id_fkey",
+        "definition": "FOREIGN KEY (device_token_id) REFERENCES device_tokens(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "conname": "notification_delivery_tokens_notification_delivery_id_devic_key",
+        "definition": "UNIQUE (notification_delivery_id, device_token_id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "conname": "notification_delivery_tokens_notification_delivery_id_fkey",
+        "definition": "FOREIGN KEY (notification_delivery_id) REFERENCES notification_deliveries(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "conname": "notification_delivery_tokens_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "notification_delivery_tokens",
+        "conname": "notification_delivery_tokens_status_check",
+        "definition": "CHECK (status = ANY (ARRAY['queued'::text, 'sending'::text, 'retry'::text, 'accepted'::text, 'permanent_failed'::text, 'uncertain'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "conname": "notifications_friend_relationship_id_fkey",
+        "definition": "FOREIGN KEY (friend_relationship_id) REFERENCES friend_relationships(id) ON DELETE SET NULL"
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "conname": "notifications_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "conname": "notifications_tracking_session_id_fkey",
+        "definition": "FOREIGN KEY (tracking_session_id) REFERENCES tracking_sessions(id) ON DELETE SET NULL"
+      },
+      {
+        "nspname": "public",
+        "relname": "notifications",
+        "conname": "notifications_user_id_fkey",
+        "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "profiles",
+        "conname": "profiles_pkey",
+        "definition": "PRIMARY KEY (user_id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "profiles",
+        "conname": "profiles_user_id_fkey",
+        "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "provider_request_leases",
+        "conname": "provider_request_leases_pkey",
+        "definition": "PRIMARY KEY (lock_key)"
+      },
+      {
+        "nspname": "public",
+        "relname": "provider_response_cache",
+        "conname": "provider_response_cache_pkey",
+        "definition": "PRIMARY KEY (cache_key)"
+      },
+      {
+        "nspname": "public",
+        "relname": "push_devices",
+        "conname": "push_devices_apns_token_key",
+        "definition": "UNIQUE (apns_token)"
+      },
+      {
+        "nspname": "public",
+        "relname": "push_devices",
+        "conname": "push_devices_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "push_devices",
+        "conname": "push_devices_user_id_fkey",
+        "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "ticket_souvenirs",
+        "conname": "ticket_souvenirs_active_payload_check",
+        "definition": "CHECK (deleted_at IS NULL AND flight_payload IS NOT NULL AND collected_at IS NOT NULL OR deleted_at IS NOT NULL)"
+      },
+      {
+        "nspname": "public",
+        "relname": "ticket_souvenirs",
+        "conname": "ticket_souvenirs_pkey",
+        "definition": "PRIMARY KEY (user_id, flight_id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "ticket_souvenirs",
+        "conname": "ticket_souvenirs_user_id_fkey",
+        "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "conname": "tracking_sessions_owner_user_id_fkey",
+        "definition": "FOREIGN KEY (owner_user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "conname": "tracking_sessions_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "tracking_sessions",
+        "conname": "tracking_sessions_session_status_check",
+        "definition": "CHECK (session_status = ANY (ARRAY['pending'::text, 'active'::text, 'paused'::text, 'completed'::text, 'cancelled'::text, 'errored'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "conname": "user_achievements_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "conname": "user_achievements_type_check",
+        "definition": "CHECK (achievement_type = ANY (ARRAY['new_country'::text, 'yearly_flights'::text, 'lifetime_distance'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "conname": "user_achievements_user_id_fkey",
+        "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_achievements",
+        "conname": "user_achievements_user_key_unique",
+        "definition": "UNIQUE (user_id, achievement_key)"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "conname": "user_flights_alert_settings_is_object",
+        "definition": "CHECK (jsonb_typeof(alert_settings_json) = 'object'::text)"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "conname": "user_flights_final_route_capture_status_check",
+        "definition": "CHECK (final_route_capture_status IS NULL OR (final_route_capture_status = ANY (ARRAY['pending'::text, 'in_progress'::text, 'failed'::text, 'captured'::text, 'no_track'::text])))"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "conname": "user_flights_flight_instance_id_fkey",
+        "definition": "FOREIGN KEY (flight_instance_id) REFERENCES flight_instances(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "conname": "user_flights_lifecycle_state_check",
+        "definition": "CHECK (lifecycle_state = ANY (ARRAY['upcoming'::text, 'active'::text, 'landed'::text, 'archived'::text, 'deleted'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "conname": "user_flights_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "conname": "user_flights_source_type_check",
+        "definition": "CHECK (source_type = ANY (ARRAY['trip'::text, 'manual_search'::text, 'calendar_import'::text, 'tracked'::text, 'recovered'::text, 'manual_verified'::text, 'manual_recovery'::text, 'history_snapshot'::text, 'history_repair'::text, 'auto_archive'::text, 'travelled_archive'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "conname": "user_flights_user_id_fkey",
+        "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_flights",
+        "conname": "user_flights_user_tracking_unique",
+        "definition": "UNIQUE (user_id, tracking_session_id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "conname": "user_settings_distance_unit_check",
+        "definition": "CHECK (distance_unit = ANY (ARRAY['km'::text, 'miles'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "conname": "user_settings_pkey",
+        "definition": "PRIMARY KEY (user_id)"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "conname": "user_settings_preferred_theme_check",
+        "definition": "CHECK (preferred_theme = ANY (ARRAY['light'::text, 'dark'::text, 'system'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "conname": "user_settings_temperature_unit_check",
+        "definition": "CHECK (temperature_unit = ANY (ARRAY['celsius'::text, 'fahrenheit'::text]))"
+      },
+      {
+        "nspname": "public",
+        "relname": "user_settings",
+        "conname": "user_settings_user_id_fkey",
+        "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      },
+      {
+        "nspname": "runwy_security",
+        "relname": "provider_daily_budgets",
+        "conname": "provider_daily_budgets_bucket_check",
+        "definition": "CHECK (bucket = ANY (ARRAY['general'::text, 'tracked'::text]))"
+      },
+      {
+        "nspname": "runwy_security",
+        "relname": "provider_daily_budgets",
+        "conname": "provider_daily_budgets_pkey",
+        "definition": "PRIMARY KEY (budget_day, bucket)"
+      },
+      {
+        "nspname": "runwy_security",
+        "relname": "provider_daily_budgets",
+        "conname": "provider_daily_budgets_reserved_units_check",
+        "definition": "CHECK (reserved_units >= 0)"
+      },
+      {
+        "nspname": "runwy_security",
+        "relname": "rate_limits",
+        "conname": "rate_limits_pkey",
+        "definition": "PRIMARY KEY (namespace, key_hash)"
+      }
+    ],
+    "indexes": [
+      {
+        "schemaname": "public",
+        "tablename": "api_usage_logs",
+        "indexname": "api_usage_logs_pkey",
+        "indexdef": "CREATE UNIQUE INDEX api_usage_logs_pkey ON public.api_usage_logs USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "api_usage_logs",
+        "indexname": "api_usage_logs_provider_created_idx",
+        "indexdef": "CREATE INDEX api_usage_logs_provider_created_idx ON public.api_usage_logs USING btree (provider, created_at DESC)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "device_tokens",
+        "indexname": "device_tokens_pkey",
+        "indexdef": "CREATE UNIQUE INDEX device_tokens_pkey ON public.device_tokens USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "device_tokens",
+        "indexname": "device_tokens_user_active_idx",
+        "indexdef": "CREATE INDEX device_tokens_user_active_idx ON public.device_tokens USING btree (user_id, is_active)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "device_tokens",
+        "indexname": "device_tokens_user_id_device_token_key",
+        "indexdef": "CREATE UNIQUE INDEX device_tokens_user_id_device_token_key ON public.device_tokens USING btree (user_id, device_token)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "entitlements",
+        "indexname": "entitlements_pkey",
+        "indexdef": "CREATE UNIQUE INDEX entitlements_pkey ON public.entitlements USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "entitlements",
+        "indexname": "entitlements_unique_user_entitlement",
+        "indexdef": "CREATE UNIQUE INDEX entitlements_unique_user_entitlement ON public.entitlements USING btree (user_id, entitlement_key)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "entitlements",
+        "indexname": "entitlements_user_active_idx",
+        "indexdef": "CREATE INDEX entitlements_user_active_idx ON public.entitlements USING btree (user_id, is_active, entitlement_key)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_definitions",
+        "indexname": "flight_definitions_airline_code_flight_number_key",
+        "indexdef": "CREATE UNIQUE INDEX flight_definitions_airline_code_flight_number_key ON public.flight_definitions USING btree (airline_code, flight_number)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_definitions",
+        "indexname": "flight_definitions_pkey",
+        "indexdef": "CREATE UNIQUE INDEX flight_definitions_pkey ON public.flight_definitions USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_event_logs",
+        "indexname": "flight_event_logs_dedupe_key_key",
+        "indexdef": "CREATE UNIQUE INDEX flight_event_logs_dedupe_key_key ON public.flight_event_logs USING btree (dedupe_key)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_event_logs",
+        "indexname": "flight_event_logs_fa_flight_id_idx",
+        "indexdef": "CREATE INDEX flight_event_logs_fa_flight_id_idx ON public.flight_event_logs USING btree (fa_flight_id, created_at DESC) WHERE (fa_flight_id IS NOT NULL)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_event_logs",
+        "indexname": "flight_event_logs_flight_instance_idx",
+        "indexdef": "CREATE INDEX flight_event_logs_flight_instance_idx ON public.flight_event_logs USING btree (flight_instance_id, created_at DESC)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_event_logs",
+        "indexname": "flight_event_logs_flight_key_idx",
+        "indexdef": "CREATE INDEX flight_event_logs_flight_key_idx ON public.flight_event_logs USING btree (flight_key, created_at DESC)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_event_logs",
+        "indexname": "flight_event_logs_pkey",
+        "indexdef": "CREATE UNIQUE INDEX flight_event_logs_pkey ON public.flight_event_logs USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_events",
+        "indexname": "flight_events_instance_created_idx",
+        "indexdef": "CREATE INDEX flight_events_instance_created_idx ON public.flight_events USING btree (flight_instance_id, created_at DESC)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_events",
+        "indexname": "flight_events_pending_fanout_idx",
+        "indexdef": "CREATE INDEX flight_events_pending_fanout_idx ON public.flight_events USING btree (created_at) WHERE ((notification_required = true) AND (fanout_completed_at IS NULL))"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_events",
+        "indexname": "flight_events_pkey",
+        "indexdef": "CREATE UNIQUE INDEX flight_events_pkey ON public.flight_events USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_instance_aliases",
+        "indexname": "flight_instance_aliases_alias_key_key",
+        "indexdef": "CREATE UNIQUE INDEX flight_instance_aliases_alias_key_key ON public.flight_instance_aliases USING btree (alias_key)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_instance_aliases",
+        "indexname": "flight_instance_aliases_pkey",
+        "indexdef": "CREATE UNIQUE INDEX flight_instance_aliases_pkey ON public.flight_instance_aliases USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_instances",
+        "indexname": "flight_instances_flight_key_key",
+        "indexdef": "CREATE UNIQUE INDEX flight_instances_flight_key_key ON public.flight_instances USING btree (flight_key)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_instances",
+        "indexname": "flight_instances_lookup_idx",
+        "indexdef": "CREATE INDEX flight_instances_lookup_idx ON public.flight_instances USING btree (airline_code, flight_number, departure_date, origin_airport, destination_airport)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_instances",
+        "indexname": "flight_instances_pkey",
+        "indexdef": "CREATE UNIQUE INDEX flight_instances_pkey ON public.flight_instances USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_instances",
+        "indexname": "flight_instances_provider_alert_idx",
+        "indexdef": "CREATE INDEX flight_instances_provider_alert_idx ON public.flight_instances USING btree (provider, provider_alert_status, provider_alert_expires_at)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_instances",
+        "indexname": "flight_instances_refresh_idx",
+        "indexdef": "CREATE INDEX flight_instances_refresh_idx ON public.flight_instances USING btree (fresh_until, is_final, needs_revalidation, provider_alert_status, refresh_priority)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_instances",
+        "indexname": "flight_instances_streaming_idx",
+        "indexdef": "CREATE INDEX flight_instances_streaming_idx ON public.flight_instances USING btree (provider, live_data_source, streaming_status, last_stream_event_at)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_instances",
+        "indexname": "idx_flight_instances_canonical_order",
+        "indexdef": "CREATE INDEX idx_flight_instances_canonical_order ON public.flight_instances USING btree (id, state_revision, last_stream_event_at)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_snapshots",
+        "indexname": "flight_snapshots_instance_created_idx",
+        "indexdef": "CREATE INDEX flight_snapshots_instance_created_idx ON public.flight_snapshots USING btree (flight_instance_id, created_at DESC)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_snapshots",
+        "indexname": "flight_snapshots_pkey",
+        "indexdef": "CREATE UNIQUE INDEX flight_snapshots_pkey ON public.flight_snapshots USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_invites",
+        "indexname": "friend_invites_inviter_idx",
+        "indexdef": "CREATE INDEX friend_invites_inviter_idx ON public.friend_invites USING btree (inviter_user_id, status, expires_at DESC)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_invites",
+        "indexname": "friend_invites_pkey",
+        "indexdef": "CREATE UNIQUE INDEX friend_invites_pkey ON public.friend_invites USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_invites",
+        "indexname": "friend_invites_token_hash_key",
+        "indexdef": "CREATE UNIQUE INDEX friend_invites_token_hash_key ON public.friend_invites USING btree (token_hash)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_permissions",
+        "indexname": "friend_permissions_pkey",
+        "indexdef": "CREATE UNIQUE INDEX friend_permissions_pkey ON public.friend_permissions USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_permissions",
+        "indexname": "friend_permissions_unique_direction",
+        "indexdef": "CREATE UNIQUE INDEX friend_permissions_unique_direction ON public.friend_permissions USING btree (owner_user_id, viewer_user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_permissions",
+        "indexname": "friend_permissions_viewer_idx",
+        "indexdef": "CREATE INDEX friend_permissions_viewer_idx ON public.friend_permissions USING btree (viewer_user_id, owner_user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_relationships",
+        "indexname": "friend_relationships_pkey",
+        "indexdef": "CREATE UNIQUE INDEX friend_relationships_pkey ON public.friend_relationships USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_relationships",
+        "indexname": "friend_relationships_unique_pair",
+        "indexdef": "CREATE UNIQUE INDEX friend_relationships_unique_pair ON public.friend_relationships USING btree (user_a, user_b)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_relationships",
+        "indexname": "friend_relationships_user_a_idx",
+        "indexdef": "CREATE INDEX friend_relationships_user_a_idx ON public.friend_relationships USING btree (user_a, relationship_status)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_relationships",
+        "indexname": "friend_relationships_user_b_idx",
+        "indexdef": "CREATE INDEX friend_relationships_user_b_idx ON public.friend_relationships USING btree (user_b, relationship_status)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "live_activity_tokens",
+        "indexname": "live_activity_tokens_flight_active_idx",
+        "indexdef": "CREATE INDEX live_activity_tokens_flight_active_idx ON public.live_activity_tokens USING btree (flight_instance_id, is_active)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "live_activity_tokens",
+        "indexname": "live_activity_tokens_pkey",
+        "indexdef": "CREATE UNIQUE INDEX live_activity_tokens_pkey ON public.live_activity_tokens USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "live_activity_tokens",
+        "indexname": "live_activity_tokens_user_id_activity_id_key",
+        "indexdef": "CREATE UNIQUE INDEX live_activity_tokens_user_id_activity_id_key ON public.live_activity_tokens USING btree (user_id, activity_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "live_snapshots",
+        "indexname": "idx_live_snapshots_canonical_order",
+        "indexdef": "CREATE INDEX idx_live_snapshots_canonical_order ON public.live_snapshots USING btree (tracking_session_id, canonical_revision, provider_last_updated_at)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "live_snapshots",
+        "indexname": "live_snapshots_pkey",
+        "indexdef": "CREATE UNIQUE INDEX live_snapshots_pkey ON public.live_snapshots USING btree (tracking_session_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notification_deliveries",
+        "indexname": "notification_deliveries_pkey",
+        "indexdef": "CREATE UNIQUE INDEX notification_deliveries_pkey ON public.notification_deliveries USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notification_deliveries",
+        "indexname": "notification_deliveries_user_created_idx",
+        "indexdef": "CREATE INDEX notification_deliveries_user_created_idx ON public.notification_deliveries USING btree (user_id, created_at DESC)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notification_deliveries",
+        "indexname": "notification_deliveries_user_dedupe_key_channel_uidx",
+        "indexdef": "CREATE UNIQUE INDEX notification_deliveries_user_dedupe_key_channel_uidx ON public.notification_deliveries USING btree (user_id, dedupe_key, channel) WHERE (dedupe_key IS NOT NULL)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notification_deliveries",
+        "indexname": "notification_deliveries_user_flight_idx",
+        "indexdef": "CREATE INDEX notification_deliveries_user_flight_idx ON public.notification_deliveries USING btree (user_flight_id) WHERE (user_flight_id IS NOT NULL)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notification_deliveries",
+        "indexname": "notification_deliveries_user_id_flight_event_id_channel_key",
+        "indexdef": "CREATE UNIQUE INDEX notification_deliveries_user_id_flight_event_id_channel_key ON public.notification_deliveries USING btree (user_id, flight_event_id, channel)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notification_delivery_tokens",
+        "indexname": "notification_delivery_tokens_due_idx",
+        "indexdef": "CREATE INDEX notification_delivery_tokens_due_idx ON public.notification_delivery_tokens USING btree (next_attempt_at, created_at) WHERE (status = ANY (ARRAY['queued'::text, 'retry'::text]))"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notification_delivery_tokens",
+        "indexname": "notification_delivery_tokens_notification_delivery_id_devic_key",
+        "indexdef": "CREATE UNIQUE INDEX notification_delivery_tokens_notification_delivery_id_devic_key ON public.notification_delivery_tokens USING btree (notification_delivery_id, device_token_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notification_delivery_tokens",
+        "indexname": "notification_delivery_tokens_pkey",
+        "indexdef": "CREATE UNIQUE INDEX notification_delivery_tokens_pkey ON public.notification_delivery_tokens USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notification_delivery_tokens",
+        "indexname": "notification_delivery_tokens_stale_sending_idx",
+        "indexdef": "CREATE INDEX notification_delivery_tokens_stale_sending_idx ON public.notification_delivery_tokens USING btree (locked_until) WHERE (status = 'sending'::text)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notifications",
+        "indexname": "notifications_pkey",
+        "indexdef": "CREATE UNIQUE INDEX notifications_pkey ON public.notifications USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notifications",
+        "indexname": "notifications_tracking_idx",
+        "indexdef": "CREATE INDEX notifications_tracking_idx ON public.notifications USING btree (tracking_session_id, created_at DESC)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notifications",
+        "indexname": "notifications_user_created_idx",
+        "indexdef": "CREATE INDEX notifications_user_created_idx ON public.notifications USING btree (user_id, created_at DESC)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notifications",
+        "indexname": "notifications_user_dedupe_key_uidx",
+        "indexdef": "CREATE UNIQUE INDEX notifications_user_dedupe_key_uidx ON public.notifications USING btree (user_id, dedupe_key) WHERE (dedupe_key IS NOT NULL)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "profiles",
+        "indexname": "profiles_email_idx",
+        "indexdef": "CREATE INDEX profiles_email_idx ON public.profiles USING btree (email)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "profiles",
+        "indexname": "profiles_pkey",
+        "indexdef": "CREATE UNIQUE INDEX profiles_pkey ON public.profiles USING btree (user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "provider_request_leases",
+        "indexname": "provider_request_leases_expires_at_idx",
+        "indexdef": "CREATE INDEX provider_request_leases_expires_at_idx ON public.provider_request_leases USING btree (expires_at)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "provider_request_leases",
+        "indexname": "provider_request_leases_pkey",
+        "indexdef": "CREATE UNIQUE INDEX provider_request_leases_pkey ON public.provider_request_leases USING btree (lock_key)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "provider_response_cache",
+        "indexname": "provider_response_cache_expiry_idx",
+        "indexdef": "CREATE INDEX provider_response_cache_expiry_idx ON public.provider_response_cache USING btree (expires_at)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "provider_response_cache",
+        "indexname": "provider_response_cache_pkey",
+        "indexdef": "CREATE UNIQUE INDEX provider_response_cache_pkey ON public.provider_response_cache USING btree (cache_key)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "push_devices",
+        "indexname": "push_devices_apns_token_key",
+        "indexdef": "CREATE UNIQUE INDEX push_devices_apns_token_key ON public.push_devices USING btree (apns_token)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "push_devices",
+        "indexname": "push_devices_pkey",
+        "indexdef": "CREATE UNIQUE INDEX push_devices_pkey ON public.push_devices USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "push_devices",
+        "indexname": "push_devices_user_enabled_idx",
+        "indexdef": "CREATE INDEX push_devices_user_enabled_idx ON public.push_devices USING btree (user_id, push_enabled)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "ticket_souvenirs",
+        "indexname": "ticket_souvenirs_pkey",
+        "indexdef": "CREATE UNIQUE INDEX ticket_souvenirs_pkey ON public.ticket_souvenirs USING btree (user_id, flight_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "ticket_souvenirs",
+        "indexname": "ticket_souvenirs_user_collected_idx",
+        "indexdef": "CREATE INDEX ticket_souvenirs_user_collected_idx ON public.ticket_souvenirs USING btree (user_id, collected_at DESC) WHERE (deleted_at IS NULL)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "tracking_sessions",
+        "indexname": "tracking_sessions_due_idx",
+        "indexdef": "CREATE INDEX tracking_sessions_due_idx ON public.tracking_sessions USING btree (session_status, next_poll_after)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "tracking_sessions",
+        "indexname": "tracking_sessions_owner_status_idx",
+        "indexdef": "CREATE INDEX tracking_sessions_owner_status_idx ON public.tracking_sessions USING btree (owner_user_id, session_status, updated_at DESC)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "tracking_sessions",
+        "indexname": "tracking_sessions_pkey",
+        "indexdef": "CREATE UNIQUE INDEX tracking_sessions_pkey ON public.tracking_sessions USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "tracking_sessions",
+        "indexname": "tracking_sessions_provider_idx",
+        "indexdef": "CREATE INDEX tracking_sessions_provider_idx ON public.tracking_sessions USING btree (provider, provider_flight_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_achievements",
+        "indexname": "user_achievements_pending_idx",
+        "indexdef": "CREATE INDEX user_achievements_pending_idx ON public.user_achievements USING btree (user_id, awarded_at) WHERE (celebrated_at IS NULL)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_achievements",
+        "indexname": "user_achievements_pkey",
+        "indexdef": "CREATE UNIQUE INDEX user_achievements_pkey ON public.user_achievements USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_achievements",
+        "indexname": "user_achievements_user_key_unique",
+        "indexdef": "CREATE UNIQUE INDEX user_achievements_user_key_unique ON public.user_achievements USING btree (user_id, achievement_key)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "indexname": "user_flights_final_route_capture_due_idx",
+        "indexdef": "CREATE INDEX user_flights_final_route_capture_due_idx ON public.user_flights USING btree (lifecycle_state, final_route_capture_status, final_route_capture_next_attempt_at, estimated_arrival) WHERE ((deleted_at IS NULL) AND (tracking_session_id IS NULL) AND (provider_flight_id IS NOT NULL))"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "indexname": "user_flights_history_occurrence_unique",
+        "indexdef": "CREATE UNIQUE INDEX user_flights_history_occurrence_unique ON public.user_flights USING btree (user_id, regexp_replace(upper(display_flight_number), '[^A-Z0-9]'::text, ''::text, 'g'::text), upper(TRIM(BOTH FROM origin_iata)), upper(TRIM(BOTH FROM destination_iata)), date_trunc('minute'::text, (scheduled_departure AT TIME ZONE 'UTC'::text))) WHERE ((lifecycle_state = 'archived'::text) AND (source_type <> ALL (ARRAY['trip'::text, 'tracked'::text])) AND (tracking_session_id IS NULL) AND (deleted_at IS NULL) AND (display_flight_number IS NOT NULL) AND (origin_iata IS NOT NULL) AND (destination_iata IS NOT NULL) AND (scheduled_departure IS NOT NULL))"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "indexname": "user_flights_pkey",
+        "indexdef": "CREATE UNIQUE INDEX user_flights_pkey ON public.user_flights USING btree (id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "indexname": "user_flights_provider_idx",
+        "indexdef": "CREATE INDEX user_flights_provider_idx ON public.user_flights USING btree (provider_name, provider_flight_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "indexname": "user_flights_user_deleted_idx",
+        "indexdef": "CREATE INDEX user_flights_user_deleted_idx ON public.user_flights USING btree (user_id, deleted_at)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "indexname": "user_flights_user_flight_instance_unique",
+        "indexdef": "CREATE UNIQUE INDEX user_flights_user_flight_instance_unique ON public.user_flights USING btree (user_id, flight_instance_id) WHERE (flight_instance_id IS NOT NULL)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "indexname": "user_flights_user_state_idx",
+        "indexdef": "CREATE INDEX user_flights_user_state_idx ON public.user_flights USING btree (user_id, lifecycle_state, scheduled_departure DESC)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "indexname": "user_flights_user_tracking_unique",
+        "indexdef": "CREATE UNIQUE INDEX user_flights_user_tracking_unique ON public.user_flights USING btree (user_id, tracking_session_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_settings",
+        "indexname": "user_settings_pkey",
+        "indexdef": "CREATE UNIQUE INDEX user_settings_pkey ON public.user_settings USING btree (user_id)"
+      },
+      {
+        "schemaname": "runwy_security",
+        "tablename": "provider_daily_budgets",
+        "indexname": "provider_daily_budgets_pkey",
+        "indexdef": "CREATE UNIQUE INDEX provider_daily_budgets_pkey ON runwy_security.provider_daily_budgets USING btree (budget_day, bucket)"
+      },
+      {
+        "schemaname": "runwy_security",
+        "tablename": "rate_limits",
+        "indexname": "rate_limits_expiry_idx",
+        "indexdef": "CREATE INDEX rate_limits_expiry_idx ON runwy_security.rate_limits USING btree (expires_at)"
+      },
+      {
+        "schemaname": "runwy_security",
+        "tablename": "rate_limits",
+        "indexname": "rate_limits_pkey",
+        "indexdef": "CREATE UNIQUE INDEX rate_limits_pkey ON runwy_security.rate_limits USING btree (namespace, key_hash)"
+      }
+    ],
+    "policies": [
+      {
+        "schemaname": "public",
+        "tablename": "device_tokens",
+        "policyname": "device_tokens_own_delete",
+        "permissive": "PERMISSIVE",
+        "roles": "{public}",
+        "cmd": "DELETE",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "device_tokens",
+        "policyname": "device_tokens_own_insert",
+        "permissive": "PERMISSIVE",
+        "roles": "{public}",
+        "cmd": "INSERT",
+        "qual": null,
+        "with_check": "(auth.uid() = user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "device_tokens",
+        "policyname": "device_tokens_own_select",
+        "permissive": "PERMISSIVE",
+        "roles": "{public}",
+        "cmd": "SELECT",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "device_tokens",
+        "policyname": "device_tokens_own_update",
+        "permissive": "PERMISSIVE",
+        "roles": "{public}",
+        "cmd": "UPDATE",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": "(auth.uid() = user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "entitlements",
+        "policyname": "entitlements_select_self",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "flight_event_logs",
+        "policyname": "flight_event_logs_no_client_select",
+        "permissive": "PERMISSIVE",
+        "roles": "{public}",
+        "cmd": "SELECT",
+        "qual": "false",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_invites",
+        "policyname": "friend_invites_select_own",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "((auth.uid() = inviter_user_id) OR (auth.uid() = accepted_by_user_id))",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_permissions",
+        "policyname": "friend_permissions_select_members",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "((auth.uid() = owner_user_id) OR (auth.uid() = viewer_user_id))",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_permissions",
+        "policyname": "friend_permissions_update_owner",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "UPDATE",
+        "qual": "(auth.uid() = owner_user_id)",
+        "with_check": "(auth.uid() = owner_user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "friend_relationships",
+        "policyname": "friend_relationships_select_members",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "((auth.uid() = user_a) OR (auth.uid() = user_b))",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "live_activity_tokens",
+        "policyname": "live_activity_tokens_own_select",
+        "permissive": "PERMISSIVE",
+        "roles": "{public}",
+        "cmd": "SELECT",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "live_snapshots",
+        "policyname": "live_snapshots_select_visible",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "(EXISTS ( SELECT 1\n   FROM tracking_sessions ts\n  WHERE ((ts.id = live_snapshots.tracking_session_id) AND ((ts.owner_user_id = auth.uid()) OR (EXISTS ( SELECT 1\n           FROM (friend_permissions fp\n             JOIN friend_relationships fr ON ((fr.id = fp.relationship_id)))\n          WHERE ((fp.owner_user_id = ts.owner_user_id) AND (fp.viewer_user_id = auth.uid()) AND (fr.relationship_status = 'active'::text) AND (fp.can_view_live = true))))))))",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notification_deliveries",
+        "policyname": "notification_deliveries_own_select",
+        "permissive": "PERMISSIVE",
+        "roles": "{public}",
+        "cmd": "SELECT",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notifications",
+        "policyname": "notifications_select_self",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "notifications",
+        "policyname": "notifications_update_self",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "UPDATE",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": "(auth.uid() = user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "profiles",
+        "policyname": "profiles_insert_self",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "INSERT",
+        "qual": null,
+        "with_check": "(auth.uid() = user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "profiles",
+        "policyname": "profiles_select_self",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "profiles",
+        "policyname": "profiles_update_self",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "UPDATE",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": "(auth.uid() = user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "push_devices",
+        "policyname": "push_devices_delete_self",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "DELETE",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "push_devices",
+        "policyname": "push_devices_insert_self",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "INSERT",
+        "qual": null,
+        "with_check": "(auth.uid() = user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "push_devices",
+        "policyname": "push_devices_select_self",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "push_devices",
+        "policyname": "push_devices_update_self",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "UPDATE",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": "(auth.uid() = user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "ticket_souvenirs",
+        "policyname": "ticket_souvenirs_insert_owner",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "INSERT",
+        "qual": null,
+        "with_check": "(user_id = auth.uid())"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "ticket_souvenirs",
+        "policyname": "ticket_souvenirs_select_owner",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "(user_id = auth.uid())",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "ticket_souvenirs",
+        "policyname": "ticket_souvenirs_update_owner",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "UPDATE",
+        "qual": "(user_id = auth.uid())",
+        "with_check": "(user_id = auth.uid())"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "tracking_sessions",
+        "policyname": "tracking_sessions_insert_owner",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "INSERT",
+        "qual": null,
+        "with_check": "(auth.uid() = owner_user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "tracking_sessions",
+        "policyname": "tracking_sessions_select_visible",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "((auth.uid() = owner_user_id) OR (EXISTS ( SELECT 1\n   FROM (friend_permissions fp\n     JOIN friend_relationships fr ON ((fr.id = fp.relationship_id)))\n  WHERE ((fp.owner_user_id = tracking_sessions.owner_user_id) AND (fp.viewer_user_id = auth.uid()) AND (fr.relationship_status = 'active'::text) AND (fp.can_view_live = true)))))",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "tracking_sessions",
+        "policyname": "tracking_sessions_update_owner",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "UPDATE",
+        "qual": "(auth.uid() = owner_user_id)",
+        "with_check": "(auth.uid() = owner_user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_achievements",
+        "policyname": "user_achievements_select_owner",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "(user_id = auth.uid())",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_achievements",
+        "policyname": "user_achievements_update_owner",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "UPDATE",
+        "qual": "(user_id = auth.uid())",
+        "with_check": "(user_id = auth.uid())"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "policyname": "user_flights_delete_owner",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "DELETE",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "policyname": "user_flights_insert_owner",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "INSERT",
+        "qual": null,
+        "with_check": "(auth.uid() = user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "policyname": "user_flights_own_delete",
+        "permissive": "PERMISSIVE",
+        "roles": "{public}",
+        "cmd": "DELETE",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "policyname": "user_flights_own_insert",
+        "permissive": "PERMISSIVE",
+        "roles": "{public}",
+        "cmd": "INSERT",
+        "qual": null,
+        "with_check": "(auth.uid() = user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "policyname": "user_flights_own_select",
+        "permissive": "PERMISSIVE",
+        "roles": "{public}",
+        "cmd": "SELECT",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "policyname": "user_flights_own_update",
+        "permissive": "PERMISSIVE",
+        "roles": "{public}",
+        "cmd": "UPDATE",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": "(auth.uid() = user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "policyname": "user_flights_select_owner",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_flights",
+        "policyname": "user_flights_update_owner",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "UPDATE",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": "(auth.uid() = user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_settings",
+        "policyname": "user_settings_insert_self",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "INSERT",
+        "qual": null,
+        "with_check": "(auth.uid() = user_id)"
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_settings",
+        "policyname": "user_settings_select_self",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": null
+      },
+      {
+        "schemaname": "public",
+        "tablename": "user_settings",
+        "policyname": "user_settings_update_self",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "UPDATE",
+        "qual": "(auth.uid() = user_id)",
+        "with_check": "(auth.uid() = user_id)"
+      },
+      {
+        "schemaname": "storage",
+        "tablename": "objects",
+        "policyname": "flight_liveries_public_read",
+        "permissive": "PERMISSIVE",
+        "roles": "{public}",
+        "cmd": "SELECT",
+        "qual": "(bucket_id = 'flight-liveries'::text)",
+        "with_check": null
+      },
+      {
+        "schemaname": "storage",
+        "tablename": "objects",
+        "policyname": "profile_avatars_circle_read",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "((bucket_id = 'profile-avatars'::text) AND (((storage.foldername(name))[1] = (auth.uid())::text) OR (EXISTS ( SELECT 1\n   FROM friend_relationships relationship\n  WHERE ((relationship.relationship_status = 'active'::text) AND (((relationship.user_a = auth.uid()) AND ((relationship.user_b)::text = (storage.foldername(objects.name))[1])) OR ((relationship.user_b = auth.uid()) AND ((relationship.user_a)::text = (storage.foldername(objects.name))[1]))))))))",
+        "with_check": null
+      },
+      {
+        "schemaname": "storage",
+        "tablename": "objects",
+        "policyname": "profile_avatars_owner_delete",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "DELETE",
+        "qual": "((bucket_id = 'profile-avatars'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text))",
+        "with_check": null
+      },
+      {
+        "schemaname": "storage",
+        "tablename": "objects",
+        "policyname": "profile_avatars_owner_insert",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "INSERT",
+        "qual": null,
+        "with_check": "((bucket_id = 'profile-avatars'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text))"
+      },
+      {
+        "schemaname": "storage",
+        "tablename": "objects",
+        "policyname": "profile_avatars_owner_update",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "UPDATE",
+        "qual": "((bucket_id = 'profile-avatars'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text))",
+        "with_check": "((bucket_id = 'profile-avatars'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text))"
+      },
+      {
+        "schemaname": "storage",
+        "tablename": "objects",
+        "policyname": "ticket_stickers_owner_delete",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "DELETE",
+        "qual": "((bucket_id = 'ticket-stickers'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text))",
+        "with_check": null
+      },
+      {
+        "schemaname": "storage",
+        "tablename": "objects",
+        "policyname": "ticket_stickers_owner_insert",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "INSERT",
+        "qual": null,
+        "with_check": "((bucket_id = 'ticket-stickers'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text))"
+      },
+      {
+        "schemaname": "storage",
+        "tablename": "objects",
+        "policyname": "ticket_stickers_owner_select",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "SELECT",
+        "qual": "((bucket_id = 'ticket-stickers'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text))",
+        "with_check": null
+      },
+      {
+        "schemaname": "storage",
+        "tablename": "objects",
+        "policyname": "ticket_stickers_owner_update",
+        "permissive": "PERMISSIVE",
+        "roles": "{authenticated}",
+        "cmd": "UPDATE",
+        "qual": "((bucket_id = 'ticket-stickers'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text))",
+        "with_check": "((bucket_id = 'ticket-stickers'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text))"
+      }
+    ],
+    "functions": [
+      {
+        "nspname": "public",
+        "signature": "can_access_tracking_session(uuid,uuid)",
+        "definition": "CREATE OR REPLACE FUNCTION public.can_access_tracking_session(p_tracking_session_id uuid, p_user_id uuid)\n RETURNS boolean\n LANGUAGE sql\n STABLE SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\n  select exists (\n    select 1\n    from public.tracking_sessions ts\n    where ts.id = p_tracking_session_id\n      and (\n        ts.owner_user_id = p_user_id\n        or exists (\n          select 1\n          from public.flight_watchers fw\n          where fw.tracking_session_id = ts.id\n            and fw.watcher_user_id = p_user_id\n            and fw.watch_state = 'approved'\n        )\n      )\n  );\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "cleanup_deleted_user_flight_notification_artifacts()",
+        "definition": "CREATE OR REPLACE FUNCTION public.cleanup_deleted_user_flight_notification_artifacts()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\ndeclare\n  deleted_flight public.user_flights%rowtype;\nbegin\n  if tg_op = 'DELETE' then\n    deleted_flight := old;\n  else\n    deleted_flight := new;\n    if deleted_flight.deleted_at is null\n       and coalesce(deleted_flight.lifecycle_state, '') <> 'deleted' then\n      return new;\n    end if;\n  end if;\n\n  delete from public.notifications n\n   where n.payload_json ->> 'user_flight_id' = deleted_flight.id::text\n      or (\n        n.user_id = deleted_flight.user_id\n        and (\n          (deleted_flight.tracking_session_id is not null\n            and (n.tracking_session_id = deleted_flight.tracking_session_id\n              or n.payload_json ->> 'tracking_session_id' = deleted_flight.tracking_session_id::text))\n          or (deleted_flight.flight_instance_id is not null\n            and n.payload_json ->> 'flight_instance_id' = deleted_flight.flight_instance_id::text)\n        )\n      );\n\n  delete from public.notification_deliveries d\n   where d.user_flight_id = deleted_flight.id\n      or (\n        d.user_id = deleted_flight.user_id\n        and deleted_flight.flight_instance_id is not null\n        and d.flight_instance_id = deleted_flight.flight_instance_id\n      );\n\n  if tg_op = 'DELETE' then\n    return old;\n  end if;\n  return new;\nend;\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "cleanup_deleted_user_flight_notifications()",
+        "definition": "CREATE OR REPLACE FUNCTION public.cleanup_deleted_user_flight_notifications()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\ndeclare\n  has_active_sibling boolean := false;\nbegin\n  if new.deleted_at is null and coalesce(new.lifecycle_state, '') <> 'deleted' then\n    return new;\n  end if;\n\n  if tg_op = 'UPDATE'\n     and old.deleted_at is not null\n     and coalesce(old.lifecycle_state, '') = 'deleted' then\n    return new;\n  end if;\n\n  if new.display_flight_number is not null\n     and new.origin_iata is not null\n     and new.destination_iata is not null\n     and new.scheduled_departure is not null then\n    select exists (\n      select 1\n      from public.user_flights sibling\n      where sibling.user_id = new.user_id\n        and sibling.id <> new.id\n        and sibling.deleted_at is null\n        and coalesce(sibling.lifecycle_state, '') <> 'deleted'\n        and regexp_replace(upper(coalesce(sibling.display_flight_number, '')), '[^A-Z0-9]', '', 'g')\n          = regexp_replace(upper(new.display_flight_number), '[^A-Z0-9]', '', 'g')\n        and upper(coalesce(sibling.origin_iata, '')) = upper(new.origin_iata)\n        and upper(coalesce(sibling.destination_iata, '')) = upper(new.destination_iata)\n        and abs(extract(epoch from (sibling.scheduled_departure - new.scheduled_departure))) <= 1800\n    ) into has_active_sibling;\n  end if;\n\n  delete from public.notification_deliveries\n  where user_flight_id = new.id\n     or (\n       not has_active_sibling\n       and user_id = new.user_id\n       and new.flight_instance_id is not null\n       and flight_instance_id = new.flight_instance_id\n     );\n\n  delete from public.notifications\n  where payload_json ->> 'user_flight_id' = new.id::text\n     or payload_json ->> 'userFlightId' = new.id::text\n     or (\n       not has_active_sibling\n       and user_id = new.user_id\n       and (\n         (new.tracking_session_id is not null and tracking_session_id = new.tracking_session_id)\n         or (new.tracking_session_id is not null and payload_json ->> 'tracking_session_id' = new.tracking_session_id::text)\n         or (new.flight_instance_id is not null and payload_json ->> 'flight_instance_id' = new.flight_instance_id::text)\n       )\n     );\n\n  if new.tracking_session_id is not null\n     and not exists (\n       select 1 from public.user_flights uf\n       where uf.tracking_session_id = new.tracking_session_id\n         and uf.deleted_at is null\n         and coalesce(uf.lifecycle_state, '') <> 'deleted'\n     ) then\n    update public.tracking_sessions\n    set session_status = 'paused',\n        next_poll_after = null,\n        polling_stopped_reason = 'user_flight_deleted',\n        updated_at = now()\n    where id = new.tracking_session_id;\n  end if;\n\n  return new;\nend;\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "delete_current_user_account()",
+        "definition": "CREATE OR REPLACE FUNCTION public.delete_current_user_account()\n RETURNS boolean\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\ndeclare\n  requesting_user_id uuid := auth.uid();\n  deleted_user boolean := false;\nbegin\n  if requesting_user_id is null then\n    raise exception 'Authentication is required to delete an account'\n      using errcode = '42501';\n  end if;\n\n  -- This column intentionally has no foreign key because usage logs may outlive\n  -- shared flight records. A deletion request must still remove its user link.\n  delete from public.api_usage_logs\n  where user_id = requesting_user_id;\n\n  -- Accepted invitations use ON DELETE SET NULL. Remove them instead so no\n  -- invitation record remains associated with the departing account.\n  delete from public.friend_invites\n  where accepted_by_user_id = requesting_user_id;\n\n  delete from auth.users\n  where id = requesting_user_id;\n\n  deleted_user := found;\n  if not deleted_user then\n    raise exception 'Authenticated account no longer exists'\n      using errcode = 'P0002';\n  end if;\n\n  return true;\nend;\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "handle_new_auth_user()",
+        "definition": "CREATE OR REPLACE FUNCTION public.handle_new_auth_user()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nbegin\n  insert into public.profiles (user_id, email, display_name, avatar_url)\n  values (\n    new.id,\n    new.email,\n    coalesce(\n      nullif(trim(new.raw_user_meta_data ->> 'full_name'), ''),\n      nullif(trim(new.raw_user_meta_data ->> 'name'), ''),\n      nullif(split_part(coalesce(new.email, ''), '@', 1), ''),\n      'Traveler'\n    ),\n    coalesce(\n      nullif(trim(new.raw_user_meta_data ->> 'avatar_url'), ''),\n      nullif(trim(new.raw_user_meta_data ->> 'picture'), '')\n    )\n  )\n  on conflict (user_id) do nothing;\n\n  insert into public.user_settings (user_id)\n  values (new.id)\n  on conflict (user_id) do nothing;\n\n  return new;\nend;\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "increment_live_snapshot_version()",
+        "definition": "CREATE OR REPLACE FUNCTION public.increment_live_snapshot_version()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\nbegin\n  new.version = coalesce(old.version, 0) + 1;\n  new.updated_at = now();\n  return new;\nend;\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "is_tracking_session_owner(uuid,uuid)",
+        "definition": "CREATE OR REPLACE FUNCTION public.is_tracking_session_owner(p_tracking_session_id uuid, p_user_id uuid)\n RETURNS boolean\n LANGUAGE sql\n STABLE SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\n  select exists (\n    select 1\n    from public.tracking_sessions ts\n    where ts.id = p_tracking_session_id\n      and ts.owner_user_id = p_user_id\n  );\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "prevent_stale_ticket_souvenir_write()",
+        "definition": "CREATE OR REPLACE FUNCTION public.prevent_stale_ticket_souvenir_write()\n RETURNS trigger\n LANGUAGE plpgsql\n SET search_path TO ''\nAS $function$\nbegin\n  if new.updated_at < old.updated_at then\n    return old;\n  end if;\n  return new;\nend;\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "reconcile_user_flight_history_occurrence()",
+        "definition": "CREATE OR REPLACE FUNCTION public.reconcile_user_flight_history_occurrence()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nbegin\n  if new.lifecycle_state = 'archived'\n     and new.source_type not in ('trip', 'tracked')\n     and new.tracking_session_id is null\n     and new.deleted_at is null\n     and new.display_flight_number is not null\n     and new.origin_iata is not null\n     and new.destination_iata is not null\n     and new.scheduled_departure is not null then\n    update public.user_flights as existing\n    set lifecycle_state = 'deleted',\n        deleted_at = now(),\n        updated_at = now()\n    where existing.id <> new.id\n      and existing.user_id = new.user_id\n      and existing.lifecycle_state = 'archived'\n      and existing.source_type not in ('trip', 'tracked')\n      and existing.tracking_session_id is null\n      and existing.deleted_at is null\n      and regexp_replace(upper(existing.display_flight_number), '[^A-Z0-9]', '', 'g')\n        = regexp_replace(upper(new.display_flight_number), '[^A-Z0-9]', '', 'g')\n      and upper(trim(existing.origin_iata)) = upper(trim(new.origin_iata))\n      and upper(trim(existing.destination_iata)) = upper(trim(new.destination_iata))\n      and date_trunc('minute', existing.scheduled_departure at time zone 'UTC')\n        = date_trunc('minute', new.scheduled_departure at time zone 'UTC');\n  end if;\n\n  return new;\nend;\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "runwy_cleanup_rate_limits()",
+        "definition": "CREATE OR REPLACE FUNCTION public.runwy_cleanup_rate_limits()\n RETURNS void\n LANGUAGE sql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\n  delete from runwy_security.rate_limits where (namespace, key_hash) in (\n    select namespace, key_hash from runwy_security.rate_limits\n    where expires_at < now() - interval '5 minutes' order by expires_at limit 10000\n  );\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "runwy_consume_rate_limit(text,text,integer,integer)",
+        "definition": "CREATE OR REPLACE FUNCTION public.runwy_consume_rate_limit(p_namespace text, p_key_hash text, p_window_ms integer, p_limit integer)\n RETURNS TABLE(total_hits integer, reset_at timestamp with time zone)\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\ndeclare\n  current_time_value timestamptz := clock_timestamp();\nbegin\n  if length(p_namespace) > 80 or p_namespace is null or p_key_hash !~ '^[a-f0-9]{64}$'\n     or p_key_hash is null or p_window_ms is null or p_window_ms not between 1000 and 3600000\n     or p_limit is null or p_limit not between 1 and 1000000 then\n    raise exception 'Invalid rate-limit parameters';\n  end if;\n  return query\n    insert into runwy_security.rate_limits as counters(namespace, key_hash, hits, expires_at)\n    values (p_namespace, p_key_hash, 1, current_time_value + p_window_ms * interval '1 millisecond')\n    on conflict (namespace, key_hash) do update\n    set hits = case when counters.expires_at <= current_time_value then 1\n                    else least(counters.hits + 1, p_limit + 1) end,\n        expires_at = case when counters.expires_at <= current_time_value\n                     then current_time_value + p_window_ms * interval '1 millisecond'\n                     else counters.expires_at end\n    returning counters.hits, counters.expires_at;\nend;\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "runwy_reserve_flightaware_budget(text,integer,integer)",
+        "definition": "CREATE OR REPLACE FUNCTION public.runwy_reserve_flightaware_budget(p_bucket text, p_limit integer, p_units integer)\n RETURNS TABLE(allowed boolean, used_units integer)\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\ndeclare\n  day_value date := (now() at time zone 'UTC')::date;\n  current_units integer;\nbegin\n  if p_bucket not in ('general', 'tracked') or p_bucket is null\n     or p_limit is null or p_limit < 1 or p_units is null or p_units < 1 then\n    raise exception 'Invalid provider budget parameters';\n  end if;\n  -- Seed the first reservation from existing usage so deployment does not reset today's budget.\n  if not exists (select 1 from runwy_security.provider_daily_budgets where budget_day = day_value and bucket = p_bucket) then\n  insert into runwy_security.provider_daily_budgets(budget_day, bucket, reserved_units)\n  select day_value, p_bucket, coalesce(sum(coalesce(cost_estimate, 1)), 0)::integer\n  from public.api_usage_logs\n  where provider = 'flightaware' and endpoint like 'aeroapi:flight:%'\n    and ((p_bucket = 'tracked' and endpoint = 'aeroapi:flight:tracked_flight')\n      or (p_bucket = 'general' and endpoint <> 'aeroapi:flight:tracked_flight'))\n    and created_at >= day_value::timestamp at time zone 'UTC'\n  on conflict (budget_day, bucket) do nothing;\n  end if;\n\n  select reserved_units into current_units from runwy_security.provider_daily_budgets\n  where budget_day = day_value and bucket = p_bucket for update;\n  if p_units > p_limit - current_units then\n    return query select false, current_units;\n    return;\n  end if;\n  update runwy_security.provider_daily_budgets set reserved_units = reserved_units + p_units\n  where budget_day = day_value and bucket = p_bucket;\n  return query select true, current_units + p_units;\nend;\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "runwy_touch_updated_at()",
+        "definition": "CREATE OR REPLACE FUNCTION public.runwy_touch_updated_at()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\nbegin\n  new.updated_at = now();\n  return new;\nend;\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "set_updated_at_timestamp()",
+        "definition": "CREATE OR REPLACE FUNCTION public.set_updated_at_timestamp()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\nbegin\n  new.updated_at = now();\n  return new;\nend;\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "sync_user_backup_after_past_flight_import(uuid)",
+        "definition": "CREATE OR REPLACE FUNCTION public.sync_user_backup_after_past_flight_import(p_user_id uuid)\n RETURNS void\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\ndeclare\n  v_flights_json jsonb;\n  v_total_count int;\n  v_stats_json jsonb;\nbegin\n  select coalesce(\n    jsonb_agg(\n      jsonb_build_object(\n        'id', pf.id,\n        'fa_flight_id', pf.fa_flight_id,\n        'ident', pf.ident,\n        'display_flight_number', pf.display_flight_number,\n        'operator_name', pf.operator_name,\n        'origin_iata', pf.origin_iata,\n        'origin_icao', pf.origin_icao,\n        'destination_iata', pf.destination_iata,\n        'destination_icao', pf.destination_icao,\n        'scheduled_out', pf.scheduled_out,\n        'actual_out', pf.actual_out,\n        'scheduled_in', pf.scheduled_in,\n        'actual_in', pf.actual_in,\n        'status', pf.status,\n        'aircraft_type', pf.aircraft_type,\n        'import_source', pf.import_source,\n        'imported_at', pf.imported_at\n      )\n      order by coalesce(pf.actual_out, pf.scheduled_out, pf.imported_at) desc\n    ),\n    '[]'::jsonb\n  )\n  into v_flights_json\n  from public.past_flights pf\n  where pf.user_id = p_user_id;\n\n  select count(*)\n  into v_total_count\n  from public.past_flights pf\n  where pf.user_id = p_user_id;\n\n  with yearly as (\n    select\n      extract(year from coalesce(actual_out, scheduled_out, imported_at))::int as yr,\n      count(*)::int as cnt\n    from public.past_flights\n    where user_id = p_user_id\n    group by 1\n  ),\n  top_airlines as (\n    select\n      coalesce(nullif(operator_name, ''), 'Unknown') as airline,\n      count(*)::int as cnt\n    from public.past_flights\n    where user_id = p_user_id\n    group by 1\n    order by 2 desc, 1 asc\n    limit 10\n  ),\n  top_airports as (\n    select\n      airport,\n      count(*)::int as cnt\n    from (\n      select origin_iata as airport\n      from public.past_flights\n      where user_id = p_user_id and origin_iata is not null and origin_iata <> ''\n      union all\n      select destination_iata as airport\n      from public.past_flights\n      where user_id = p_user_id and destination_iata is not null and destination_iata <> ''\n    ) airports\n    group by airport\n    order by 2 desc, 1 asc\n    limit 12\n  )\n  select jsonb_build_object(\n    'total_flights', v_total_count,\n    'yearly_counts', coalesce((select jsonb_object_agg(yr::text, cnt) from yearly), '{}'::jsonb),\n    'top_airlines', coalesce((select jsonb_agg(jsonb_build_object('name', airline, 'count', cnt)) from top_airlines), '[]'::jsonb),\n    'top_airports', coalesce((select jsonb_agg(jsonb_build_object('code', airport, 'count', cnt)) from top_airports), '[]'::jsonb),\n    'synced_at', now()\n  )\n  into v_stats_json;\n\n  insert into public.user_backup_snapshots (user_id, backup_version, past_flights_json, stats_json)\n  values (p_user_id, 1, v_flights_json, v_stats_json)\n  on conflict (user_id)\n  do update set\n    backup_version = public.user_backup_snapshots.backup_version + 1,\n    past_flights_json = excluded.past_flights_json,\n    stats_json = excluded.stats_json,\n    updated_at = now();\nend;\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "touch_tracking_session_from_snapshot()",
+        "definition": "CREATE OR REPLACE FUNCTION public.touch_tracking_session_from_snapshot()\n RETURNS trigger\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'public'\nAS $function$\nbegin\n  update public.tracking_sessions\n  set\n    last_snapshot_at = coalesce(new.provider_last_updated_at, new.updated_at, now()),\n    last_polled_at = now(),\n    next_poll_after = case\n      when new.snapshot_status in ('landed', 'cancelled', 'diverted') then null\n      else next_poll_after\n    end,\n    session_status = case\n      when new.snapshot_status = 'cancelled' then 'cancelled'\n      when new.snapshot_status in ('landed', 'diverted') then 'completed'\n      when session_status in ('pending', 'paused') then 'active'\n      else session_status\n    end,\n    completed_at = case\n      when new.snapshot_status in ('landed', 'diverted') then coalesce(completed_at, now())\n      else completed_at\n    end,\n    cancelled_at = case\n      when new.snapshot_status = 'cancelled' then coalesce(cancelled_at, now())\n      else cancelled_at\n    end,\n    polling_stopped_reason = case\n      when new.snapshot_status in ('landed', 'cancelled', 'diverted')\n        then coalesce(polling_stopped_reason, new.snapshot_status)\n      else polling_stopped_reason\n    end,\n    updated_at = now()\n  where id = new.tracking_session_id;\n\n  return new;\nend;\n$function$\n"
+      },
+      {
+        "nspname": "public",
+        "signature": "touch_user_achievement_updated_at()",
+        "definition": "CREATE OR REPLACE FUNCTION public.touch_user_achievement_updated_at()\n RETURNS trigger\n LANGUAGE plpgsql\n SET search_path TO ''\nAS $function$\nbegin\n  new.updated_at = now();\n  return new;\nend;\n$function$\n"
+      }
+    ]
+  }
+}

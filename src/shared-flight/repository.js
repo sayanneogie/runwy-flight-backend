@@ -869,7 +869,7 @@ function createPostgresSharedFlightRepository(pool) {
            on ts.id = uf.tracking_session_id
          where (
              uf.flight_instance_id = $1
-             or ts.metadata_json->>'sharedFlightInstanceId' = $1::text
+             or ts.flight_instance_id = $1::uuid
            )
            and uf.deleted_at is null
            and coalesce(uf.lifecycle_state, '') <> 'deleted'
@@ -985,7 +985,7 @@ function createPostgresSharedFlightRepository(pool) {
                on ts.id = uf.tracking_session_id
              where (
                  uf.flight_instance_id = fi.id
-                 or ts.metadata_json->>'sharedFlightInstanceId' = fi.id::text
+                 or ts.flight_instance_id = fi.id
                )
                and uf.deleted_at is null
                and coalesce(uf.lifecycle_state, '') <> 'deleted'
@@ -1214,7 +1214,7 @@ function createPostgresSharedFlightRepository(pool) {
       ));
     },
     async upsertUserFlight(userId, flightInstanceId, input = {}) {
-      return one(await pool.query(
+      const saved = one(await pool.query(
         `insert into public.user_flights (
            user_id,
            flight_instance_id,
@@ -1328,6 +1328,10 @@ function createPostgresSharedFlightRepository(pool) {
           input.alertSettings || input.alertSettingsJson || input.alert_settings_json || null,
         ]
       ));
+      return saved || one(await pool.query(
+        "select * from public.user_flights where user_id=$1 and flight_instance_id=$2",
+        [userId, flightInstanceId]
+      ));
     },
     async listUserFlights(userId) {
       const result = await pool.query(
@@ -1402,32 +1406,8 @@ function createPostgresSharedFlightRepository(pool) {
     },
     async linkUserFlightToInstance(userId, id, flightInstanceId, patch = {}) {
       return one(await pool.query(
-        `update public.user_flights uf set
-          flight_instance_id = $3,
-          notification_enabled = coalesce($4, uf.notification_enabled, uf.notifications_enabled, true),
-          notifications_enabled = coalesce($4, uf.notifications_enabled, uf.notification_enabled, true),
-          alert_preferences = coalesce($5, uf.alert_preferences, $6::jsonb),
-          aircraft_type = coalesce(
-            nullif(trim(coalesce(fi.normalized_data->>'aircraftType', fi.normalized_data->>'aircraft_type', '')), ''),
-            uf.aircraft_type
-          ),
-          status = coalesce(fi.status, uf.status),
-          provider_name = coalesce(fi.provider, uf.provider_name),
-          provider_flight_id = coalesce(fi.provider_flight_id, uf.provider_flight_id),
-          updated_at = now()
-         from public.flight_instances fi
-         where uf.user_id = $1
-           and uf.id = $2
-           and fi.id = $3
-         returning uf.*`,
-        [
-          userId,
-          id,
-          flightInstanceId,
-          patch.notificationEnabled ?? null,
-          patch.alertPreferences || null,
-          JSON.stringify(DEFAULT_ALERT_PREFERENCES),
-        ]
+        "select * from public.runwy_link_user_flight($1::uuid,$2::uuid,$3::uuid,$4::jsonb)",
+        [userId, id, flightInstanceId, JSON.stringify(patch)]
       ));
     },
     async deleteUserFlight(userId, id) {
@@ -1500,19 +1480,12 @@ function createPostgresSharedFlightRepository(pool) {
     },
     async upsertDeviceToken(userId, input) {
       return one(await pool.query(
-        `insert into public.device_tokens (user_id, device_token, platform, environment, is_active, updated_at)
-         values ($1, $2, $3, $4, true, now())
-         on conflict (user_id, device_token) do update set
-           platform = excluded.platform,
-           environment = excluded.environment,
-           is_active = true,
-           updated_at = now()
-         returning *`,
-        [userId, input.deviceToken, input.platform || "ios", input.environment]
+        "select * from public.runwy_register_push_device($1::uuid,$2,$3,$4,$5)",
+        [userId,input.deviceToken,input.deviceId || null,input.platform || "ios",input.environment || "production"]
       ));
     },
     async disableDeviceToken(deviceToken) {
-      await pool.query(`update public.device_tokens set is_active = false, updated_at = now() where device_token = $1`, [deviceToken]);
+      await pool.query("select public.runwy_disable_push_device(null,null,$1)",[deviceToken]);
     },
     async getEventWithFlight(eventId) {
       const row = one(await pool.query(
@@ -1525,7 +1498,6 @@ function createPostgresSharedFlightRepository(pool) {
       return row;
     },
     async listNotificationTargets(flightInstanceId, severity, eventType) {
-      const circleCondition = circleNotificationPreferenceConditionForEventType(eventType);
       const ownerSetting = ownerAlertSettingForEventType(eventType);
       const ownerCondition = ownerSetting
         ? `coalesce((uf.alert_settings_json ->> '${ownerSetting}')::boolean, (uf.alert_preferences ->> $2)::boolean, false) = true`
@@ -1550,7 +1522,7 @@ function createPostgresSharedFlightRepository(pool) {
            left join public.user_settings us on us.user_id = uf.user_id
            where (
                uf.flight_instance_id = $1
-               or ts.metadata_json->>'sharedFlightInstanceId' = $1::text
+               or ts.flight_instance_id = $1::uuid
              )
              and uf.notification_enabled = true
              and uf.deleted_at is null
@@ -1594,7 +1566,7 @@ function createPostgresSharedFlightRepository(pool) {
            left join public.user_settings rus on rus.user_id = fp.viewer_user_id
            where (
                uf.flight_instance_id = $1
-               or ts.metadata_json->>'sharedFlightInstanceId' = $1::text
+               or ts.flight_instance_id = $1::uuid
              )
              and uf.deleted_at is null
              and coalesce(uf.lifecycle_state, '') <> 'deleted'
@@ -1613,15 +1585,9 @@ function createPostgresSharedFlightRepository(pool) {
                  and upper(coalesce(deleted_uf.destination_iata, '')) = upper(coalesce(uf.destination_iata, ''))
                  and abs(extract(epoch from (deleted_uf.scheduled_departure - uf.scheduled_departure))) <= 1800
              )
-             and fr.relationship_status = 'active'
-             and fp.can_view_live = true
-             and fp.can_receive_alerts = true
+             and public.runwy_circle_flight_allowed(uf.id, fp.viewer_user_id, true)
+             and public.runwy_circle_alert_allowed(fp.relationship_id, fp.viewer_user_id, $3)
              ${tripStartingCondition}
-             and (
-               fp.share_scope = 'all_flights'
-               or (fp.share_scope = 'future_flights' and coalesce(uf.lifecycle_state, '') in ('upcoming', 'active'))
-             )
-             and ${circleCondition}
          ),
          targets as (
            select * from owner_targets
@@ -1642,7 +1608,7 @@ function createPostgresSharedFlightRepository(pool) {
            on dt.user_id = targets.recipient_user_id
           and dt.is_active = true
          group by user_flight, recipient_user_id, is_circle, owner_display_name, recipient_display_name, temperature_unit, is_traveler`,
-        [flightInstanceId, severity]
+        [flightInstanceId, severity, eventType]
       );
       return result.rows.map((row) => ({
         userFlight: {
@@ -1762,6 +1728,13 @@ function createPostgresSharedFlightRepository(pool) {
       return { row, created };
     },
     async claimNotificationTokenDelivery(id, leaseMs = 30_000) {
+      // Permission can change after fanout or while a retry is queued. Recheck
+      // immediately before claiming a send, including token account ownership.
+      await pool.query(
+        `update public.notification_delivery_tokens ndt set status = 'permanent_failed',
+           error = 'notification_permission_revoked', locked_until = null, updated_at = now()
+         where ndt.id = $1::uuid and ndt.status in ('queued', 'retry')
+           and not public.runwy_notification_delivery_allowed(ndt.notification_delivery_id)`, [id]);
       return one(await pool.query(
         `update public.notification_delivery_tokens ndt set
            status = 'sending',
@@ -1774,6 +1747,9 @@ function createPostgresSharedFlightRepository(pool) {
            and dt.id = ndt.device_token_id
            and ndt.status in ('queued', 'retry')
            and ndt.next_attempt_at <= now()
+           and public.runwy_notification_delivery_allowed(ndt.notification_delivery_id)
+           and exists (select 1 from public.notification_deliveries nd
+             where nd.id = ndt.notification_delivery_id and nd.user_id = dt.user_id)
          returning ndt.*, dt.device_token, dt.environment, dt.is_active`,
         [id, Math.max(1, Math.round(leaseMs))]
       ));
@@ -1876,7 +1852,7 @@ function createPostgresSharedFlightRepository(pool) {
              where candidate.user_id = $1::uuid
                and (
                  candidate.flight_instance_id = $2::uuid
-                 or ts.metadata_json->>'sharedFlightInstanceId' = $2::text
+                 or ts.flight_instance_id = $2::uuid
                )
                and candidate.deleted_at is null
                and coalesce(candidate.lifecycle_state, '') <> 'deleted'
@@ -1921,7 +1897,7 @@ function createPostgresSharedFlightRepository(pool) {
          where uf.user_id = $1::uuid
            and (
              uf.flight_instance_id = $2::uuid
-             or ts.metadata_json->>'sharedFlightInstanceId' = $2::text
+             or ts.flight_instance_id = $2::uuid
            )
            and uf.deleted_at is null
            and coalesce(uf.lifecycle_state, '') <> 'deleted'
@@ -2011,18 +1987,27 @@ function createPostgresSharedFlightRepository(pool) {
 function circleNotificationPreferenceConditionForEventType(eventType) {
   switch (String(eventType || "").toUpperCase()) {
     case "DELAYED":
-      return "fp.notify_delay = true";
+    case "RESCHEDULED":
     case "CANCELLED":
     case "DIVERTED":
-      return "true";
+      return "fp.notify_delay = true";
+    case "GATE_CHANGED":
+    case "TERMINAL_CHANGED":
+      return "fp.notify_gate_change = true";
+    case "BAGGAGE_BELT_ASSIGNED":
+    case "BAGGAGE_BELT_CHANGED":
+      return "fp.notify_baggage = true";
     case "TRIP_STARTING":
     case "BOARDING":
     case "TAXIING":
+    case "TAKEOFF_ROLL":
     case "DEPARTED":
     case "AIRBORNE":
       return "fp.notify_departure = true";
     case "LANDED":
     case "ARRIVED":
+    case "TAXI_IN":
+    case "ARRIVED_AT_GATE":
       return "fp.notify_arrival = true";
     default:
       return "false";

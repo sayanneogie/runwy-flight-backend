@@ -746,10 +746,10 @@ test("arrival visit counts use readable ordinals", () => {
   assert.equal(__test__.ordinalNumber(66), "66th");
 });
 
-test("Circle allows only the eight requested milestones in both notification paths", () => {
+test("Circle exposes only supported categories, including the controls shown in the app", () => {
   const { circleNotificationPreferenceConditionForEventType: shared } = require("../src/shared-flight/repository");
-  const allowed = ["TRIP_STARTING", "DELAYED", "CANCELLED", "BOARDING", "TAXIING", "DEPARTED", "AIRBORNE", "DIVERTED", "LANDED", "ARRIVED"];
-  const blocked = ["GATE_CHANGED", "TERMINAL_CHANGED", "RESCHEDULED", "AIRCRAFT_CHANGED", "TAKEOFF_ROLL", "TAXI_IN", "ARRIVED_AT_GATE", "BAGGAGE_BELT_ASSIGNED", "BAGGAGE_BELT_CHANGED", "INBOUND_DEPARTED", "INBOUND_ARRIVED", "INBOUND_CANCELLED", "INBOUND_DIVERTED", "WEATHER_ADVISORY", "FLIGHT_PLAN_AVAILABLE", "FLIGHT_PLAN_CHANGED", "UNKNOWN"];
+  const allowed = ["GATE_CHANGED", "TERMINAL_CHANGED", "RESCHEDULED", "TAKEOFF_ROLL", "TAXI_IN", "ARRIVED_AT_GATE", "BAGGAGE_BELT_ASSIGNED", "BAGGAGE_BELT_CHANGED", "TRIP_STARTING", "DELAYED", "CANCELLED", "BOARDING", "TAXIING", "DEPARTED", "AIRBORNE", "DIVERTED", "LANDED", "ARRIVED"];
+  const blocked = ["AIRCRAFT_CHANGED", "INBOUND_DEPARTED", "INBOUND_ARRIVED", "INBOUND_CANCELLED", "INBOUND_DIVERTED", "WEATHER_ADVISORY", "FLIGHT_PLAN_AVAILABLE", "FLIGHT_PLAN_CHANGED", "UNKNOWN"];
   for (const type of allowed) assert.notEqual(shared(type), "false", type);
   for (const type of blocked) assert.equal(shared(type), "false", type);
   for (const type of ["flight_gate_change", "flight_takeoff_roll", "flight_inbound_arrived", "flight_baggage_claim", "flight_aircraft_changed", "unknown"]) {

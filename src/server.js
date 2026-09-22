@@ -410,6 +410,7 @@ const pool = DATABASE_URL
   ? new Pool({
       connectionString: DATABASE_URL,
       ssl: postgresSSLConfig(),
+      max: Math.max(1, Math.min(20, Number(process.env.DATABASE_POOL_MAX) || 8)),
       connectionTimeoutMillis: 5_000,
       statement_timeout: 15_000,
     })
@@ -5211,7 +5212,9 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
   if (!usesDatabase()) return [];
 
   const ownerCondition = ownerNotificationPreferenceConditionForEventType(eventType);
-  const circleCondition = circleNotificationPreferenceConditionForEventType(eventType);
+  const circleEvent = ({ flight_gate_change: "GATE_CHANGED", flight_terminal_change: "TERMINAL_CHANGED",
+    flight_baggage_claim: "BAGGAGE_BELT_ASSIGNED" })[eventType]
+    || String(eventType).replace(/^flight_/, "").toUpperCase();
   const result = await pool.query(
     `
     with base as (
@@ -5258,10 +5261,9 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
             and uf.tracking_session_id = base.tracking_session_id
             and uf.deleted_at is null
             and coalesce(uf.lifecycle_state, '') <> 'deleted'
+            and public.runwy_circle_flight_allowed(uf.id, fp.viewer_user_id, true)
         )
-        and fp.can_view_live = true
-        and fp.can_receive_alerts = true
-        and ${circleCondition}
+        and public.runwy_circle_alert_allowed(fp.relationship_id, fp.viewer_user_id, $2)
     ),
     recipients as (
       select * from owner_recipient
@@ -5279,7 +5281,7 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
       on pd.user_id = recipients.user_id
      and pd.push_enabled = true
     `,
-    [flightId]
+    [flightId, circleEvent]
   );
 
   return result.rows.map((row) => ({
@@ -7164,14 +7166,8 @@ app.post("/v1/devices/push-token", async (req, res) => {
       deviceId,
       userId,
       platform: validated.value.platform,
+      environment: validated.value.environment || (APNS_USE_SANDBOX ? "sandbox" : "production"),
     });
-    if (sharedFlightService?.upsertDeviceToken) {
-      await sharedFlightService.upsertDeviceToken(userId, {
-        deviceToken: validated.value.token,
-        platform: validated.value.platform,
-        environment: validated.value.environment || (APNS_USE_SANDBOX ? "sandbox" : "production"),
-      });
-    }
 
     return res.json({ ok: true });
   } catch (_error) {
@@ -7330,22 +7326,6 @@ app.post("/v1/devices/push-token/remove", async (req, res) => {
 
   try {
     await disablePushTokensForDevice(deviceId, userId);
-    if (usesDatabase()) {
-      await pool.query(
-        `
-        update public.device_tokens
-        set is_active = false, updated_at = now()
-        where user_id = $1::uuid
-          and device_token in (
-            select apns_token
-            from public.push_devices
-            where device_id = $2
-              and user_id = $1::uuid
-          )
-        `,
-        [userId, deviceId]
-      );
-    }
     return res.json({ ok: true });
   } catch (_error) {
     return res.status(500).json({ error: "Unable to disable push token" });
@@ -7534,7 +7514,7 @@ async function syncBridgedTrackingStateFromSharedFlight(flight) {
       and uf.deleted_at is null
       and coalesce(uf.lifecycle_state, '') <> 'deleted'
      where (
-       ts.metadata_json->>'sharedFlightInstanceId' = $1
+       ts.flight_instance_id = $1::uuid
        or uf.flight_instance_id = $1::uuid
      )
      order by ts.id, uf.updated_at desc`,
@@ -8234,6 +8214,13 @@ async function startApiServer() {
   }
   if (usesDatabase()) {
     await ensureDatabaseSchema();
+    const { rows } = await pool.query(`select
+      to_regprocedure('public.runwy_circle_flight_allowed(uuid,uuid,boolean)') is not null
+      and to_regprocedure('public.runwy_register_push_device(uuid,text,text,text,text)') is not null
+      and to_regprocedure('public.runwy_link_user_flight(uuid,uuid,uuid,jsonb)') is not null
+      and to_regprocedure('public.runwy_prepare_tracking_user_flight(uuid,uuid,uuid)') is not null
+      and to_regprocedure('public.runwy_prune_operational_history(integer)') is not null as ready`);
+    if (!rows[0]?.ready) throw new Error("Apply the database gap-fix migrations before deploying this backend");
   }
 
   startTrackingPoller({ keepProcessAlive: false });
@@ -8255,6 +8242,14 @@ async function startApiServer() {
   }, 60_000);
   protectionTimer.unref();
   server.on("close", () => clearInterval(protectionTimer));
+
+  const maintenanceTimer = setInterval(() => {
+    if (pool) pool.query("select public.runwy_prune_operational_history(500)")
+      .then(({ rows }) => console.log("Operational history maintenance", rows[0]?.runwy_prune_operational_history))
+      .catch((error) => console.warn("Operational history maintenance failed", { code: error.code }));
+  }, 60 * 60_000);
+  maintenanceTimer.unref();
+  server.on("close", () => clearInterval(maintenanceTimer));
 
   let lifecycleRecoveryRunning = false;
   const runLifecycleRecovery = async (reason) => {

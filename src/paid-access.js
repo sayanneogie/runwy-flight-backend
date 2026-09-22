@@ -87,7 +87,7 @@ function createPaidAccess({ apiKey, query, fetchImpl = global.fetch, now = Date.
       from public.user_flights uf
       left join public.tracking_sessions ts on ts.id = uf.tracking_session_id
       left join public.flight_instances fi on fi.id = uf.flight_instance_id
-        or fi.id::text = ts.metadata_json->>'sharedFlightInstanceId'
+        or fi.id = ts.flight_instance_id
       where uf.deleted_at is null and coalesce(uf.lifecycle_state, '') <> 'deleted'
         and (fi.provider_flight_id = $1
           or fi.normalized_data->'inboundFlight'->>'providerFlightId' = $1

@@ -91,14 +91,14 @@ test("push registration retires older APNs tokens for the same device", async ()
     platform: "ios",
   });
 
-  assert.equal(queries.length, 3);
-  assert.match(queries[0].sql, /update public\.device_tokens/);
-  assert.match(queries[1].sql, /update public\.push_devices/);
-  assert.match(queries[2].sql, /insert into public\.push_devices/);
+  assert.equal(queries.length, 1);
+  assert.match(queries[0].sql, /runwy_register_push_device/);
   assert.deepEqual(queries[0].params, [
-    "new-token",
     "11111111-1111-4111-8111-111111111111",
+    "new-token",
     "device-1",
+    "ios",
+    "production",
   ]);
 });
 

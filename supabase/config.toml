@@ -13,3 +13,6 @@ verify_jwt = false
 
 [functions.preview-friend-invite]
 verify_jwt = false
+
+[functions.delete-account]
+verify_jwt = false

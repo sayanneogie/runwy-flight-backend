@@ -1,15 +1,17 @@
 "use strict";
 
-function createSharedFlightQueue({ onError = null } = {}) {
+function createSharedFlightQueue({ onError = null, maxPendingJobs = 10000 } = {}) {
   const jobs = [];
   const handlers = new Map();
   const dedupe = new Set();
+  let sequence = 0;
 
   async function add(name, data, options = {}) {
     const dedupeKey = options.dedupeKey || `${name}:${data.flight_instance_id || data.flight_key || data.flight_event_id || JSON.stringify(data)}`;
     if (options.dedupe && dedupe.has(dedupeKey)) return { id: dedupeKey, deduped: true };
+    if (jobs.length >= maxPendingJobs) throw new Error("Shared flight queue is full; retry through durable recovery");
     dedupe.add(dedupeKey);
-    const job = { id: `${name}:${jobs.length + 1}`, name, data, options };
+    const job = { id: `${name}:${++sequence}`, name, data, options };
     jobs.push(job);
     if (options.runImmediately !== false && handlers.has(name)) {
       const run = async () => {
@@ -27,6 +29,8 @@ function createSharedFlightQueue({ onError = null } = {}) {
           }
         } finally {
           dedupe.delete(dedupeKey);
+          const index = jobs.indexOf(job);
+          if (index >= 0) jobs.splice(index, 1);
         }
       };
       if (Number.isFinite(options.delayMs) && options.delayMs > 0) {

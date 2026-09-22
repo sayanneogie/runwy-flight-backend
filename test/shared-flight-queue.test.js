@@ -35,3 +35,15 @@ test("background job failures are contained and release their dedupe key", async
   );
   assert.equal(retry.deduped, undefined);
 });
+
+test("completed jobs release payloads and queue capacity is bounded", async () => {
+  const queue=createSharedFlightQueue({maxPendingJobs:1});
+  queue.process("work",async()=>{});
+  const first=await queue.add("work",{value:1});
+  await assert.rejects(queue.add("work",{value:2}),/queue is full/);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(queue.jobs.length,0);
+  const second=await queue.add("work",{value:3});
+  assert.notEqual(first.id,second.id);
+  await new Promise(resolve=>setImmediate(resolve));
+});

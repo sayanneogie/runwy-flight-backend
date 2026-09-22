@@ -179,55 +179,15 @@ function createTrackingStore({
     });
   }
 
-  async function upsertPushDevice({ apnsToken, deviceId, userId, platform = "ios" }) {
+  async function upsertPushDevice({ apnsToken, deviceId, userId, platform = "ios", environment = "production" }) {
     if (usesDatabase()) {
       if (!userId) {
         throw new Error("Authenticated user is required to register push devices");
       }
 
-      // APNs may rotate a token after reinstall or restore. Retire every older
-      // token tied to this physical Runwy device before activating the new one,
-      // otherwise one arrival event is delivered once per historical token.
       await pool.query(
-        `
-        update public.device_tokens
-        set is_active = false, updated_at = now()
-        where user_id = $2::uuid
-          and device_token <> $1
-          and device_token in (
-            select apns_token
-            from public.push_devices
-            where user_id = $2::uuid
-              and device_id = $3
-          )
-        `,
-        [apnsToken, userId, deviceId]
-      );
-
-      await pool.query(
-        `
-        update public.push_devices
-        set push_enabled = false, updated_at = now()
-        where user_id = $2::uuid
-          and device_id = $3
-          and apns_token <> $1
-        `,
-        [apnsToken, userId, deviceId]
-      );
-
-      await pool.query(
-        `
-        insert into public.push_devices (apns_token, user_id, device_id, platform, push_enabled, updated_at)
-        values ($1, $2::uuid, $3, $4, true, now())
-        on conflict (apns_token) do update
-        set
-          user_id = excluded.user_id,
-          device_id = excluded.device_id,
-          platform = excluded.platform,
-          push_enabled = true,
-          updated_at = now()
-        `,
-        [apnsToken, userId, deviceId, platform]
+        "select * from public.runwy_register_push_device($1::uuid,$2,$3,$4,$5)",
+        [userId, apnsToken, deviceId, platform, environment]
       );
 
       return;
@@ -252,15 +212,7 @@ function createTrackingStore({
     if (!deviceId || !userId) return;
 
     if (usesDatabase()) {
-      await pool.query(
-        `
-        update public.push_devices
-        set push_enabled = false, updated_at = now()
-        where device_id = $1
-          and user_id = $2::uuid
-        `,
-        [deviceId, userId]
-      );
+      await pool.query("select public.runwy_disable_push_device($1::uuid,$2,null)", [userId,deviceId]);
       return;
     }
 
@@ -280,14 +232,7 @@ function createTrackingStore({
     if (!apnsToken) return;
 
     if (usesDatabase()) {
-      await pool.query(
-        `
-        update public.push_devices
-        set push_enabled = false, updated_at = now()
-        where apns_token = $1
-        `,
-        [apnsToken]
-      );
+      await pool.query("select public.runwy_disable_push_device(null,null,$1)", [apnsToken]);
       return;
     }
 
@@ -310,18 +255,6 @@ function createTrackingStore({
           from public.tracking_sessions ts
           where ts.id = $1::uuid
 
-          union
-
-          select fp.viewer_user_id as user_id
-          from public.tracking_sessions ts
-          join public.friend_permissions fp
-            on fp.owner_user_id = ts.owner_user_id
-          join public.friend_relationships fr
-            on fr.id = fp.relationship_id
-          where ts.id = $1::uuid
-            and fr.relationship_status = 'active'
-            and fp.can_view_live = true
-            and fp.can_receive_alerts = true
         )
         select distinct pd.apns_token
         from public.push_devices pd
@@ -851,19 +784,7 @@ function createTrackingStore({
       left join public.live_snapshots ls
         on ls.tracking_session_id = ts.id
       where ts.id = $1::uuid
-        and (
-          ts.owner_user_id = $2::uuid
-          or exists (
-            select 1
-            from public.friend_permissions fp
-            join public.friend_relationships fr
-              on fr.id = fp.relationship_id
-            where fp.owner_user_id = ts.owner_user_id
-              and fp.viewer_user_id = $2::uuid
-              and fr.relationship_status = 'active'
-              and fp.can_view_live = true
-          )
-        )
+        and ts.owner_user_id = $2::uuid
       limit 1
       `,
       [flightId, userId]
@@ -963,7 +884,12 @@ function createTrackingStore({
       ]
     );
 
-    await pool.query(
+    const persistUserFlight = async (executor) => {
+      if (hasCanonicalFlightInstance) {
+        await executor.query("select public.runwy_prepare_tracking_user_flight($1::uuid,$2::uuid,$3::uuid)",
+          [userId, flightId, normalized.flightInstanceId]);
+      }
+    await executor.query(
       `
       insert into public.user_flights (
         user_id,
@@ -1034,7 +960,8 @@ function createTrackingStore({
         deleted_at = null,
         ${attachTrackingSessionOnConflict}
         flight_instance_id = coalesce(excluded.flight_instance_id, public.user_flights.flight_instance_id),
-        source_type = excluded.source_type,
+        source_type = case when public.user_flights.source_type = 'tracked'
+          then excluded.source_type else public.user_flights.source_type end,
         lifecycle_state = excluded.lifecycle_state,
         display_flight_number = excluded.display_flight_number,
         marketing_airline_code = excluded.marketing_airline_code,
@@ -1088,6 +1015,20 @@ function createTrackingStore({
         providerFlightId,
       ]
     );
+    };
+    if (typeof pool.connect === "function") {
+      const client = await pool.connect();
+      try {
+        await client.query("begin");
+        await persistUserFlight(client);
+        await client.query("commit");
+      } catch (error) {
+        await client.query("rollback");
+        throw error;
+      } finally { client.release(); }
+    } else {
+      await persistUserFlight(pool);
+    }
 
     await pool.query(
       `

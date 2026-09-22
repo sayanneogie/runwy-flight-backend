@@ -11,7 +11,7 @@ async function database() {
   const db = new PGlite();
   await db.exec(`create role anon; create role authenticated; create role service_role;
     create table public.api_usage_logs(provider text, endpoint text, cost_estimate integer, created_at timestamptz default now());`);
-  await db.exec(fs.readFileSync(path.join(__dirname, "../supabase/migrations/20260915_request_abuse_guardrails.sql"), "utf8"));
+  await db.exec(fs.readFileSync(path.join(__dirname, "../supabase/legacy-migrations/20260915_request_abuse_guardrails.sql"), "utf8"));
   return db;
 }
 

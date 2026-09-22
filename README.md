@@ -282,3 +282,7 @@ Legacy query-string webhook secrets are still accepted for backward compatibilit
 - On Railway, prefer direct Node start commands over `npm run ...` to avoid npm runtime warnings.
 - If you use a custom API command, keep `ENABLE_TRACKING_POLLER=false`.
 - For a Firehose-only worker, it is fine to set `DISABLE_PROVIDER_CALLS=true` there so the worker does not make AeroAPI refresh calls.
+
+## Database migrations and hardening
+
+Use the current 14-digit migration sequence and the [database hardening runbook](docs/database-hardening.md). Historical SQL is retained in `supabase/legacy-migrations` and must not be replayed. Existing production adopts the verified baseline before applying forward migrations; a fresh Supabase database executes the baseline. Run `npm test`, `npm run db:status`, and `npm run db:verify` with the appropriate credentials available. Apply migrations before deploying this backend.
