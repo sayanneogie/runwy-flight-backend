@@ -4,9 +4,9 @@ The database keeps shared flight facts separate from each user's saved travel re
 
 ## Migration contract
 
-`supabase/migrations` is now the executable sequence: one schema baseline and five forward migrations, all with unique 14-digit versions. The 29 historical scripts are preserved in `supabase/legacy-migrations` for reference and regression tests. Do not replay that directory: it contains overlapping versions and references to tables retired in the production reset.
+`supabase/migrations` is now the executable sequence: one schema baseline and six forward migrations, all with unique 14-digit versions. The 29 historical scripts are preserved in `supabase/legacy-migrations` for reference and regression tests. Do not replay that directory: it contains overlapping versions and references to tables retired in the production reset.
 
-A fresh Supabase project supplies its usual auth, storage, extension schemas and API roles, then applies the six current migrations. The isolated PostgreSQL tests reproduce the application schema with minimal Supabase fixtures. They are not a substitute for a managed Supabase backup restore test.
+A fresh Supabase project supplies its usual auth, storage, extension schemas and API roles, then applies the seven current migrations. The isolated PostgreSQL tests reproduce the application schema with minimal Supabase fixtures. They are not a substitute for a managed Supabase backup restore test.
 
 Existing production must **adopt**, rather than execute, the baseline. Adoption compares its schema to the reviewed schema-only SHA-256 manifest in `supabase/schema/pre-baseline-signature.json`. It aborts on drift. Original Supabase migration records, including their SQL, are copied into the RLS-protected `runwy_security.legacy_migration_history` before replacing the active history with the baseline record. No application rows are reset.
 

@@ -59,10 +59,12 @@ test('Circle scopes, recipient preferences, revocation and invite replay are enf
     await flight(db,{id:40,visibility:'private'});
     await flight(db,{id:41,visibility:'circle',state:'active'});
     await flight(db,{id:42,visibility:'circle',state:'archived',date:'2020-01-01'});
+    await flight(db,{id:43,visibility:'circle',state:'upcoming',date:'2020-01-01'});
     const allowed=async(id,alerts=false)=>(await db.query('select runwy_circle_flight_allowed($1,$2,$3) as allowed',[uid(id),uid(2),alerts])).rows[0].allowed;
     assert.equal(await allowed(40),false);
     assert.equal(await allowed(41),true);
     assert.equal(await allowed(42),false);
+    assert.equal(await allowed(43),false);
     await db.query("update friend_permissions set share_scope='selected_flights' where owner_user_id=$1",[uid(1)]);
     assert.equal(await allowed(41),false);
     await actor(db,1);
@@ -71,10 +73,12 @@ test('Circle scopes, recipient preferences, revocation and invite replay are enf
     assert.equal(await allowed(41),true);
     await db.query('update friend_permissions set can_view_live=false where owner_user_id=$1',[uid(1)]);
     assert.equal(await allowed(41),false);
+    await db.query("update friend_permissions set share_scope='all_flights' where owner_user_id=$1",[uid(1)]);
+    assert.equal(await allowed(43),false);
     await db.query("update friend_permissions set can_view_live=true,share_scope='all_flights',can_view_history=true where owner_user_id=$1",[uid(1)]);
     assert.equal(await allowed(42),true);
     const overview=(await db.query('select runwy_circle_overview($1,1,0) as data',[uid(2)])).rows[0].data;
-    assert.equal(overview.total_shared_flights,2);assert.equal(overview.has_more,true);
+    assert.equal(overview.total_shared_flights,3);assert.equal(overview.has_more,true);
     assert.equal(overview.members[0].live_flight_count,1);
     assert.equal(overview.shared_flights.length,1);
     await actor(db,3);
@@ -164,7 +168,7 @@ test('account deletion requires storage cleanup and blocks uploads after deletio
 
 test('migration versions and schema reproduction are deterministic',async()=>{
   const {migrations,verify}=require('../scripts/db-migrate');
-  const files=migrations();assert.equal(files.length,6);
+  const files=migrations();assert.equal(files.length,7);
   assert.equal(files[0],'20260922000000_production_baseline.sql');
   const db=await createDatabase();
   try{assert.ok(Object.values(await verify(db)).every(Boolean));}finally{await db.close();}
