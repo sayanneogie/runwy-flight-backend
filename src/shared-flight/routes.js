@@ -6,7 +6,7 @@ function mountSharedFlightRoutes(app, service) {
       const flight = await service.searchFlight(req.query, { userId: req.auth?.userId || null });
       return res.json(flight);
     } catch (error) {
-      return res.status(error.statusCode || 500).json({ error: error.message || "Unable to search flight" });
+      return res.status(error.code === "PT429" ? 429 : error.code === "23514" ? 400 : (error.statusCode || 500)).json({ error: error.message || "Unable to search flight" });
     }
   });
 
@@ -17,7 +17,7 @@ function mountSharedFlightRoutes(app, service) {
       const result = await service.saveUserFlight(userId, req.body || {});
       return res.status(201).json(result);
     } catch (error) {
-      return res.status(error.statusCode || 500).json({ error: error.message || "Unable to save flight" });
+      return res.status(error.code === "PT429" ? 429 : error.code === "23514" ? 400 : (error.statusCode || 500)).json({ error: error.message || "Unable to save flight" });
     }
   });
 
@@ -28,7 +28,7 @@ function mountSharedFlightRoutes(app, service) {
       const result = await service.ensureUserFlightLiveCoverage(userId, req.body || {});
       return res.json(result);
     } catch (error) {
-      return res.status(error.statusCode || 500).json({ error: error.message || "Unable to ensure live coverage" });
+      return res.status(error.code === "PT429" ? 429 : error.code === "23514" ? 400 : (error.statusCode || 500)).json({ error: error.message || "Unable to ensure live coverage" });
     }
   });
 
@@ -39,7 +39,7 @@ function mountSharedFlightRoutes(app, service) {
       const result = await service.reconcileDisplayedUserFlights(userId, req.body || {});
       return res.json(result);
     } catch (error) {
-      return res.status(error.statusCode || 500).json({
+      return res.status(error.code === "PT429" ? 429 : error.code === "23514" ? 400 : (error.statusCode || 500)).json({
         error: error.message || "Unable to reconcile displayed flights",
       });
     }
@@ -70,6 +70,12 @@ function mountSharedFlightRoutes(app, service) {
     if ("userLabel" in body) patch.user_label = body.userLabel;
     if ("visibility" in body) patch.visibility = body.visibility;
 
+    if ((patch.alert_preferences !== undefined && !validAlertPreferences(patch.alert_preferences, false)) ||
+        (patch.alert_settings_json !== undefined && !validAlertPreferences(patch.alert_settings_json, true)) ||
+        (patch.user_label != null && (typeof patch.user_label !== "string" || patch.user_label.length > 200))) {
+      return res.status(400).json({ error: "Invalid alert preferences or flight label" });
+    }
+
     try {
       const updated = await service.updateUserFlight(userId, req.params.id, patch);
       if (!updated) return res.status(404).json({ error: "Saved flight not found" });
@@ -96,20 +102,23 @@ function mountSharedFlightRoutes(app, service) {
     const userId = String(req.auth?.userId || "").trim();
     if (!userId) return res.status(401).json({ error: "Sign in is required" });
     const body = req.body || {};
-    const deviceToken = String(body.deviceToken || body.device_token || "").trim();
+    const deviceToken = String(body.deviceToken || body.device_token || "").trim().toLowerCase();
     const environment = String(body.environment || "").trim().toLowerCase();
-    if (!deviceToken || !["sandbox", "production"].includes(environment)) {
-      return res.status(400).json({ error: "deviceToken and environment are required" });
+    const deviceId = req.get("X-Device-ID") || body.deviceId || body.device_id;
+    if (!/^[a-fA-F0-9]{64,512}$/.test(deviceToken) || typeof deviceId !== "string" || !deviceId.trim() || deviceId.length > 128 ||
+        (body.platform && body.platform !== "ios") || !["sandbox", "production"].includes(environment)) {
+      return res.status(400).json({ error: "A valid deviceToken, deviceId and environment are required" });
     }
     try {
       const token = await service.upsertDeviceToken(userId, {
         deviceToken,
+        deviceId: deviceId.trim(),
         environment,
         platform: body.platform || "ios",
       });
       return res.status(201).json({ deviceToken: token });
     } catch (error) {
-      return res.status(500).json({ error: "Unable to register device token" });
+      return res.status(error.code === "PT429" ? 429 : 500).json({ error: "Unable to register device token" });
     }
   });
 
@@ -138,4 +147,14 @@ function mountSharedFlightRoutes(app, service) {
   });
 }
 
-module.exports = { mountSharedFlightRoutes };
+function validAlertPreferences(value, detailed) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || JSON.stringify(value).length > 4096) return false;
+  const keys = detailed ? ["gateChange", "delayUpdates", "boardingTime", "takeoffLanding", "baggageClaim", "inboundAircraft", "flightPlans", "enabled", "low", "medium", "high", "critical"] : ["low", "medium", "high", "critical"];
+  return Object.entries(value).every(([key, item]) => {
+    if (detailed && key === "quietHours") return item && typeof item === "object" && !Array.isArray(item) &&
+      Object.entries(item).every(([name, number]) => ["startHour", "endHour", "startMinute", "endMinute"].includes(name) &&
+        Number.isInteger(number) && number >= 0 && number <= (name.endsWith("Hour") ? 23 : 59));
+    return keys.includes(key) && typeof item === "boolean";
+  });
+}
+module.exports = { mountSharedFlightRoutes, validAlertPreferences };

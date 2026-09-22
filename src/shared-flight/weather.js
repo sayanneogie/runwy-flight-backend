@@ -33,7 +33,7 @@ function createWeatherKitClient({ env = process.env, fetchImpl = global.fetch } 
       url.searchParams.set("dataSets", "currentWeather,hourlyForecast,weatherAlerts");
       url.searchParams.set("hourlyStart", hourlyStart);
       url.searchParams.set("hourlyEnd", hourlyEnd);
-      const response = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } });
+      const response = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000) });
       if (!response.ok) {
         const error = new Error(`WeatherKit request failed (${response.status})`);
         error.statusCode = response.status;
@@ -44,53 +44,69 @@ function createWeatherKitClient({ env = process.env, fetchImpl = global.fetch } 
   };
 }
 
-function createFlightWeatherService({ cache, repository, weatherProvider = createWeatherKitClient(), now = () => Date.now() } = {}) {
+function createFlightWeatherService({ cache, repository, weatherProvider = createWeatherKitClient(), now = () => Date.now(), dailyLimit = 2000 } = {}) {
+  const pending = new Map();
+  const recent = new Map();
+  async function load(key, airport, target, row, options) {
+    let lease;
+    try {
+      const cached = await repository?.getWeatherCache?.(key) || (cache ? await cache.getJSON(key) : null);
+      if (cached) return cached;
+      if (repository?.acquireProviderRequestLease) {
+        lease = await repository.acquireProviderRequestLease(key, 15000);
+        if (!lease) return { unavailable: true, reason: "refresh_pending" };
+        // Another replica may have filled the cache immediately before the lock.
+        const fresh = await repository.getWeatherCache?.(key);
+        if (fresh) return fresh;
+      }
+      if (repository?.reserveWeatherBudget && !(await repository.reserveWeatherBudget(dailyLimit))) {
+        return { unavailable: true, reason: "daily_budget_reached" };
+      }
+      const started = now();
+      let result;
+      try {
+        const raw = await weatherProvider.fetchWeather({ latitude: airport.coordinate.latitude, longitude: airport.coordinate.longitude, forecastTime: target.forecastTime });
+        result = { raw };
+        await repository?.logApiUsage?.({ provider: weatherProvider.name || "weatherkit", endpoint: "weatherInsight", flight_key: row.flight_key,
+          response_time_ms: now()-started, cache_status: options.cacheStatus || "miss", status_code: 200 });
+      } catch (error) {
+        result = { unavailable: true, reason: "provider_unavailable" };
+        await repository?.logApiUsage?.({ provider: weatherProvider.name || "weatherkit", endpoint: "weatherInsight", flight_key: row.flight_key,
+          response_time_ms: now()-started, cache_status: "miss", status_code: error.statusCode || null, error: error.message });
+      }
+      const ttl = result.unavailable ? 30 : WEATHER_CACHE_TTL_SECONDS;
+      if (cache) await cache.setJSON(key,result,ttl);
+      await repository?.setWeatherCache?.(key,result,ttl);
+      return result;
+    } finally {
+      if (lease) await repository.releaseProviderRequestLease(key,lease);
+    }
+  }
   async function insightForFlight(row, options = {}) {
     const target = weatherTargetForFlight(row, now());
     if (!target) return unavailable("too_early", "Weather check will run closer to departure.");
     const airport = airportByCode(target.airportCode);
-    if (!airport?.coordinate?.latitude || !airport?.coordinate?.longitude) {
-      return unavailable("airport_coordinates_missing", "Weather is unavailable for this airport.");
+    if (!airport?.coordinate?.latitude || !airport?.coordinate?.longitude) return unavailable("airport_coordinates_missing", "Weather is unavailable for this airport.");
+    if (!weatherProvider?.isConfigured?.()) return unavailable("weatherkit_not_configured", "WeatherKit is not enabled on the backend.");
+    const key = "v2:" + weatherCacheKey(target.airportCode,target.forecastTime);
+    let result = recent.get(key);
+    if (!result || result.expires <= now()) {
+      let work = pending.get(key);
+      if (!work) {
+        if (pending.size >= 32) return unavailable("capacity_reached", "Weather is temporarily unavailable.");
+        work = load(key,airport,target,row,options).catch(() => ({ unavailable: true, reason: "provider_unavailable" }));
+        pending.set(key,work);
+        work.finally(() => pending.delete(key));
+      }
+      const value = await work;
+      result = { value, expires: now() + (value.unavailable ? 30000 : WEATHER_CACHE_TTL_SECONDS*1000) };
+      if (recent.size >= 2000) recent.delete(recent.keys().next().value);
+      recent.set(key,result);
     }
-    const cacheKey = weatherCacheKey(target.airportCode, target.forecastTime);
-    const cached = cache ? await cache.getJSON(cacheKey) : null;
-    if (cached) return { ...cached, source: "redis" };
-    if (!weatherProvider?.isConfigured?.()) {
-      return unavailable("weatherkit_not_configured", "WeatherKit is not enabled on the backend.");
-    }
-
-    const startedAt = now();
-    try {
-      const raw = await weatherProvider.fetchWeather({
-        latitude: airport.coordinate.latitude,
-        longitude: airport.coordinate.longitude,
-        forecastTime: target.forecastTime,
-      });
-      const insight = buildWeatherInsight({ raw, airport, target, row, nowMs: now() });
-      if (cache) await cache.setJSON(cacheKey, insight, WEATHER_CACHE_TTL_SECONDS);
-      await repository?.logApiUsage?.({
-        provider: weatherProvider.name || "weatherkit",
-        endpoint: "weatherInsight",
-        flight_key: row.flight_key,
-        response_time_ms: now() - startedAt,
-        cache_status: options.cacheStatus || "miss",
-        status_code: 200,
-      });
-      return insight;
-    } catch (error) {
-      await repository?.logApiUsage?.({
-        provider: weatherProvider.name || "weatherkit",
-        endpoint: "weatherInsight",
-        flight_key: row.flight_key,
-        response_time_ms: now() - startedAt,
-        cache_status: "miss",
-        status_code: error.statusCode || null,
-        error: error?.message || String(error),
-      });
-      return unavailable("provider_unavailable", "Weather is temporarily unavailable.");
-    }
+    if (result.value.unavailable) return unavailable(result.value.reason,"Weather is temporarily unavailable.");
+    // Share provider observations, not flight-specific notification decisions or summaries.
+    return buildWeatherInsight({ raw: result.value.raw,airport,target,row,nowMs:now() });
   }
-
   return { insightForFlight };
 }
 

@@ -101,16 +101,27 @@ class PostgresRateLimitStore {
     this.prefix = `${namespace}:`;
     this.limit = limit;
     this.localKeys = false;
+    this.denials = new Map();
   }
   init(options) { this.windowMs = options.windowMs; }
   async increment(key) {
     const hash = crypto.createHash("sha256").update(String(key)).digest("hex");
+    const denied = this.denials.get(hash);
+    if (denied && denied.resetTime.getTime() > Date.now()) return denied;
+    this.denials.delete(hash);
     const { rows } = await this.query(
       "select * from public.runwy_consume_rate_limit($1, $2, $3, $4)",
       [this.prefix, hash, this.windowMs, this.limit],
     );
     if (!rows[0]) throw new Error("Rate-limit store returned no counter");
-    return { totalHits: Number(rows[0].total_hits), resetTime: new Date(rows[0].reset_at) };
+    const result = { totalHits: Number(rows[0].total_hits), resetTime: new Date(rows[0].reset_at) };
+    if (result.totalHits > this.limit) {
+      if (this.denials.size >= 10000) {
+        for (const [id, value] of this.denials) if (value.resetTime.getTime() <= Date.now()) this.denials.delete(id);
+      }
+      if (this.denials.size < 10000) this.denials.set(hash, result);
+    }
+    return result;
   }
   // Every request counts, including errors and disconnects. No refunds or resets.
   async decrement() {}

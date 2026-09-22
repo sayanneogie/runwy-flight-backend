@@ -1,7 +1,7 @@
 require("dotenv").config();
 
 const crypto = require("node:crypto");
-const { createPaidAccess, withoutLiveTelemetry } = require("./paid-access");
+const { createPaidAccess, withoutLiveTelemetry, isAdmin } = require("./paid-access");
 const http2 = require("node:http2");
 const express = require("express");
 const helmet = require("helmet");
@@ -5279,7 +5279,7 @@ async function listNotificationRecipientsForFlight(flightId, eventType) {
     from recipients
     left join public.push_devices pd
       on pd.user_id = recipients.user_id
-     and pd.push_enabled = true
+     and pd.push_enabled = true and pd.updated_at > now()-interval '90 days'
     `,
     [flightId, circleEvent]
   );
@@ -5376,7 +5376,7 @@ async function deliverTestPushJob(job) {
      and dt.is_active = true
     where pd.user_id = $1::uuid
       and pd.device_id = $2
-      and pd.push_enabled = true
+      and pd.push_enabled = true and pd.updated_at > now()-interval '90 days'
     `,
     [userId, deviceId, APNS_USE_SANDBOX]
   );
@@ -7118,7 +7118,28 @@ app.post("/v1/admin/membership-test", async (req, res) => {
   } catch (error) { res.status(error.status || 503).json({ error: error.message }); }
 });
 
-app.get("/v1/health/details", async (_req, res) => {
+// Cloud sync reads raw telemetry only after server-verified membership and ownership.
+app.get("/v1/tracking/snapshots", async (req, res) => {
+  const ids = typeof req.query.ids === "string" ? req.query.ids.split(",") : [];
+  if (!ids.length || ids.length > 40 || ids.some(id => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
+    return res.status(400).json({ error: "Provide 1 to 40 tracking session IDs" });
+  }
+  if (!pool) return res.status(503).json({ error: "Tracking storage unavailable" });
+  try {
+    const { rows } = await pool.query(`select ls.tracking_session_id,ls.provider,ls.baggage_claim,
+      case when $3::boolean then coalesce(p.canonical_snapshot_json,ls.canonical_snapshot_json)
+        else ls.canonical_snapshot_json end as canonical_snapshot_json,
+      ls.updated_at,ls.provider_last_updated_at,ls.canonical_revision
+      from public.live_snapshots ls join public.tracking_sessions ts on ts.id=ls.tracking_session_id
+      left join runwy_security.live_snapshot_payloads p on p.tracking_session_id=ts.id
+      where ts.owner_user_id=$1::uuid and ts.id=any($2::uuid[]) limit 40`,
+      [req.auth.userId, ids, req.paidAccess === true]);
+    return res.json(rows);
+  } catch { return res.status(503).json({ error: "Unable to load tracking snapshots" }); }
+});
+
+app.get("/v1/health/details", async (req, res) => {
+  if (!isAdmin(req.auth?.userId)) return res.status(403).json({ error: "Admin access required" });
   res.json(await buildDetailedHealth());
 });
 

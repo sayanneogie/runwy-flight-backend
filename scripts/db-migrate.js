@@ -51,6 +51,12 @@ async function verify(client) {
     not has_table_privilege('authenticated','public.device_tokens','INSERT') as token_registration_server_only,
     not exists(select 1 from pg_constraint c join pg_namespace n on n.oid=c.connamespace
       where n.nspname in('public','runwy_security') and not c.convalidated) as all_constraints_valid,
+    not has_table_privilege('authenticated','runwy_security.live_snapshot_payloads','SELECT') as raw_snapshots_private,
+    not has_function_privilege('authenticated','public.runwy_create_tracking_session(uuid,text,text,text,text,text,text,date,text,jsonb,integer)','EXECUTE') as tracking_reservation_server_only,
+    exists(select 1 from pg_trigger where tgname='runwy_bound_storage') as storage_allowance_enforced,
+    exists(select 1 from pg_constraint where conname='runwy_alert_settings_shape') as alert_shapes_validated,
+    not exists(select 1 from public.live_snapshots where canonical_snapshot_json is distinct from public.runwy_basic_snapshot(canonical_snapshot_json)
+      or raw_provider_payload_json<>'{}'::jsonb) as basic_snapshots_sanitized,
     not exists(select 1 from public.user_flights uf left join public.tracking_sessions ts on ts.id=uf.tracking_session_id
       where uf.tracking_session_id is not null and (ts.id is null or ts.owner_user_id<>uf.user_id)) as valid_session_owners`);
   for(const [name,passed]of Object.entries(rows[0]))if(passed!==true)throw Error(`Verification failed: ${name}`);

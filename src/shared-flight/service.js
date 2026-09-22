@@ -1480,6 +1480,7 @@ function createSharedFlightService({
   }
 
   async function getFlightWeatherInsight(flightInstanceId, options = {}) {
+    if (options.userId && !(await repository.canReadFlight(options.userId, flightInstanceId))) return null;
     const row = await repository.findFlightById(flightInstanceId);
     if (!row) return null;
     const insight = await weatherService.insightForFlight(row, options);

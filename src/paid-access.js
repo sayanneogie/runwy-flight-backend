@@ -102,8 +102,8 @@ function createPaidAccess({ apiKey, query, fetchImpl = global.fetch, now = Date.
   }
   async function tokenAllowed(token) {
     if (!query) return false;
-    const result = await query(`select user_id from public.device_tokens where device_token = $1 and is_active = true
-      union select user_id from public.push_devices where apns_token = $1 and push_enabled = true`, [token]);
+    const result = await query(`select user_id from public.device_tokens where device_token = $1 and is_active = true and updated_at > now()-interval '90 days'
+      union select user_id from public.push_devices where apns_token = $1 and push_enabled = true and updated_at > now()-interval '90 days'`, [token]);
     for (const row of result.rows) if ((await membership(row.user_id)).paid) return true;
     return false;
   }
@@ -128,4 +128,4 @@ function withoutLiveTelemetry(value) {
     hidden.has(key) ? (key === "trackPoints" ? [] : null) : withoutLiveTelemetry(item)]));
 }
 
-module.exports = { createPaidAccess, paidEntitlement, withoutLiveTelemetry };
+module.exports = { createPaidAccess, paidEntitlement, withoutLiveTelemetry, isAdmin: userId => String(userId).toUpperCase() === ADMIN_USER_ID };

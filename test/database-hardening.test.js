@@ -118,10 +118,10 @@ test('push registration rotates and reassigns a token atomically across compatib
   try {
     await users(db);
     const register=(user,token)=>db.query("select * from runwy_register_push_device($1,$2,'device-1','ios','production')",[uid(user),token]);
-    await register(1,'old-token');await register(1,'new-token');await register(2,'new-token');
+    await register(1,'a'.repeat(64));await register(1,'b'.repeat(64));await register(2,'b'.repeat(64));
     const active=(await db.query('select user_id,device_token from device_tokens where is_active')).rows;
-    assert.deepEqual(active,[{user_id:uid(2),device_token:'new-token'}]);
-    assert.deepEqual((await db.query('select user_id,apns_token from push_devices where push_enabled')).rows,[{user_id:uid(2),apns_token:'new-token'}]);
+    assert.deepEqual(active,[{user_id:uid(2),device_token:'b'.repeat(64)}]);
+    assert.deepEqual((await db.query('select user_id,apns_token from push_devices where push_enabled')).rows,[{user_id:uid(2),apns_token:'b'.repeat(64)}]);
     await db.query("select runwy_disable_push_device($1,'device-1',null)",[uid(2)]);
     assert.equal((await db.query('select count(*)::int n from device_tokens where is_active')).rows[0].n,0);
     assert.equal((await db.query('select count(*)::int n from push_devices where push_enabled')).rows[0].n,0);
@@ -168,7 +168,7 @@ test('account deletion requires storage cleanup and blocks uploads after deletio
 
 test('migration versions and schema reproduction are deterministic',async()=>{
   const {migrations,verify}=require('../scripts/db-migrate');
-  const files=migrations();assert.equal(files.length,7);
+  const files=migrations();assert.equal(files.length,13);
   assert.equal(files[0],'20260922000000_production_baseline.sql');
   const db=await createDatabase();
   try{assert.ok(Object.values(await verify(db)).every(Boolean));}finally{await db.close();}
@@ -189,11 +189,20 @@ test('tracking persistence reconciles both unique identities without losing a sa
       normalizeFlightCode:v=>String(v||'').toUpperCase(),normalizeAirportCode:v=>v||null,
       displayFlightCode:n=>n.flightNumber});
     const input={userId:uid(1),flightId:uid(30),query:{date:'2030-01-01',flightNumber:'TT1'},
-      normalized:{flightInstanceId:uid(50),flightNumber:'TT1',airlineCode:'TT',
+      normalized:{flightInstanceId:uid(50),flightNumber:'TT1',airlineCode:'TT',stateRevision:5,livePosition:{latitude:12,longitude:34},trackPoints:[{latitude:12}],rawProviderPayload:{secret:'fixture'},
         departureAirportIata:'AAA',arrivalAirportIata:'BBB',status:'scheduled',
         departureTimes:{scheduled:'2030-01-01T10:00:00Z'},arrivalTimes:{scheduled:'2030-01-01T12:00:00Z'}},
       provider:'fixture',providerFlightId:'fixture-1',rawProviderPayload:{}};
     await store.persistTrackingSnapshot(input);await store.persistTrackingSnapshot(input);
+    await store.persistTrackingSnapshot({...input,normalized:{...input.normalized,stateRevision:4,livePosition:{latitude:99}}});
+    const full=(await db.query('select canonical_snapshot_json from runwy_security.live_snapshot_payloads where tracking_session_id=$1',[uid(30)])).rows[0].canonical_snapshot_json;
+    assert.equal(full.livePosition.latitude,12);
+    await actor(db,1);
+    const basic=(await db.query('select canonical_snapshot_json,raw_provider_payload_json from live_snapshots')).rows[0];
+    assert.equal(basic.canonical_snapshot_json.livePosition,null);assert.deepEqual(basic.canonical_snapshot_json.trackPoints,[]);
+    assert.deepEqual(basic.raw_provider_payload_json,{});
+    await assert.rejects(db.query('select * from runwy_security.live_snapshot_payloads'),e=>e.code==='42501');
+    await admin(db);
     assert.deepEqual((await db.query("select id,tracking_session_id,source_type,user_label from user_flights where deleted_at is null")).rows,
       [{id:uid(40),tracking_session_id:uid(30),source_type:'trip',user_label:'My trip'}]);
     assert.equal((await db.query('select canonical_id from user_flight_aliases where alias_id=$1',[uid(41)])).rows[0].canonical_id,uid(40));

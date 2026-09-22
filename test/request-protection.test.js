@@ -29,6 +29,9 @@ test("shared quotas survive server replacement, isolate identities, and reset on
     restarted.init({ windowMs: 60000 });
     assert.equal((await restarted.increment("one-user")).totalHits, 4);
     await db.exec("update runwy_security.rate_limits set expires_at = now() - interval '1 second'");
+    // The local denial remains valid until its original expiry, even if an operator edits the DB counter.
+    assert.equal((await restarted.increment("one-user")).totalHits, 4);
+    for (const value of restarted.denials.values()) value.resetTime = new Date(0);
     assert.equal((await restarted.increment("one-user")).totalHits, 1);
     const { rows } = await db.query("select key_hash from runwy_security.rate_limits");
     assert.ok(rows.every(row => /^[a-f0-9]{64}$/.test(row.key_hash)));

@@ -100,7 +100,7 @@ function createTrackingStore({
           ts.*,
           ls.provider as snapshot_provider,
           ls.provider_flight_id as snapshot_provider_flight_id,
-          ls.canonical_snapshot_json,
+          coalesce((select p.canonical_snapshot_json from runwy_security.live_snapshot_payloads p where p.tracking_session_id=ts.id), ls.canonical_snapshot_json) as canonical_snapshot_json,
           ls.provider_last_updated_at,
           ls.canonical_revision,
           ls.updated_at as snapshot_updated_at
@@ -150,7 +150,7 @@ function createTrackingStore({
           ts.*,
           ls.provider as snapshot_provider,
           ls.provider_flight_id as snapshot_provider_flight_id,
-          ls.canonical_snapshot_json,
+          coalesce((select p.canonical_snapshot_json from runwy_security.live_snapshot_payloads p where p.tracking_session_id=ts.id), ls.canonical_snapshot_json) as canonical_snapshot_json,
           ls.provider_last_updated_at,
           ls.canonical_revision,
           ls.updated_at as snapshot_updated_at
@@ -260,7 +260,7 @@ function createTrackingStore({
         from public.push_devices pd
         join recipients r
           on r.user_id = pd.user_id
-        where pd.push_enabled = true
+        where pd.push_enabled = true and pd.updated_at > now()-interval '90 days'
         `,
         [flightId]
       );
@@ -741,8 +741,8 @@ function createTrackingStore({
         ls.departure_times_json,
         ls.arrival_times_json,
         ls.alerts_json,
-        ls.metrics_json,
-        ls.canonical_snapshot_json,
+        coalesce((select p.metrics_json from runwy_security.live_snapshot_payloads p where p.tracking_session_id=ts.id), ls.metrics_json) as metrics_json,
+        coalesce((select p.canonical_snapshot_json from runwy_security.live_snapshot_payloads p where p.tracking_session_id=ts.id), ls.canonical_snapshot_json) as canonical_snapshot_json,
         ls.provider_last_updated_at,
         ls.canonical_revision,
         ls.updated_at as snapshot_updated_at
@@ -775,8 +775,8 @@ function createTrackingStore({
         ls.departure_times_json,
         ls.arrival_times_json,
         ls.alerts_json,
-        ls.metrics_json,
-        ls.canonical_snapshot_json,
+        coalesce((select p.metrics_json from runwy_security.live_snapshot_payloads p where p.tracking_session_id=ts.id), ls.metrics_json) as metrics_json,
+        coalesce((select p.canonical_snapshot_json from runwy_security.live_snapshot_payloads p where p.tracking_session_id=ts.id), ls.canonical_snapshot_json) as canonical_snapshot_json,
         ls.provider_last_updated_at,
         ls.canonical_revision,
         ls.updated_at as snapshot_updated_at
@@ -1032,7 +1032,7 @@ function createTrackingStore({
 
     await pool.query(
       `
-      insert into public.live_snapshots (
+      with saved_snapshot as (insert into public.live_snapshots (
         tracking_session_id,
         provider,
         provider_flight_id,
@@ -1106,6 +1106,12 @@ function createTrackingStore({
              '-infinity'::timestamptz
            )
          )
+      returning tracking_session_id)
+      insert into runwy_security.live_snapshot_payloads as p
+        (tracking_session_id,canonical_snapshot_json,raw_provider_payload_json,metrics_json)
+      select tracking_session_id,$17::jsonb,$18::jsonb,$16::jsonb from saved_snapshot
+      on conflict(tracking_session_id) do update set canonical_snapshot_json=excluded.canonical_snapshot_json,
+        raw_provider_payload_json=excluded.raw_provider_payload_json,metrics_json=excluded.metrics_json
       `,
       [
         flightId,
@@ -1228,72 +1234,20 @@ function createTrackingStore({
     }
 
     const providerFlightId = providerFlightIdentifier(rawProviderPayload, provider);
-    let flightId = await findReusableTrackingSession({
-      userId,
-      provider,
-      providerFlightId,
-      flightNumber: query.flightNumber,
-      travelDate: query.date,
-      departureIata: query.departureIata,
-      arrivalIata: query.arrivalIata,
-    });
-
-    if (!flightId) {
-      if (Number.isFinite(maxActiveTrackingSessionsPerUser) && maxActiveTrackingSessionsPerUser > 0) {
-        const activeSessionCount = await countActiveTrackingSessionsForUser(userId);
-        if (activeSessionCount >= maxActiveTrackingSessionsPerUser) {
-          const error = new Error(
-            `Active tracking limit reached (${maxActiveTrackingSessionsPerUser}). Pause or complete older tracked flights before adding more.`
-          );
-          error.code = "TRACKING_LIMIT_REACHED";
-          throw error;
-        }
-      }
-
-      const inserted = await pool.query(
-        `
-        insert into public.tracking_sessions (
-          owner_user_id,
-          provider,
-          provider_flight_id,
-          flight_number,
-          airline_code,
-          origin_iata,
-          destination_iata,
-          travel_date,
-          session_status,
-          created_source,
-          metadata_json
-        )
-        values (
-          $1::uuid,
-          $2,
-          $3,
-          $4,
-          $5,
-          $6,
-          $7,
-          $8::date,
-          'pending',
-          $9,
-          jsonb_build_object('query', $10::jsonb)
-        )
-        returning id
-        `,
-        [
-          userId,
-          provider,
-          providerFlightId,
-          normalizeFlightCode(normalized.flightNumber || query.flightNumber),
-          normalized.airlineCode || null,
+    let flightId;
+    try {
+      const reserved = await pool.query(
+        'select public.runwy_create_tracking_session($1::uuid,$2,$3,$4,$5,$6,$7,$8::date,$9,$10::jsonb,$11::integer) as id',
+        [userId, provider, providerFlightId,
+          normalizeFlightCode(normalized.flightNumber || query.flightNumber), normalized.airlineCode || null,
           normalizeAirportCode(normalized.departureAirportIata || query.departureIata),
-          normalizeAirportCode(normalized.arrivalAirportIata || query.arrivalIata),
-          query.date,
-          createdSource,
-          JSON.stringify(query),
-        ]
+          normalizeAirportCode(normalized.arrivalAirportIata || query.arrivalIata), query.date, createdSource,
+          JSON.stringify(query), maxActiveTrackingSessionsPerUser || 5]
       );
-      flightId = inserted.rows[0]?.id;
+      flightId = reserved.rows[0]?.id;
+    } catch (error) {
+      if (error.code === 'PT429') error.code = 'TRACKING_LIMIT_REACHED';
+      throw error;
     }
 
     if (!flightId) {
@@ -1325,7 +1279,7 @@ function createTrackingStore({
         ts.*,
         ls.provider as snapshot_provider,
         ls.provider_flight_id as snapshot_provider_flight_id,
-        ls.canonical_snapshot_json,
+        coalesce((select p.canonical_snapshot_json from runwy_security.live_snapshot_payloads p where p.tracking_session_id=ts.id), ls.canonical_snapshot_json) as canonical_snapshot_json,
         ls.provider_last_updated_at,
         ls.canonical_revision,
         ls.updated_at as snapshot_updated_at
@@ -1399,8 +1353,8 @@ function createTrackingStore({
         ls.departure_times_json,
         ls.arrival_times_json,
         ls.alerts_json,
-        ls.metrics_json,
-        ls.canonical_snapshot_json,
+        coalesce((select p.metrics_json from runwy_security.live_snapshot_payloads p where p.tracking_session_id=ts.id), ls.metrics_json) as metrics_json,
+        coalesce((select p.canonical_snapshot_json from runwy_security.live_snapshot_payloads p where p.tracking_session_id=ts.id), ls.canonical_snapshot_json) as canonical_snapshot_json,
         ls.provider_last_updated_at,
         ls.canonical_revision,
         ls.updated_at as snapshot_updated_at

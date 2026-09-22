@@ -398,6 +398,9 @@ function createMemorySharedFlightRepository() {
       userFlights.set(key, saved);
       return saved;
     },
+    async canReadFlight(userId, flightId) {
+      return [...userFlights.values()].some(row => row.user_id === userId && row.flight_instance_id === flightId && !row.deleted_at && row.lifecycle_state !== "deleted");
+    },
     async listUserFlights(userId) {
       return [...userFlights.values()]
         .filter((row) => row.user_id === userId && !row.deleted_at && row.lifecycle_state !== "deleted")
@@ -814,6 +817,23 @@ function createPostgresSharedFlightRepository(pool) {
   }
 
   return {
+    async canReadFlight(userId, flightId) {
+      const result = await pool.query(`select exists(select 1 from public.user_flights uf where uf.flight_instance_id=$2::uuid
+        and uf.deleted_at is null and uf.lifecycle_state<>'deleted'
+        and (uf.user_id=$1::uuid or public.runwy_circle_flight_allowed(uf.id,$1::uuid,false))) as allowed`, [userId,flightId]);
+      return result.rows[0]?.allowed === true;
+    },
+    async getWeatherCache(key) {
+      return (await pool.query("select response from public.provider_response_cache where cache_key=$1 and expires_at>now()",[key])).rows[0]?.response;
+    },
+    async setWeatherCache(key, response, seconds) {
+      await pool.query(`insert into public.provider_response_cache(cache_key,response,requested_at,expires_at)
+        values($1,$2::jsonb,now(),now()+$3*interval '1 second') on conflict(cache_key) do update
+        set response=excluded.response,requested_at=excluded.requested_at,expires_at=excluded.expires_at`,[key,JSON.stringify(response),seconds]);
+    },
+    async reserveWeatherBudget(limit) {
+      return (await pool.query("select public.runwy_reserve_weather_budget($1) as allowed",[limit])).rows[0]?.allowed === true;
+    },
     async acquireProviderRequestLease(lockKey, ttlMs) {
       const token = crypto.randomUUID();
       const result = await pool.query(
@@ -1500,15 +1520,15 @@ function createPostgresSharedFlightRepository(pool) {
     async listNotificationTargets(flightInstanceId, severity, eventType) {
       const ownerSetting = ownerAlertSettingForEventType(eventType);
       const ownerCondition = ownerSetting
-        ? `coalesce((uf.alert_settings_json ->> '${ownerSetting}')::boolean, (uf.alert_preferences ->> $2)::boolean, false) = true`
-        : "coalesce((uf.alert_preferences ->> $2)::boolean, false) = true";
+        ? `case when jsonb_typeof(uf.alert_settings_json -> '${ownerSetting}') = 'boolean' then uf.alert_settings_json -> '${ownerSetting}' = 'true'::jsonb else coalesce(uf.alert_preferences -> $2 = 'true'::jsonb, false) end`
+        : "coalesce(uf.alert_preferences -> $2 = 'true'::jsonb, false)";
       const tripStartingCondition = eventType === "TRIP_STARTING"
         ? "and coalesce(uf.source_type, 'tracked') <> 'tracked'"
         : "";
       const result = await pool.query(
         `with owner_targets as (
            select
-             to_jsonb(uf) as user_flight,
+             jsonb_build_object('id',uf.id,'user_id',uf.user_id,'tracking_session_id',uf.tracking_session_id) as user_flight,
              uf.user_id as recipient_user_id,
              false as is_circle,
              p.display_name as owner_display_name,
@@ -1547,7 +1567,7 @@ function createPostgresSharedFlightRepository(pool) {
          ),
          circle_targets as (
            select
-             to_jsonb(uf) as user_flight,
+             jsonb_build_object('id',uf.id,'user_id',uf.user_id,'tracking_session_id',uf.tracking_session_id) as user_flight,
              fp.viewer_user_id as recipient_user_id,
              true as is_circle,
              p.display_name as owner_display_name,
@@ -1606,7 +1626,7 @@ function createPostgresSharedFlightRepository(pool) {
          from targets
          left join public.device_tokens dt
            on dt.user_id = targets.recipient_user_id
-          and dt.is_active = true
+          and dt.is_active = true and dt.updated_at > now()-interval '90 days'
          group by user_flight, recipient_user_id, is_circle, owner_display_name, recipient_display_name, temperature_unit, is_traveler`,
         [flightInstanceId, severity, eventType]
       );
