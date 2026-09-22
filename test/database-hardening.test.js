@@ -168,7 +168,7 @@ test('account deletion requires storage cleanup and blocks uploads after deletio
 
 test('migration versions and schema reproduction are deterministic',async()=>{
   const {migrations,verify}=require('../scripts/db-migrate');
-  const files=migrations();assert.equal(files.length,13);
+  const files=migrations();assert.equal(files.length,14);
   assert.equal(files[0],'20260922000000_production_baseline.sql');
   const db=await createDatabase();
   try{assert.ok(Object.values(await verify(db)).every(Boolean));}finally{await db.close();}

@@ -7118,6 +7118,10 @@ app.post("/v1/admin/membership-test", async (req, res) => {
   } catch (error) { res.status(error.status || 503).json({ error: error.message }); }
 });
 
+app.post("/v1/stickers/cloud-access", require("./sticker-cloud").stickerCloudAccessHandler({
+  query: pool ? (sql, params) => pool.query(sql, params) : null, paidAccess,
+}));
+
 // Cloud sync reads raw telemetry only after server-verified membership and ownership.
 app.get("/v1/tracking/snapshots", async (req, res) => {
   const ids = typeof req.query.ids === "string" ? req.query.ids.split(",") : [];

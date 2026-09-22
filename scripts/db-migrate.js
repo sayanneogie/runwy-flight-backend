@@ -51,6 +51,10 @@ async function verify(client) {
     not has_table_privilege('authenticated','public.device_tokens','INSERT') as token_registration_server_only,
     not exists(select 1 from pg_constraint c join pg_namespace n on n.oid=c.connamespace
       where n.nspname in('public','runwy_security') and not c.convalidated) as all_constraints_valid,
+    not has_table_privilege('authenticated','runwy_security.sticker_cloud_access','INSERT') as sticker_access_server_only,
+    (select count(*)=6 from pg_policy where not polpermissive and polname in('ticket_sticker_paid_read','ticket_sticker_paid_insert','ticket_sticker_paid_update',
+      'ticket_souvenir_paid_read','ticket_souvenir_paid_insert','ticket_souvenir_paid_update')) as paid_sticker_policies,
+    has_table_privilege('authenticated','public.user_flights','INSERT') as free_flight_sync_enabled,
     not has_table_privilege('authenticated','runwy_security.live_snapshot_payloads','SELECT') as raw_snapshots_private,
     not has_function_privilege('authenticated','public.runwy_create_tracking_session(uuid,text,text,text,text,text,text,date,text,jsonb,integer)','EXECUTE') as tracking_reservation_server_only,
     exists(select 1 from pg_trigger where tgname='runwy_bound_storage') as storage_allowance_enforced,

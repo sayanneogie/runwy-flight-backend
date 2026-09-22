@@ -35,6 +35,7 @@ function createPaidAccess({ apiKey, query, fetchImpl = global.fetch, now = Date.
       set raw_app_meta_data = jsonb_set(coalesce(raw_app_meta_data, '{}'::jsonb), '{runwy_test_as_free}', to_jsonb($2::boolean), true)
       where id = $1 returning id`, [ADMIN_USER_ID, enabled]);
     if (!rows.length) throw Object.assign(new Error("Admin account unavailable"), { status: 503 });
+    if (enabled) await query("delete from runwy_security.sticker_cloud_access where user_id=$1::uuid", [ADMIN_USER_ID]);
     cache.delete(ADMIN_USER_ID);
     return enabled;
   }
