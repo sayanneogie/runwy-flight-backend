@@ -1,7 +1,7 @@
 "use strict";
 const { createSharedLimiter } = require('./request-protection');
 const TABLES = new Set(['user_flights','profiles','user_settings','ticket_souvenirs','tracking_sessions','live_snapshots','notifications','friend_relationships','friend_invites']);
-const RPCS = new Set(['runwy_remove_circle_member','runwy_set_circle_flights','runwy_update_circle_notifications']);
+const RPCS = new Set(['runwy_remove_circle_member','runwy_set_circle_flights','runwy_update_circle_notifications','runwy_import_flighty_batch']);
 function mountDataGateway(app, { query, supabaseURL, anonKey, secret, fetchImpl = (...args) => fetch(...args) }) {
   const userKey = req => req.auth.userId;
   const limit = (namespace, max) => createSharedLimiter({ query, namespace, limit: max, keyGenerator: userKey });
